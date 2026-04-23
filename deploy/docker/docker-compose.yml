@@ -59,6 +59,75 @@ services:
       - prometheus_data:/prometheus
 
   # ==================== 应用服务 ====================
+  # MCP 注册中心
+  mcp-registry:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9099:9099"
+    environment:
+      - MCP_REGISTRY_HOST=0.0.0.0
+      - MCP_REGISTRY_PORT=9099
+    command: ["python", "-m", "mcp_servers.registry"]
+
+  # OA 审批 MCP 服务
+  mcp-oa:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9001:9001"
+    environment:
+      - OA_API_URL=${OA_API_URL:-http://host.docker.internal:3001/api}
+      - OA_API_TOKEN=${OA_API_TOKEN}
+    command: ["python", "-m", "mcp_servers.oa_server.server"]
+    depends_on:
+      - mcp-registry
+
+  # 邮件 MCP 服务
+  mcp-email:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9002:9002"
+    environment:
+      - EMAIL_API_URL=${EMAIL_API_URL:-http://host.docker.internal:3002/api}
+      - EMAIL_API_TOKEN=${EMAIL_API_TOKEN}
+    command: ["python", "-m", "mcp_servers.email_server.server"]
+    depends_on:
+      - mcp-registry
+
+  # 日历 MCP 服务
+  mcp-calendar:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9003:9003"
+    environment:
+      - CALENDAR_API_URL=${CALENDAR_API_URL:-http://host.docker.internal:3003/api}
+      - CALENDAR_API_TOKEN=${CALENDAR_API_TOKEN}
+    command: ["python", "-m", "mcp_servers.calendar_server.server"]
+    depends_on:
+      - mcp-registry
+
+  # CRM MCP 服务
+  mcp-crm:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9004:9004"
+    environment:
+      - CRM_API_URL=${CRM_API_URL:-http://host.docker.internal:3004/api}
+      - CRM_API_TOKEN=${CRM_API_TOKEN}
+    command: ["python", "-m", "mcp_servers.crm_server.server"]
+    depends_on:
+      - mcp-registry
+
+  # Agent API 主服务
   agent-api:
     build:
       context: ../..
