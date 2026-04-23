@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY mcp_servers/ ./mcp_servers/
+COPY agent/core/ ./agent/core/
+
+# MCP 服务默认端口，由环境变量覆盖
+ARG MCP_PORT=9001
+ENV MCP_PORT=${MCP_PORT}
+
+EXPOSE ${MCP_PORT}
+
+CMD ["python", "-m", "mcp_servers.run_server"]
