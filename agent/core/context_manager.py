@@ -1,8 +1,10 @@
-"""上下文管理与压缩
+"""上下文管理与三级记忆
 
 负责管理 Agent 的对话上下文，包括：
-  - 上下文窗口管理
-  - 对话历史压缩
+  - L1 工作记忆: Agent 内存，单次请求生命周期
+  - L2 短期记忆: Redis 会话历史，2h TTL
+  - L3 长期记忆: 会话归档（Phase 5 实现）
+  - 上下文窗口管理与压缩
   - Token 估算
 """
 
@@ -10,6 +12,7 @@ import logging
 from typing import Any
 
 from agent.core.model_client import get_lightweight_client
+from agent.core.session_manager import SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,6 @@ def estimate_tokens(messages: list[dict[str, Any]]) -> int:
     for msg in messages:
         content = msg.get("content", "")
         total_chars += len(content)
-        # 额外计算 role 和元数据的开销
         total_chars += 20
     return max(1, total_chars // 2)
 
@@ -64,7 +66,6 @@ async def compress_context(
     if len(messages) <= recent_count + 1:
         return messages
 
-    # 分离系统消息、早期消息和近期消息
     system_msg = messages[DEFAULT_SYSTEM_MESSAGE_INDEX] if messages else None
     early_msgs = messages[1:-recent_count]
     recent_msgs = messages[-recent_count:]
@@ -72,14 +73,12 @@ async def compress_context(
     if not early_msgs:
         return messages
 
-    # 使用轻量级模型生成摘要
     summary_text = await _generate_summary(early_msgs)
 
     compressed = []
     if system_msg:
         compressed.append(system_msg)
 
-    # 插入摘要作为系统上下文
     compressed.append(
         {
             "role": "system",
@@ -110,7 +109,6 @@ async def _generate_summary(messages: list[dict[str, Any]]) -> str:
     Returns:
         摘要文本
     """
-    # 构建待摘要的文本
     conversation = ""
     for msg in messages:
         role = msg.get("role", "unknown")
@@ -130,7 +128,6 @@ async def _generate_summary(messages: list[dict[str, Any]]) -> str:
         return response.choices[0].message.content or ""
     except Exception as e:
         logger.error("生成对话摘要失败: %s", e)
-        # 降级方案：截取每条消息的前100字
         fallback_parts = []
         for msg in messages:
             content = msg.get("content", "")[:100]
@@ -163,3 +160,60 @@ def build_agent_context(
         context.append({"role": "user", "content": current_task})
 
     return context
+
+
+def extract_session_history(session: SessionState) -> list[dict[str, Any]]:
+    """从会话状态中提取历史消息
+
+    将 SessionState 中的 message_history 转换为 Agent 可用的消息格式。
+    同时注入已有的上下文摘要（如果有）。
+
+    Args:
+        session: 会话状态
+
+    Returns:
+        消息列表
+    """
+    messages: list[dict[str, Any]] = []
+
+    if session.context_summary:
+        messages.append({
+            "role": "system",
+            "content": f"[本轮会话前情摘要] {session.context_summary}",
+        })
+
+    for msg in session.message_history:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role and content:
+            messages.append({"role": role, "content": content})
+
+    return messages
+
+
+async def prepare_context_for_agent(
+    session: SessionState,
+    system_message: str,
+    current_task: str,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> list[dict[str, Any]]:
+    """为 Agent 准备完整的上下文
+
+    整合三级记忆，构建 Agent 可用的上下文消息列表：
+    1. 从 L2 短期记忆（SessionState）提取历史
+    2. 构建初始上下文
+    3. 超过窗口时压缩
+
+    Args:
+        session: 会话状态（L2 短期记忆）
+        system_message: Agent 系统提示词
+        current_task: 当前用户任务
+        max_tokens: 最大 Token 数
+
+    Returns:
+        压缩后的完整上下文消息列表
+    """
+    history = extract_session_history(session)
+    context = build_agent_context(system_message, history, current_task)
+    compressed = await compress_context(context, max_tokens=max_tokens)
+    return compressed

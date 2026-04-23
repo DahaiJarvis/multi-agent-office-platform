@@ -36,11 +36,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
         content=request.message,
     )
 
-    # 通过 Supervisor 路由并执行任务
+    # 通过 Supervisor 路由并执行任务（传入会话状态以注入上下文）
     result = await route_and_execute(
         user_message=request.message,
         session_id=session.session_id,
         user_id=request.user_id,
+        session=session,
     )
 
     reply = result.get("message", "处理完成")

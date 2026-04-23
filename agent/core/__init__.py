@@ -26,6 +26,8 @@ from agent.core.context_manager import (
     compress_context,
     estimate_tokens,
     build_agent_context,
+    extract_session_history,
+    prepare_context_for_agent,
 )
 
 __all__ = [
@@ -49,4 +51,6 @@ __all__ = [
     "compress_context",
     "estimate_tokens",
     "build_agent_context",
+    "extract_session_history",
+    "prepare_context_for_agent",
 ]
