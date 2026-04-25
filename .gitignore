@@ -1,45 +1,194 @@
-# Python
+# ==================== Python ====================
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
 *.egg-info/
 dist/
 build/
 *.egg
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
 
 # 虚拟环境
 .venv/
 venv/
 env/
+ENV/
+env.bak/
+venv.bak/
 
-# 环境变量
+# ==================== Node.js / 前端 ====================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 前端构建产物
+frontend/dist/
+frontend/dist-ssr/
+frontend/.output/
+frontend/.nuxt/
+frontend/.cache/
+
+# Vite
+frontend/.vite/
+
+# TypeScript
+*.tsbuildinfo
+
+# 编辑器项目文件
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ==================== 环境变量 ====================
 .env
 .env.local
+.env.*.local
 .env.production
+.env.development
 
-# IDE
+# ==================== IDE / 编辑器 ====================
+# JetBrains
 .idea/
-.vscode/
+*.iml
+*.iws
+*.ipr
+out/
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Vim
 *.swp
 *.swo
+*.un~
+.*.swp
 
-# 系统文件
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
+# ==================== 操作系统 ====================
+# macOS
 .DS_Store
-Thumbs.db
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
 
-# Trae
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ==================== Trae ====================
 .trae/
 
-# 日志
+# ==================== 日志 ====================
 *.log
 logs/
+log/
 
-# 测试与覆盖率
+# ==================== 测试与覆盖率 ====================
 .coverage
+.coverage.*
 htmlcov/
 .pytest_cache/
+pytestdebug.log
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
 
-# MyPy
+# ==================== 类型检查 ====================
 .mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
 
-docs/
+# ==================== 数据库 ====================
+*.db
+*.sqlite
+*.sqlite3
+*.sql.gz
+data/
+
+# ==================== 缓存 ====================
+.cache/
+*.cache
+.parcel-cache/
+
+# ==================== 临时文件 ====================
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+
+# ==================== 敏感信息 ====================
+secrets/
+*.pem
+*.key
+*.crt
+credentials.json
+service-account.json
+
+# ==================== 打包与发布 ====================
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# ==================== 文档构建 ====================
+site/
+docs/_build/
+
+# ==================== Jupyter Notebook ====================
+.ipynb_checkpoints/
+
+# ==================== Docker ====================
+docker-compose.override.yml
+
+# ==================== 其他 ====================
+*.pid
+*.seed
+*.pid.lock
+.eslintcache
+.stylelintcache

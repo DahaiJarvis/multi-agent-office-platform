@@ -9,7 +9,7 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from autogen_agentchat.base import ChatMessage
+from autogen_agentchat.messages import ChatMessage
 
 from agent.agents.supervisor import (
     classify_intent,
