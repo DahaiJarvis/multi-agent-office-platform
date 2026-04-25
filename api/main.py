@@ -12,7 +12,7 @@ from agent.core.mcp_integration import close_all_connections
 from api.middleware.auth import AuthMiddleware
 from api.middleware.rate_limit import RateLimitMiddleware
 from api.middleware.tracing import TracingMiddleware
-from api.routes import agent_routes, session_routes, admin_routes
+from api.routes import agent_routes, session_routes, admin_routes, auth_routes
 from observability.logging_config import setup_logging
 from observability.tracing import setup_tracing
 
@@ -74,6 +74,7 @@ def create_app() -> FastAPI:
     app.add_middleware(AuthMiddleware)
 
     # 注册路由
+    app.include_router(auth_routes.router, prefix="/api/v1")
     app.include_router(agent_routes.router, prefix="/api/v1")
     app.include_router(session_routes.router, prefix="/api/v1")
     app.include_router(admin_routes.router, prefix="/api/v1")
