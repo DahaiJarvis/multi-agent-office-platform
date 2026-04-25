@@ -1,8 +1,13 @@
 """全局配置管理"""
 
+import logging
+import secrets
+
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, model_validator
 from functools import lru_cache
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -53,6 +58,15 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     environment: str = Field(default="development", alias="ENVIRONMENT")
 
+    # API 版本
+    api_version: str = Field(default="v1", alias="API_VERSION")
+
+    # CORS 允许的来源（逗号分隔）
+    cors_allowed_origins: str = Field(
+        default="http://localhost:3000,http://localhost:8080",
+        alias="CORS_ALLOWED_ORIGINS",
+    )
+
     # 安全
     jwt_secret_key: str = Field(default="", alias="JWT_SECRET_KEY")
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
@@ -62,7 +76,25 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = Field(default=60, alias="RATE_LIMIT_PER_MINUTE")
     rate_limit_burst: int = Field(default=100, alias="RATE_LIMIT_BURST")
 
+    # MCP Registry
+    mcp_registry_url: str = Field(
+        default="http://localhost:9099", alias="MCP_REGISTRY_URL"
+    )
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
+    @model_validator(mode="after")
+    def _validate_security_config(self) -> "Settings":
+        """安全配置校验：非开发环境必须设置 JWT 密钥"""
+        if self.environment != "development" and not self.jwt_secret_key:
+            raise ValueError(
+                "生产环境必须设置 JWT_SECRET_KEY 环境变量，"
+                "可通过 `python -c \"import secrets; print(secrets.token_urlsafe(32))\"` 生成"
+            )
+        if self.environment == "development" and not self.jwt_secret_key:
+            self.jwt_secret_key = secrets.token_urlsafe(32)
+            logger.warning("开发模式: 已自动生成临时 JWT 密钥，生产环境必须显式配置")
+        return self
 
     @property
     def postgres_dsn(self) -> str:
@@ -75,6 +107,18 @@ class Settings(BaseSettings):
     def redis_url(self) -> str:
         auth = f":{self.redis_password}@" if self.redis_password else ""
         return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """解析 CORS 允许来源列表"""
+        if self.environment == "development":
+            return ["*"]
+        origins = [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+        return origins
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
 
 
 @lru_cache

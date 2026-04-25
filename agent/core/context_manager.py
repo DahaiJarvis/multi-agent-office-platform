@@ -3,9 +3,10 @@
 负责管理 Agent 的对话上下文，包括：
   - L1 工作记忆: Agent 内存，单次请求生命周期
   - L2 短期记忆: Redis 会话历史，2h TTL
-  - L3 长期记忆: 会话归档（Phase 5 实现）
+  - L3 长期记忆: 会话归档
   - 上下文窗口管理与压缩
   - Token 估算
+  - 滑动窗口 + 摘要压缩策略
 """
 
 import logging
@@ -16,7 +17,6 @@ from agent.core.session_manager import SessionState
 
 logger = logging.getLogger(__name__)
 
-# 上下文窗口默认配置
 DEFAULT_MAX_TOKENS = 4000
 DEFAULT_RECENT_MESSAGES = 6
 DEFAULT_SYSTEM_MESSAGE_INDEX = 0

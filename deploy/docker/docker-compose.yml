@@ -127,6 +127,76 @@ services:
     depends_on:
       - mcp-registry
 
+  # IM 消息 MCP 服务
+  mcp-im:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9006:9006"
+    environment:
+      - IM_API_URL=${IM_API_URL:-http://host.docker.internal:3006/api}
+      - IM_API_TOKEN=${IM_API_TOKEN}
+    command: ["python", "-m", "mcp_servers.im_server.server"]
+    depends_on:
+      - mcp-registry
+
+  # 文档 MCP 服务
+  mcp-doc:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9007:9007"
+    environment:
+      - DOC_API_URL=${DOC_API_URL:-http://host.docker.internal:3007/api}
+      - DOC_API_TOKEN=${DOC_API_TOKEN}
+    command: ["python", "-m", "mcp_servers.doc_server.server"]
+    depends_on:
+      - mcp-registry
+
+  # HR 人事 MCP 服务
+  mcp-hr:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9008:9008"
+    environment:
+      - HR_API_URL=${HR_API_URL:-http://host.docker.internal:3008/api}
+      - HR_API_TOKEN=${HR_API_TOKEN}
+    command: ["python", "-m", "mcp_servers.hr_server.server"]
+    depends_on:
+      - mcp-registry
+
+  # 财务 MCP 服务
+  mcp-finance:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9009:9009"
+    environment:
+      - FINANCE_API_URL=${FINANCE_API_URL:-http://host.docker.internal:3009/api}
+      - FINANCE_API_TOKEN=${FINANCE_API_TOKEN}
+    command: ["python", "-m", "mcp_servers.finance_server.server"]
+    depends_on:
+      - mcp-registry
+
+  # 知识库 MCP 服务
+  mcp-knowledge:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9010:9010"
+    environment:
+      - KNOWLEDGE_API_URL=${KNOWLEDGE_API_URL:-http://host.docker.internal:3010/api}
+      - KNOWLEDGE_API_TOKEN=${KNOWLEDGE_API_TOKEN}
+    command: ["python", "-m", "mcp_servers.knowledge_server.server"]
+    depends_on:
+      - mcp-registry
+
   # Agent API 主服务
   agent-api:
     build:

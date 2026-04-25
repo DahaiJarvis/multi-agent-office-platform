@@ -1,0 +1,221 @@
+# Grafana 仪表盘配置 - 企业级多Agent办公平台
+# 导入方式: Grafana -> Dashboards -> Import -> 粘贴此 JSON
+#
+# 仪表盘包含以下面板:
+#   - 系统概览: 请求QPS / 错误率 / 活跃会话 / P95延迟
+#   - Agent 指标: 各Agent调用次数 / 成功率 / 响应时间
+#   - MCP 指标: 工具调用次数 / 失败率 / 响应时间
+#   - LLM 指标: Token使用量 / 调用次数 / 模型分布
+#   - 基础设施: CPU / 内存 / Pod状态
+
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "系统概览",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}
+    },
+    {
+      "title": "请求 QPS",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total[5m]))",
+          "legendFormat": "QPS"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 300},
+              {"color": "red", "value": 800}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "错误率",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{status_code=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))",
+          "legendFormat": "Error Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.02},
+              {"color": "red", "value": 0.05}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "活跃会话",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+      "targets": [
+        {
+          "expr": "agent_active_sessions",
+          "legendFormat": "Active Sessions"
+        }
+      ]
+    },
+    {
+      "title": "P95 延迟",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "P95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 3},
+              {"color": "red", "value": 5}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Agent 指标",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5}
+    },
+    {
+      "title": "Agent 调用次数",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "targets": [
+        {
+          "expr": "sum(rate(agent_calls_total[5m])) by (agent_name)",
+          "legendFormat": "{{agent_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    },
+    {
+      "title": "Agent 成功率",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "targets": [
+        {
+          "expr": "sum(rate(agent_calls_total{status=\"success\"}[5m])) by (agent_name) / sum(rate(agent_calls_total[5m])) by (agent_name)",
+          "legendFormat": "{{agent_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit"}
+      }
+    },
+    {
+      "title": "MCP 工具指标",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14}
+    },
+    {
+      "title": "MCP 工具调用次数",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+      "targets": [
+        {
+          "expr": "sum(rate(mcp_tool_calls_total[5m])) by (server_name)",
+          "legendFormat": "{{server_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    },
+    {
+      "title": "MCP 工具 P95 延迟",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(mcp_tool_call_duration_seconds_bucket[5m])) by (le, server_name))",
+          "legendFormat": "{{server_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "s"}
+      }
+    },
+    {
+      "title": "LLM 指标",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23}
+    },
+    {
+      "title": "Token 使用量",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [
+        {
+          "expr": "sum(rate(llm_token_usage_total[5m])) by (model, token_type)",
+          "legendFormat": "{{model}} - {{token_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short"}
+      }
+    },
+    {
+      "title": "LLM 调用次数",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "targets": [
+        {
+          "expr": "sum(rate(llm_calls_total[5m])) by (model, status)",
+          "legendFormat": "{{model}} - {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["agent-platform", "production"],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "企业级多Agent办公平台 - 运营仪表盘",
+  "uid": "agent-platform-ops",
+  "version": 1
+}

@@ -1,0 +1,177 @@
+# Prometheus 告警规则
+# 企业级多Agent办公平台核心告警
+
+groups:
+  # ==================== API 服务告警 ====================
+  - name: api_alerts
+    rules:
+      - alert: APIHighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total[5m]))
+          > 0.05
+        for: 3m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "API 错误率过高"
+          description: "5xx 错误率超过 5%，当前值: {{ $value | humanizePercentage }}"
+
+      - alert: APIHighLatency
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+          > 5.0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "API P95 延迟过高"
+          description: "P95 延迟超过 5s，当前值: {{ $value }}s"
+
+      - alert: APIHighLatencyCritical
+        expr: |
+          histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+          > 10.0
+        for: 3m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "API P95 延迟严重过高"
+          description: "P95 延迟超过 10s，当前值: {{ $value }}s"
+
+  # ==================== Agent 告警 ====================
+  - name: agent_alerts
+    rules:
+      - alert: AgentHighFailureRate
+        expr: |
+          sum(rate(agent_calls_total{status="error"}[10m]))
+          /
+          sum(rate(agent_calls_total[10m]))
+          > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: agent
+        annotations:
+          summary: "Agent 任务失败率过高"
+          description: "Agent 任务失败率超过 10%，当前值: {{ $value | humanizePercentage }}"
+
+      - alert: AgentSlowResponse
+        expr: |
+          histogram_quantile(0.95, sum(rate(agent_call_duration_seconds_bucket[10m])) by (le))
+          > 30.0
+        for: 5m
+        labels:
+          severity: warning
+          team: agent
+        annotations:
+          summary: "Agent 响应过慢"
+          description: "Agent P95 响应时间超过 30s，当前值: {{ $value }}s"
+
+      - alert: LLMServiceDown
+        expr: |
+          sum(rate(llm_calls_total{status="error"}[5m]))
+          /
+          sum(rate(llm_calls_total[5m]))
+          > 0.3
+        for: 3m
+        labels:
+          severity: critical
+          team: agent
+        annotations:
+          summary: "LLM 服务异常"
+          description: "LLM 调用失败率超过 30%，当前值: {{ $value | humanizePercentage }}"
+
+  # ==================== MCP 服务告警 ====================
+  - name: mcp_alerts
+    rules:
+      - alert: MCPToolHighFailureRate
+        expr: |
+          sum(rate(mcp_tool_calls_total{status="error"}[10m]))
+          /
+          sum(rate(mcp_tool_calls_total[10m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: mcp
+        annotations:
+          summary: "MCP 工具调用失败率过高"
+          description: "MCP 工具调用失败率超过 5%，当前值: {{ $value | humanizePercentage }}"
+
+      - alert: MCPToolSlowResponse
+        expr: |
+          histogram_quantile(0.95, sum(rate(mcp_tool_call_duration_seconds_bucket[10m])) by (le))
+          > 5.0
+        for: 5m
+        labels:
+          severity: warning
+          team: mcp
+        annotations:
+          summary: "MCP 工具响应过慢"
+          description: "MCP 工具 P95 响应时间超过 5s，当前值: {{ $value }}s"
+
+  # ==================== 基础设施告警 ====================
+  - name: infra_alerts
+    rules:
+      - alert: HighMemoryUsage
+        expr: |
+          container_memory_working_set_bytes / container_spec_memory_limit_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "容器内存使用率过高"
+          description: "容器 {{ $labels.container }} 内存使用率超过 85%"
+
+      - alert: HighCPUUsage
+        expr: |
+          sum(rate(container_cpu_usage_seconds_total[5m])) by (container)
+          /
+          sum(container_spec_cpu_quota / container_spec_cpu_period) by (container)
+          > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "容器 CPU 使用率过高"
+          description: "容器 {{ $labels.container }} CPU 使用率超过 80%"
+
+      - alert: PodCrashLooping
+        expr: |
+          rate(kube_pod_container_status_restarts_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          team: infra
+        annotations:
+          summary: "Pod 持续重启"
+          description: "Pod {{ $labels.pod }} 在过去 15 分钟内持续重启"
+
+      - alert: RedisDown
+        expr: |
+          up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: infra
+        annotations:
+          summary: "Redis 服务不可用"
+          description: "Redis 实例 {{ $labels.instance }} 不可用"
+
+      - alert: PostgreSQLDown
+        expr: |
+          pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: infra
+        annotations:
+          summary: "PostgreSQL 服务不可用"
+          description: "PostgreSQL 实例 {{ $labels.instance }} 不可用"

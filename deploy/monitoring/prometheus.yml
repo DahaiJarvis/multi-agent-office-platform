@@ -1,0 +1,65 @@
+# Prometheus 配置
+# 企业级多Agent办公平台指标采集
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# 告警规则文件
+rule_files:
+  - "alert_rules.yml"
+
+# 告警管理器
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+# 采集目标
+scrape_configs:
+  # Agent API 服务
+  - job_name: "agent-api"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "agent-api:8000"
+        labels:
+          service: "agent-orchestrator"
+          env: "production"
+
+  # MCP 服务
+  - job_name: "mcp-servers"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets:
+          - "mcp-oa:9001"
+          - "mcp-email:9002"
+          - "mcp-calendar:9003"
+          - "mcp-crm:9004"
+          - "mcp-im:9006"
+          - "mcp-doc:9007"
+          - "mcp-hr:9008"
+          - "mcp-finance:9009"
+          - "mcp-knowledge:9010"
+        labels:
+          service: "mcp-server"
+          env: "production"
+
+  # Redis
+  - job_name: "redis"
+    static_configs:
+      - targets:
+          - "redis-exporter:9121"
+
+  # PostgreSQL
+  - job_name: "postgres"
+    static_configs:
+      - targets:
+          - "pg-exporter:9187"
+
+  # Node Exporter
+  - job_name: "node"
+    static_configs:
+      - targets:
+          - "node-exporter:9100"

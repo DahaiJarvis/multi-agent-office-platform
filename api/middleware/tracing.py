@@ -12,10 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 class TracingMiddleware(BaseHTTPMiddleware):
-    """请求追踪中间件，记录请求耗时和基本信息"""
+    """请求追踪中间件，记录请求耗时和基本信息
+
+    为每个请求生成唯一 request_id 并注入到 request.state，
+    使后续中间件和异常处理器可以引用。
+    """
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
+        # 优先使用上游传入的 request_id，否则生成新的
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        request.state.request_id = request_id
         start_time = time.time()
 
         response = await call_next(request)

@@ -1,0 +1,70 @@
+# ConfigMap - 应用配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-config
+  namespace: agent-prod
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  API_WORKERS: "4"
+  POSTGRES_HOST: "postgresql-svc.infra.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "agent_platform"
+  POSTGRES_USER: "postgres"
+  REDIS_HOST: "redis-svc.infra.svc.cluster.local"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.monitoring.svc.cluster.local:4317"
+  OTEL_SERVICE_NAME: "multi-agent-office-platform"
+  DASHSCOPE_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  MODEL_QWEN_MAX: "qwen-max"
+  MODEL_QWEN_PLUS: "qwen-plus"
+  MODEL_QWEN_TURBO: "qwen-turbo"
+  JWT_ALGORITHM: "HS256"
+  JWT_EXPIRE_MINUTES: "60"
+  RATE_LIMIT_PER_MINUTE: "60"
+  RATE_LIMIT_BURST: "100"
+---
+# MCP 通用配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-common-config
+  namespace: mcp-prod
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  MCP_REGISTRY_HOST: "mcp-registry-svc.mcp-prod.svc.cluster.local"
+  MCP_REGISTRY_PORT: "9099"
+---
+# 命名空间定义
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-prod
+  labels:
+    name: agent-prod
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-prod
+  labels:
+    name: mcp-prod
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra
+  labels:
+    name: infra
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring

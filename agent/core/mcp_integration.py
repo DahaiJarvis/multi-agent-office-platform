@@ -2,6 +2,7 @@
 
 负责从 MCP Server 加载工具，并转换为 AutoGen 可用的 Function Tool。
 支持 SSE 远程连接和 STDIO 本地进程两种模式。
+支持从 MCP Registry 动态发现服务，替代纯硬编码注册表。
 """
 
 import logging
@@ -9,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from autogen_ext.tools.mcp import McpWorkbench, SseMcpToolAdapter, StdioMcpToolAdapter
+
+from agent.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +30,7 @@ class MCPServerConfig:
     enabled: bool = True
 
 
-# MCP 服务注册表
+# MCP 服务注册表（静态默认配置，可被 Registry 动态覆盖）
 MCP_SERVER_REGISTRY: dict[str, MCPServerConfig] = {
     "oa": MCPServerConfig(
         name="oa-mcp-server",
@@ -107,9 +110,113 @@ AGENT_TOOL_BINDINGS: dict[str, list[str]] = {
 _tool_cache: dict[str, list[Any]] = {}
 _workbench_cache: dict[str, McpWorkbench] = {}
 
+# Registry 同步状态
+_registry_synced: bool = False
+
+
+async def discover_from_registry() -> dict[str, MCPServerConfig]:
+    """从 MCP Registry 动态发现服务
+
+    向 Registry 查询已注册的服务列表，将结果合并到本地注册表。
+    Registry 中的服务信息会覆盖本地静态配置（URL 可能动态变化）。
+
+    Returns:
+        从 Registry 发现的服务配置字典
+    """
+    settings = get_settings()
+    registry_url = settings.mcp_registry_url
+
+    discovered: dict[str, MCPServerConfig] = {}
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{registry_url}/services")
+            if response.status_code != 200:
+                logger.warning("Registry 查询失败: status=%d", response.status_code)
+                return discovered
+
+            data = response.json()
+            services = data.get("data", [])
+
+            for svc in services:
+                svc_name = svc.get("name", "")
+                svc_url = svc.get("url", "")
+                svc_transport = svc.get("transport", "sse")
+                svc_description = svc.get("description", "")
+                svc_status = svc.get("status", "healthy")
+
+                if not svc_name or not svc_url:
+                    continue
+
+                # 通过服务名匹配本地注册表的 key
+                local_key = _match_local_key(svc_name)
+                config = MCPServerConfig(
+                    name=svc_name,
+                    description=svc_description or (MCP_SERVER_REGISTRY.get(local_key, MCPServerConfig(name="", description="")).description),
+                    transport=svc_transport,
+                    url=svc_url,
+                    enabled=svc_status == "healthy",
+                )
+
+                discovered[local_key or svc_name] = config
+
+            # 合并到本地注册表
+            for key, config in discovered.items():
+                MCP_SERVER_REGISTRY[key] = config
+                # 清除旧缓存，强制重新加载
+                _tool_cache.pop(key, None)
+
+            global _registry_synced
+            _registry_synced = True
+
+            logger.info("Registry 同步完成: 发现 %d 个服务", len(discovered))
+
+    except Exception as e:
+        logger.warning("Registry 同步失败，使用本地静态配置: %s", e)
+
+    return discovered
+
+
+def _match_local_key(service_name: str) -> str:
+    """将 Registry 服务名匹配到本地注册表 key
+
+    Args:
+        service_name: Registry 中的服务名，如 "oa-mcp-server"
+
+    Returns:
+        本地注册表 key，如 "oa"
+    """
+    name_mapping = {
+        "oa-mcp-server": "oa",
+        "email-mcp-server": "email",
+        "calendar-mcp-server": "calendar",
+        "crm-mcp-server": "crm",
+        "approval-mcp-server": "approval",
+        "im-mcp-server": "im",
+        "doc-mcp-server": "doc",
+        "hr-mcp-server": "hr",
+        "finance-mcp-server": "finance",
+        "knowledge-mcp-server": "knowledge",
+    }
+    return name_mapping.get(service_name, "")
+
+
+async def ensure_registry_synced() -> None:
+    """确保已从 Registry 同步过服务信息
+
+    首次调用时自动触发同步，后续调用跳过。
+    """
+    global _registry_synced
+    if not _registry_synced:
+        await discover_from_registry()
+
 
 async def load_mcp_tools(server_names: list[str]) -> list[Any]:
     """从指定的 MCP 服务加载工具列表
+
+    加载前自动确保 Registry 已同步，使动态发现的服务可用。
 
     Args:
         server_names: MCP 服务名称列表，如 ["oa", "email"]
@@ -117,6 +224,8 @@ async def load_mcp_tools(server_names: list[str]) -> list[Any]:
     Returns:
         AutoGen Function Tool 列表
     """
+    await ensure_registry_synced()
+
     all_tools: list[Any] = []
 
     for name in server_names:

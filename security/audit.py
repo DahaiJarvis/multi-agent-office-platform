@@ -74,11 +74,89 @@ def _is_sensitive_tool(tool_name: str) -> bool:
     return any(tool_name.startswith(prefix) for prefix in sensitive_prefixes)
 
 
+def _forward_to_centralized_audit(event: AuditEvent) -> None:
+    """将安全审计事件转发到集中化审计系统
+
+    将 security/audit.py 中的事件转换为 agent/core/audit.py 的格式，
+    写入 Redis 缓冲队列，实现审计日志的集中持久化。
+
+    Args:
+        event: 安全审计事件
+    """
+    try:
+        import asyncio
+        from agent.core.audit import AuditEventType
+
+        event_type_map = {
+            "request": AuditEventType.AGENT,
+            "agent_call": AuditEventType.AGENT,
+            "tool_call": AuditEventType.DATA,
+            "guardrail": AuditEventType.SYSTEM,
+            "auth": AuditEventType.AUTH,
+        }
+
+        audit_type = event_type_map.get(event.event_type, AuditEventType.SYSTEM)
+
+        action = event.event_type
+        if event.tool_name:
+            action = f"tool_call:{event.tool_name}"
+        elif event.event_type == "guardrail":
+            action = f"guardrail:{event.status}"
+
+        detail = {
+            "risk_level": event.risk_level,
+            "status": event.status,
+            "latency_ms": event.latency_ms,
+        }
+        if event.detail:
+            detail["detail"] = event.detail
+        if event.token_usage:
+            detail["token_usage"] = event.token_usage
+        if event.guardrail_checks:
+            detail["guardrail_checks"] = event.guardrail_checks
+
+        # 尝试在已有事件循环中调度
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_async_forward(audit_type, action, event, detail))
+        except RuntimeError:
+            # 无事件循环时（同步调用场景），仅记录日志
+            pass
+
+    except Exception as e:
+        logger.debug("转发集中化审计失败（非致命）: %s", e)
+
+
+async def _async_forward(
+    audit_type: Any,
+    action: str,
+    event: AuditEvent,
+    detail: dict[str, Any],
+) -> None:
+    """异步转发审计事件到集中化系统"""
+    try:
+        from agent.core.audit import audit_log
+
+        await audit_log(
+            event_type=audit_type,
+            action=action,
+            user_id=event.user_id,
+            session_id=event.trace_id,
+            agent_name=event.agent_name,
+            resource=event.tool_name,
+            detail=detail,
+            request_id=event.event_id,
+        )
+    except Exception:
+        pass
+
+
 def record_audit(event: AuditEvent) -> None:
     """记录审计事件
 
-    将审计事件以结构化 JSON 格式写入专用审计日志。
-    审计日志应配置独立的日志文件和保留策略。
+    将审计事件同时写入:
+    1. 专用审计日志（Python logging，独立文件）
+    2. 集中化审计系统（Redis 缓冲 -> PostgreSQL 持久化）
 
     Args:
         event: 审计事件
@@ -86,6 +164,9 @@ def record_audit(event: AuditEvent) -> None:
     event.risk_level = _determine_risk_level(event)
     event_json = event.model_dump_json()
     _audit_logger.info(event_json)
+
+    # 同步写入集中化审计系统
+    _forward_to_centralized_audit(event)
 
 
 def record_request_audit(

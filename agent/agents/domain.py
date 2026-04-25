@@ -122,6 +122,51 @@ OFFICE_ASSISTANT_PROMPT = """你是通用办公助手（OfficeAssistant），负
 
 完成当前任务后，请输出: TASK_COMPLETE"""
 
+HR_AGENT_PROMPT = """你是企业 HR 人事专家（HRAgent），负责人事相关的查询与操作。
+
+核心职责：
+- 查询考勤记录和打卡状态
+- 提交请假申请
+- 查询假期余额
+- 查询薪资信息
+- 查询员工基本信息和部门成员
+
+操作规范：
+1. 提交请假申请前，必须向用户确认请假类型、起止日期和原因
+2. 查询薪资信息时，仅限查询本人薪资，不得查询他人薪资
+3. 请假申请提交后，提醒用户关注审批进度
+4. 查询考勤异常时，建议用户联系HR部门核实
+
+安全规则：
+- 薪资数据属于L3级敏感信息，查询结果不得转发或截图
+- 不得修改他人考勤记录
+- 仅可查询本人和下属的假期余额
+- 员工个人隐私信息需脱敏展示
+
+完成当前任务后，请输出: TASK_COMPLETE"""
+
+FINANCE_AGENT_PROMPT = """你是企业财务业务专家（FinanceAgent），负责财务相关的查询与操作。
+
+核心职责：
+- 查询报销记录和报销状态
+- 提交报销申请
+- 查询预算使用情况
+- 管理发票信息
+
+操作规范：
+1. 提交报销申请前，必须向用户确认报销金额、类别和说明
+2. 报销金额超过5000元时，提醒用户需要额外审批
+3. 查询预算时，明确展示已用额度和剩余额度
+4. 上传发票前，确认发票信息准确无误
+
+安全规则：
+- 财务数据属于公司机密，不得泄露给无关人员
+- 不得修改已提交的报销记录，需撤回后重新提交
+- 发票信息需与实际发票一致，不得虚报
+- 预算数据仅限本部门人员查看
+
+完成当前任务后，请输出: TASK_COMPLETE"""
+
 
 # Agent 名称与提示词映射
 AGENT_PROMPTS: dict[str, str] = {
@@ -130,6 +175,8 @@ AGENT_PROMPTS: dict[str, str] = {
     "CalendarAgent": CALENDAR_AGENT_PROMPT,
     "CRMAgent": CRM_AGENT_PROMPT,
     "OfficeAssistant": OFFICE_ASSISTANT_PROMPT,
+    "HRAgent": HR_AGENT_PROMPT,
+    "FinanceAgent": FINANCE_AGENT_PROMPT,
 }
 
 
@@ -188,6 +235,28 @@ async def create_office_assistant() -> AssistantAgent:
     )
 
 
+async def create_hr_agent() -> AssistantAgent:
+    """创建 HR 人事 Agent"""
+    tools = await load_agent_tools("HRAgent")
+    return AssistantAgent(
+        name="HRAgent",
+        model_client=get_domain_agent_client(),
+        tools=tools,
+        system_message=HR_AGENT_PROMPT,
+    )
+
+
+async def create_finance_agent() -> AssistantAgent:
+    """创建财务业务 Agent"""
+    tools = await load_agent_tools("FinanceAgent")
+    return AssistantAgent(
+        name="FinanceAgent",
+        model_client=get_domain_agent_client(),
+        tools=tools,
+        system_message=FINANCE_AGENT_PROMPT,
+    )
+
+
 # Agent 创建函数映射
 AGENT_CREATORS: dict[str, Any] = {
     "ApprovalAgent": create_approval_agent,
@@ -195,6 +264,8 @@ AGENT_CREATORS: dict[str, Any] = {
     "CalendarAgent": create_calendar_agent,
     "CRMAgent": create_crm_agent,
     "OfficeAssistant": create_office_assistant,
+    "HRAgent": create_hr_agent,
+    "FinanceAgent": create_finance_agent,
 }
 
 

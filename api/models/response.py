@@ -39,8 +39,13 @@ class HealthResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    """错误响应"""
+    """错误响应
+
+    已弃用: 请使用 api.errors.ErrorResponse 替代，该版本包含完整的错误码体系。
+    保留此模型仅为向后兼容。
+    """
 
     error: str = Field(..., description="错误类型")
     message: str = Field(..., description="错误详情")
+    error_code: str | None = Field(default=None, description="错误码")
     request_id: str | None = Field(default=None, description="请求ID")

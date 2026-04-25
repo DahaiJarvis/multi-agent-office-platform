@@ -1,0 +1,599 @@
+# MCP 服务部署清单
+# 所有 MCP 服务采用统一模板，仅替换名称和端口
+# 生产环境建议每个 MCP 服务 2-3 副本
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-oa-server
+  namespace: mcp-prod
+  labels:
+    app: mcp-oa-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mcp-oa-server
+  template:
+    metadata:
+      labels:
+        app: mcp-oa-server
+    spec:
+      containers:
+      - name: mcp-oa
+        image: registry.company.com/mcp-oa-server:v1.0
+        ports:
+        - containerPort: 9001
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: mcp-common-config
+        - secretRef:
+            name: mcp-oa-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9001
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9001
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-oa-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-oa-server
+  ports:
+  - port: 9001
+    targetPort: 9001
+  type: ClusterIP
+
+---
+# 邮件 MCP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-email-server
+  namespace: mcp-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-email-server
+  template:
+    metadata:
+      labels:
+        app: mcp-email-server
+    spec:
+      containers:
+      - name: mcp-email
+        image: registry.company.com/mcp-email-server:v1.0
+        ports:
+        - containerPort: 9002
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: mcp-common-config
+        - secretRef:
+            name: mcp-email-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9002
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9002
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-email-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-email-server
+  ports:
+  - port: 9002
+    targetPort: 9002
+  type: ClusterIP
+
+---
+# 日历 MCP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-calendar-server
+  namespace: mcp-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-calendar-server
+  template:
+    metadata:
+      labels:
+        app: mcp-calendar-server
+    spec:
+      containers:
+      - name: mcp-calendar
+        image: registry.company.com/mcp-calendar-server:v1.0
+        ports:
+        - containerPort: 9003
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: mcp-common-config
+        - secretRef:
+            name: mcp-calendar-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9003
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9003
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-calendar-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-calendar-server
+  ports:
+  - port: 9003
+    targetPort: 9003
+  type: ClusterIP
+
+---
+# CRM MCP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-crm-server
+  namespace: mcp-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-crm-server
+  template:
+    metadata:
+      labels:
+        app: mcp-crm-server
+    spec:
+      containers:
+      - name: mcp-crm
+        image: registry.company.com/mcp-crm-server:v1.0
+        ports:
+        - containerPort: 9004
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: mcp-common-config
+        - secretRef:
+            name: mcp-crm-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9004
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9004
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-crm-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-crm-server
+  ports:
+  - port: 9004
+    targetPort: 9004
+  type: ClusterIP
+
+---
+# IM 消息 MCP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-im-server
+  namespace: mcp-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-im-server
+  template:
+    metadata:
+      labels:
+        app: mcp-im-server
+    spec:
+      containers:
+      - name: mcp-im
+        image: registry.company.com/mcp-im-server:v1.0
+        ports:
+        - containerPort: 9006
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: mcp-common-config
+        - secretRef:
+            name: mcp-im-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9006
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9006
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-im-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-im-server
+  ports:
+  - port: 9006
+    targetPort: 9006
+  type: ClusterIP
+
+---
+# 文档 MCP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-doc-server
+  namespace: mcp-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-doc-server
+  template:
+    metadata:
+      labels:
+        app: mcp-doc-server
+    spec:
+      containers:
+      - name: mcp-doc
+        image: registry.company.com/mcp-doc-server:v1.0
+        ports:
+        - containerPort: 9007
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: mcp-common-config
+        - secretRef:
+            name: mcp-doc-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9007
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9007
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-doc-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-doc-server
+  ports:
+  - port: 9007
+    targetPort: 9007
+  type: ClusterIP
+
+---
+# HR 人事 MCP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-hr-server
+  namespace: mcp-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-hr-server
+  template:
+    metadata:
+      labels:
+        app: mcp-hr-server
+    spec:
+      containers:
+      - name: mcp-hr
+        image: registry.company.com/mcp-hr-server:v1.0
+        ports:
+        - containerPort: 9008
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: mcp-common-config
+        - secretRef:
+            name: mcp-hr-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9008
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9008
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-hr-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-hr-server
+  ports:
+  - port: 9008
+    targetPort: 9008
+  type: ClusterIP
+
+---
+# 财务 MCP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-finance-server
+  namespace: mcp-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-finance-server
+  template:
+    metadata:
+      labels:
+        app: mcp-finance-server
+    spec:
+      containers:
+      - name: mcp-finance
+        image: registry.company.com/mcp-finance-server:v1.0
+        ports:
+        - containerPort: 9009
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: mcp-common-config
+        - secretRef:
+            name: mcp-finance-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9009
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9009
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-finance-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-finance-server
+  ports:
+  - port: 9009
+    targetPort: 9009
+  type: ClusterIP
+
+---
+# 知识库 MCP
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-knowledge-server
+  namespace: mcp-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-knowledge-server
+  template:
+    metadata:
+      labels:
+        app: mcp-knowledge-server
+    spec:
+      containers:
+      - name: mcp-knowledge
+        image: registry.company.com/mcp-knowledge-server:v1.0
+        ports:
+        - containerPort: 9010
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1"
+            memory: "1Gi"
+        envFrom:
+        - configMapRef:
+            name: mcp-common-config
+        - secretRef:
+            name: mcp-knowledge-secrets
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9010
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9010
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-knowledge-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-knowledge-server
+  ports:
+  - port: 9010
+    targetPort: 9010
+  type: ClusterIP
+
+---
+# MCP 注册中心
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-registry
+  namespace: mcp-prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mcp-registry
+  template:
+    metadata:
+      labels:
+        app: mcp-registry
+    spec:
+      containers:
+      - name: registry
+        image: registry.company.com/mcp-registry:v1.0
+        ports:
+        - containerPort: 9099
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9099
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9099
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-registry-svc
+  namespace: mcp-prod
+spec:
+  selector:
+    app: mcp-registry
+  ports:
+  - port: 9099
+    targetPort: 9099
+  type: ClusterIP

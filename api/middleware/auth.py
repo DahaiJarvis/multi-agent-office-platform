@@ -18,7 +18,15 @@ from security.audit import record_auth_audit
 logger = logging.getLogger(__name__)
 
 # 跳过认证的路径
-SKIP_AUTH_PATHS = {"/admin/health", "/docs", "/openapi.json", "/redoc", "/auth/login", "/auth/refresh"}
+SKIP_AUTH_PATHS = {
+    "/admin/health",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/auth/login",
+    "/auth/refresh",
+    "/metrics",
+}
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -27,7 +35,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     流程：
     1. 跳过免认证路径
     2. 从 Authorization 头提取 Token
-    3. 验证 JWT Token
+    3. 验证 JWT Token（含黑名单检查）
     4. 将用户信息注入 request.state
     5. 开发模式下支持 X-User-ID 头降级
     """
@@ -37,8 +45,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         request.state.request_id = request_id
 
-        # 跳过免认证路径
-        if request.url.path in SKIP_AUTH_PATHS:
+        # 跳过免认证路径（支持任意 API 版本前缀）
+        path = request.url.path
+        if self._should_skip_auth(path):
             return await call_next(request)
 
         settings = get_settings()
@@ -91,3 +100,27 @@ class AuthMiddleware(BaseHTTPMiddleware):
             status_code=401,
             content={"error": "unauthorized", "message": "请提供有效的认证 Token"},
         )
+
+    @staticmethod
+    def _should_skip_auth(path: str) -> bool:
+        """判断路径是否跳过认证
+
+        支持任意 API 版本前缀，如 /api/v1/auth/login 和 /api/v2/auth/login 均跳过。
+
+        Args:
+            path: 请求路径
+
+        Returns:
+            是否跳过认证
+        """
+        # 精确匹配
+        if path in SKIP_AUTH_PATHS:
+            return True
+
+        # 去除 API 版本前缀后匹配
+        import re
+        stripped = re.sub(r"^/api/v\d+", "", path)
+        if stripped in SKIP_AUTH_PATHS:
+            return True
+
+        return False
