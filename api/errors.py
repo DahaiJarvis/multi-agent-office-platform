@@ -46,6 +46,10 @@ class ErrorCode(str, Enum):
     LOGIN_RATE_LIMITED = "20006"
     PERMISSION_DENIED = "20007"
     REFRESH_TOKEN_INVALID = "20008"
+    SSO_PROVIDER_NOT_FOUND = "20009"
+    SSO_STATE_INVALID = "20010"
+    SSO_CALLBACK_FAILED = "20011"
+    SSO_USER_MAPPING_FAILED = "20012"
 
     # 30xxx - Agent 相关
     AGENT_NOT_FOUND = "30001"
@@ -97,6 +101,10 @@ class ErrorCodeMeta:
         ErrorCode.LOGIN_RATE_LIMITED: {"error": "login_rate_limited", "status": 429, "message": "登录尝试过于频繁"},
         ErrorCode.PERMISSION_DENIED: {"error": "permission_denied", "status": 403, "message": "权限不足"},
         ErrorCode.REFRESH_TOKEN_INVALID: {"error": "refresh_token_invalid", "status": 401, "message": "刷新令牌无效"},
+        ErrorCode.SSO_PROVIDER_NOT_FOUND: {"error": "sso_provider_not_found", "status": 400, "message": "SSO 提供者未注册"},
+        ErrorCode.SSO_STATE_INVALID: {"error": "sso_state_invalid", "status": 400, "message": "SSO 授权状态无效或已过期"},
+        ErrorCode.SSO_CALLBACK_FAILED: {"error": "sso_callback_failed", "status": 401, "message": "SSO 授权回调失败"},
+        ErrorCode.SSO_USER_MAPPING_FAILED: {"error": "sso_user_mapping_failed", "status": 500, "message": "SSO 用户映射失败"},
 
         ErrorCode.AGENT_NOT_FOUND: {"error": "agent_not_found", "status": 404, "message": "Agent 不存在"},
         ErrorCode.AGENT_EXECUTION_FAILED: {"error": "agent_execution_failed", "status": 500, "message": "Agent 执行失败"},

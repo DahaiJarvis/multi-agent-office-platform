@@ -349,3 +349,30 @@ async def _revoke_user_in_redis(client, user_id: str) -> None:
         logger.warning("Redis 用户撤销失败: user_id=%s error=%s", user_id, e)
     finally:
         await client.aclose()
+
+
+def require_roles(request, roles: list[str]) -> None:
+    """校验请求用户是否拥有指定角色
+
+    从 request.state.auth_payload 中提取用户角色信息，
+    如果用户不拥有任一所需角色，抛出 403 异常。
+
+    Args:
+        request: FastAPI Request 对象
+        roles: 允许的角色列表（满足其一即可）
+
+    Raises:
+        AppException: 权限不足时抛出 403
+    """
+    from api.errors import AppException, ErrorCode
+
+    auth_payload = getattr(request.state, "auth_payload", None)
+    if auth_payload is None:
+        raise AppException(ErrorCode.UNAUTHORIZED, message="未认证")
+
+    user_roles = getattr(auth_payload, "roles", [])
+    if not any(role in user_roles for role in roles):
+        raise AppException(
+            ErrorCode.PERMISSION_DENIED,
+            message=f"权限不足，需要以下角色之一: {', '.join(roles)}",
+        )

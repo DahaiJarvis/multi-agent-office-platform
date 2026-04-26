@@ -6,6 +6,11 @@ Phase 4: 安全与治理
 - desensitize: 数据脱敏
 - guardrails: 安全护栏
 - audit: 审计日志
+- sso: SSO 企业身份集成
+- encryption: 静态数据加密
+- compliance: 合规策略管理
+- data_residency: 数据驻留控制
+- tenant: 多租户架构
 """
 
 from security.permission import (

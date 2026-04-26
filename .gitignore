@@ -63,6 +63,7 @@ frontend/.vite/
 *.iws
 *.ipr
 out/
+inter/
 
 # VS Code
 .vscode/*

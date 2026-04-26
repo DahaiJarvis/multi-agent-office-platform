@@ -25,6 +25,9 @@ SKIP_AUTH_PATHS = {
     "/redoc",
     "/auth/login",
     "/auth/refresh",
+    "/auth/sso/authorize",
+    "/auth/sso/callback",
+    "/auth/sso/providers",
     "/metrics",
 }
 

@@ -10,6 +10,7 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.0
 pydantic-settings>=2.0
+python-multipart>=0.0.6
 
 # 数据存储
 redis>=5.0
@@ -31,7 +32,7 @@ opentelemetry-instrumentation-fastapi>=0.40
 opentelemetry-instrumentation-httpx>=0.40
 opentelemetry-exporter-otlp>=1.20
 prometheus-client>=0.20
-
-# 工具
-python-dotenv>=1.0
 structlog>=24.0
+
+# 安全与加密
+cryptography>=42.0

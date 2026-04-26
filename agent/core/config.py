@@ -23,6 +23,25 @@ class Settings(BaseSettings):
     model_qwen_plus: str = Field(default="qwen-plus", alias="MODEL_QWEN_PLUS")
     model_qwen_turbo: str = Field(default="qwen-turbo", alias="MODEL_QWEN_TURBO")
 
+    # LLM 配置 - OpenAI
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
+    openai_model_flagship: str = Field(default="gpt-4o", alias="OPENAI_MODEL_FLAGSHIP")
+    openai_model_standard: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL_STANDARD")
+
+    # LLM 配置 - Anthropic
+    anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
+    anthropic_base_url: str = Field(default="https://api.anthropic.com", alias="ANTHROPIC_BASE_URL")
+    anthropic_model_flagship: str = Field(default="claude-3-5-sonnet-20241022", alias="ANTHROPIC_MODEL_FLAGSHIP")
+    anthropic_model_economy: str = Field(default="claude-3-haiku-20240307", alias="ANTHROPIC_MODEL_ECONOMY")
+
+    # LLM 配置 - 本地模型
+    local_llm_base_url: str = Field(default="", alias="LOCAL_LLM_BASE_URL")
+    local_llm_model: str = Field(default="", alias="LOCAL_LLM_MODEL")
+
+    # LLM 路由策略
+    llm_route_strategy: str = Field(default="priority", alias="LLM_ROUTE_STRATEGY")
+
     # PostgreSQL
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")
     postgres_port: int = Field(default=5432, alias="POSTGRES_PORT")
@@ -72,6 +91,52 @@ class Settings(BaseSettings):
     jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
     jwt_expire_minutes: int = Field(default=60, alias="JWT_EXPIRE_MINUTES")
 
+    # SSO 企业身份集成
+    sso_enabled: bool = Field(default=False, alias="SSO_ENABLED")
+
+    sso_entra_id_enabled: bool = Field(default=False, alias="SSO_ENTRA_ID_ENABLED")
+    sso_entra_id_client_id: str = Field(default="", alias="SSO_ENTRA_ID_CLIENT_ID")
+    sso_entra_id_client_secret: str = Field(default="", alias="SSO_ENTRA_ID_CLIENT_SECRET")
+    sso_entra_id_tenant_id: str = Field(default="common", alias="SSO_ENTRA_ID_TENANT_ID")
+    sso_entra_id_redirect_uri: str = Field(default="", alias="SSO_ENTRA_ID_REDIRECT_URI")
+
+    sso_okta_enabled: bool = Field(default=False, alias="SSO_OKTA_ENABLED")
+    sso_okta_client_id: str = Field(default="", alias="SSO_OKTA_CLIENT_ID")
+    sso_okta_client_secret: str = Field(default="", alias="SSO_OKTA_CLIENT_SECRET")
+    sso_okta_domain: str = Field(default="", alias="SSO_OKTA_DOMAIN")
+    sso_okta_redirect_uri: str = Field(default="", alias="SSO_OKTA_REDIRECT_URI")
+
+    sso_wecom_enabled: bool = Field(default=False, alias="SSO_WECOM_ENABLED")
+    sso_wecom_corp_id: str = Field(default="", alias="SSO_WECOM_CORP_ID")
+    sso_wecom_agent_id: str = Field(default="", alias="SSO_WECOM_AGENT_ID")
+    sso_wecom_secret: str = Field(default="", alias="SSO_WECOM_SECRET")
+    sso_wecom_redirect_uri: str = Field(default="", alias="SSO_WECOM_REDIRECT_URI")
+
+    sso_dingtalk_enabled: bool = Field(default=False, alias="SSO_DINGTALK_ENABLED")
+    sso_dingtalk_client_id: str = Field(default="", alias="SSO_DINGTALK_CLIENT_ID")
+    sso_dingtalk_client_secret: str = Field(default="", alias="SSO_DINGTALK_CLIENT_SECRET")
+    sso_dingtalk_redirect_uri: str = Field(default="", alias="SSO_DINGTALK_REDIRECT_URI")
+
+    sso_feishu_enabled: bool = Field(default=False, alias="SSO_FEISHU_ENABLED")
+    sso_feishu_app_id: str = Field(default="", alias="SSO_FEISHU_APP_ID")
+    sso_feishu_app_secret: str = Field(default="", alias="SSO_FEISHU_APP_SECRET")
+    sso_feishu_redirect_uri: str = Field(default="", alias="SSO_FEISHU_REDIRECT_URI")
+
+    # 静态数据加密
+    encryption_enabled: bool = Field(default=True, alias="ENCRYPTION_ENABLED")
+    encryption_key_provider: str = Field(default="auto", alias="ENCRYPTION_KEY_PROVIDER")
+    encryption_key_file: str = Field(default="", alias="ENCRYPTION_KEY_FILE")
+    encryption_master_key: str = Field(default="", alias="ENCRYPTION_MASTER_KEY")
+
+    # 数据驻留控制
+    data_residency_region: str = Field(default="cn-north", alias="DATA_RESIDENCY_REGION")
+    data_residency_enforced: bool = Field(default=True, alias="DATA_RESIDENCY_ENFORCED")
+
+    # 多租户
+    multi_tenant_enabled: bool = Field(default=False, alias="MULTI_TENANT_ENABLED")
+    tenant_default_isolation: str = Field(default="row", alias="TENANT_DEFAULT_ISOLATION")
+    tenant_default_region: str = Field(default="cn-north", alias="TENANT_DEFAULT_REGION")
+
     # 限流
     rate_limit_per_minute: int = Field(default=60, alias="RATE_LIMIT_PER_MINUTE")
     rate_limit_burst: int = Field(default=100, alias="RATE_LIMIT_BURST")
@@ -119,6 +184,51 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def sso_provider_configs(self) -> dict:
+        """获取所有已启用的 SSO 提供者配置"""
+        configs = {}
+        if self.sso_entra_id_enabled and self.sso_entra_id_client_id:
+            configs["entra_id"] = {
+                "client_id": self.sso_entra_id_client_id,
+                "client_secret": self.sso_entra_id_client_secret,
+                "tenant_id": self.sso_entra_id_tenant_id,
+                "redirect_uri": self.sso_entra_id_redirect_uri,
+                "scopes": ["openid", "profile", "email", "User.Read"],
+            }
+        if self.sso_okta_enabled and self.sso_okta_client_id:
+            configs["okta"] = {
+                "client_id": self.sso_okta_client_id,
+                "client_secret": self.sso_okta_client_secret,
+                "domain": self.sso_okta_domain,
+                "redirect_uri": self.sso_okta_redirect_uri,
+                "scopes": ["openid", "profile", "email"],
+            }
+        if self.sso_wecom_enabled and self.sso_wecom_corp_id:
+            configs["wecom"] = {
+                "corp_id": self.sso_wecom_corp_id,
+                "agent_id": self.sso_wecom_agent_id,
+                "client_id": self.sso_wecom_corp_id,
+                "client_secret": self.sso_wecom_secret,
+                "redirect_uri": self.sso_wecom_redirect_uri,
+                "scopes": ["snsapi_privateinfo"],
+            }
+        if self.sso_dingtalk_enabled and self.sso_dingtalk_client_id:
+            configs["dingtalk"] = {
+                "client_id": self.sso_dingtalk_client_id,
+                "client_secret": self.sso_dingtalk_client_secret,
+                "redirect_uri": self.sso_dingtalk_redirect_uri,
+                "scopes": ["openid", "corpid"],
+            }
+        if self.sso_feishu_enabled and self.sso_feishu_app_id:
+            configs["feishu"] = {
+                "client_id": self.sso_feishu_app_id,
+                "client_secret": self.sso_feishu_app_secret,
+                "redirect_uri": self.sso_feishu_redirect_uri,
+                "scopes": [],
+            }
+        return configs
 
 
 @lru_cache

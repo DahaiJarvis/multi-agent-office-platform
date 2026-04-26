@@ -1,7 +1,7 @@
 """认证路由
 
-提供登录、登出、Token 刷新接口。
-生产环境需对接企业微信/钉钉 OAuth2.0，当前为基础 JWT 实现。
+提供登录、登出、Token 刷新、SSO 接口。
+支持 JWT 基础认证和 OAuth2.0/OIDC SSO 企业身份集成。
 """
 
 import hashlib
@@ -21,6 +21,14 @@ from security.auth import (
     revoke_all_user_tokens,
 )
 from security.audit import record_auth_audit
+from security.sso import (
+    SSOProviderType,
+    build_sso_authorization,
+    handle_sso_callback,
+    map_sso_user_to_local,
+    list_sso_providers,
+    init_sso_providers_from_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,3 +276,151 @@ async def refresh_token(request: RefreshRequest) -> dict:
         "token_type": token_pair.token_type,
         "expires_in": token_pair.expires_in,
     }
+
+
+# ==================== SSO 企业身份集成 ====================
+
+
+class SSOAuthorizeRequest(BaseModel):
+    """SSO 授权请求"""
+
+    provider: str = Field(..., description="SSO 提供者类型: entra_id/okta/wecom/dingtalk")
+    redirect_uri: str | None = Field(default=None, description="可选的回调地址覆盖")
+
+
+class SSOAuthorizeResponse(BaseModel):
+    """SSO 授权响应"""
+
+    authorization_url: str = Field(description="授权 URL，前端需重定向到此地址")
+    state: str = Field(description="CSRF 防护 state 参数")
+    provider: str = Field(description="SSO 提供者类型")
+
+
+class SSOCallbackRequest(BaseModel):
+    """SSO 回调请求"""
+
+    provider: str = Field(..., description="SSO 提供者类型")
+    code: str = Field(..., description="IdP 返回的授权码")
+    state: str = Field(..., description="CSRF 防护 state 参数")
+
+
+class SSOProvidersResponse(BaseModel):
+    """SSO 提供者列表响应"""
+
+    providers: list[str] = Field(description="已注册的 SSO 提供者类型列表")
+
+
+@router.get("/sso/providers", response_model=SSOProvidersResponse)
+async def get_sso_providers() -> SSOProvidersResponse:
+    """获取已注册的 SSO 提供者列表
+
+    返回当前系统支持的所有 SSO 身份提供者。
+    前端可据此动态渲染 SSO 登录按钮。
+    """
+    providers = list_sso_providers()
+    return SSOProvidersResponse(providers=providers)
+
+
+@router.post("/sso/authorize", response_model=SSOAuthorizeResponse)
+async def sso_authorize(request: SSOAuthorizeRequest) -> SSOAuthorizeResponse:
+    """发起 SSO 授权
+
+    构建 SSO 授权 URL 并返回给前端，前端需将用户重定向到此 URL。
+    授权完成后 IdP 会回调 /auth/sso/callback 端点。
+
+    支持的提供者：
+    - entra_id: Microsoft Entra ID (Azure AD)
+    - okta: Okta
+    - wecom: 企业微信
+    - dingtalk: 钉钉
+    """
+    valid_providers = [e.value for e in SSOProviderType]
+    if request.provider not in valid_providers:
+        raise AppException(
+            ErrorCode.SSO_PROVIDER_NOT_FOUND,
+            message=f"不支持的 SSO 提供者: {request.provider}，支持: {', '.join(valid_providers)}",
+        )
+
+    try:
+        auth_params = build_sso_authorization(request.provider, request.redirect_uri)
+    except ValueError as e:
+        raise AppException(ErrorCode.SSO_PROVIDER_NOT_FOUND, message=str(e))
+
+    record_auth_audit(
+        trace_id="",
+        user_id="",
+        channel=request.provider,
+        status="success",
+        detail=f"SSO 授权发起: provider={request.provider}",
+    )
+
+    return SSOAuthorizeResponse(
+        authorization_url=auth_params.authorization_url,
+        state=auth_params.state,
+        provider=request.provider,
+    )
+
+
+@router.post("/sso/callback", response_model=LoginResponse)
+async def sso_callback(request: SSOCallbackRequest) -> LoginResponse:
+    """处理 SSO 授权回调
+
+    IdP 认证完成后回调此端点，用授权码交换 Token 并提取用户信息，
+    映射到本地用户后签发 JWT Token 对。
+
+    流程：
+    1. 验证 state 参数（CSRF 防护）
+    2. 用授权码交换 IdP Token
+    3. 提取用户信息
+    4. 映射到本地用户
+    5. 签发 JWT Token 对
+    """
+    try:
+        sso_result = await handle_sso_callback(request.provider, request.code, request.state)
+    except ValueError as e:
+        record_auth_audit(
+            trace_id="",
+            user_id="",
+            channel=request.provider,
+            status="failed",
+            detail=f"SSO 回调失败: {str(e)}",
+        )
+        raise AppException(ErrorCode.SSO_CALLBACK_FAILED, message=str(e))
+    except Exception as e:
+        record_auth_audit(
+            trace_id="",
+            user_id="",
+            channel=request.provider,
+            status="failed",
+            detail=f"SSO 回调异常: {str(e)}",
+        )
+        raise AppException(ErrorCode.SSO_CALLBACK_FAILED, message=f"SSO 认证失败: {str(e)}")
+
+    try:
+        local_user = map_sso_user_to_local(sso_result.user_info, request.provider)
+    except Exception as e:
+        logger.error("SSO 用户映射失败: %s", e)
+        raise AppException(ErrorCode.SSO_USER_MAPPING_FAILED, message="SSO 用户映射失败")
+
+    token_pair = create_token_pair(
+        user_id=local_user["user_id"],
+        roles=local_user["roles"],
+        departments=local_user.get("departments", []),
+    )
+
+    record_auth_audit(
+        trace_id="",
+        user_id=local_user["user_id"],
+        channel=request.provider,
+        status="success",
+        detail=f"SSO 登录成功: provider={request.provider} external_id={sso_result.user_info.external_id}",
+    )
+
+    return LoginResponse(
+        access_token=token_pair.access_token,
+        refresh_token=token_pair.refresh_token,
+        token_type=token_pair.token_type,
+        expires_in=token_pair.expires_in,
+        user_id=local_user["user_id"],
+        roles=local_user["roles"],
+    )

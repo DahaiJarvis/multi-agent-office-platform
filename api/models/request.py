@@ -10,6 +10,8 @@ class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, description="会话ID，为空则创建新会话")
     user_id: str = Field(..., description="用户ID")
     channel: str = Field(default="web", description="接入渠道: web/wechat/dingtalk")
+    image_urls: list[str] = Field(default_factory=list, description="图像URL列表（多模态输入）")
+    audio_url: str = Field(default="", description="语音URL（多模态输入）")
 
 
 class SessionCreateRequest(BaseModel):

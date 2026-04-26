@@ -59,6 +59,47 @@
           <span>{{ loading ? '登录中...' : '登录' }}</span>
         </button>
 
+        <div v-if="ssoProviders.length > 0" class="sso-section">
+          <div class="sso-divider">
+            <span class="sso-divider-line" />
+            <span class="sso-divider-text">或使用企业账号登录</span>
+            <span class="sso-divider-line" />
+          </div>
+          <div class="sso-buttons">
+            <button
+              v-for="provider in ssoProviders"
+              :key="provider.type"
+              type="button"
+              class="btn-sso"
+              :disabled="ssoLoading"
+              @click="handleSSOLogin(provider.type)"
+            >
+              <span class="sso-icon" :class="`sso-icon--${provider.type}`">
+                <svg v-if="provider.type === 'entra_id'" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M11.4 24H0V12.6h11.4V24zM24 24H12.6V12.6H24V24zM11.4 11.4H0V0h11.4v11.4zM24 11.4H12.6V0H24v11.4z"/>
+                </svg>
+                <svg v-else-if="provider.type === 'okta'" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/>
+                  <circle cx="12" cy="12" r="4"/>
+                </svg>
+                <svg v-else-if="provider.type === 'wecom'" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15h-2v-6h2v6zm4 0h-2v-6h2v6zm-2-8c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1z"/>
+                </svg>
+                <svg v-else-if="provider.type === 'dingtalk'" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.14 1.42-1.48 3.52-2.08 4.86-.6 1.34-.96 2.68-1.22 3.62-.12.42-.6.42-.72 0-.26-.94-.62-2.28-1.22-3.62-.6-1.34-1.94-3.44-2.08-4.86-.04-.4.02-.78.18-1.1.38-.76 1.2-1.3 2.56-1.3h.12c1.36 0 2.18.54 2.56 1.3.16.32.22.7.18 1.1z"/>
+                </svg>
+                <svg v-else-if="provider.type === 'feishu'" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M3.5 3.5L12 2l8.5 1.5v7L12 22 3.5 10.5v-7zM12 4.2L5.5 5.3v4.5L12 19l6.5-9.2V5.3L12 4.2zM7 7h2v2H7V7zm4 0h2v2h-2V7zm4 0h2v2h-2V7zm-6 3.5h2v2H9v-2zm4 0h2v2h-2v-2z"/>
+                </svg>
+                <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z"/>
+                </svg>
+              </span>
+              <span>{{ provider.label }}</span>
+            </button>
+          </div>
+        </div>
+
         <div class="demo-accounts">
           <p class="demo-title">测试账号</p>
           <div class="demo-list">
@@ -80,16 +121,56 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, reactive, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { authApi } from '../api/auth'
 
 const router = useRouter()
+const route = useRoute()
 const authStore = useAuthStore()
 
 const form = reactive({ userId: '', password: '' })
 const loading = ref(false)
+const ssoLoading = ref(false)
 const errorMsg = ref('')
+
+const SSO_PROVIDER_LABELS: Record<string, string> = {
+  entra_id: 'Microsoft Entra ID',
+  okta: 'Okta',
+  wecom: '企业微信',
+  dingtalk: '钉钉',
+  feishu: '飞书',
+}
+
+interface SSOProviderItem {
+  type: string
+  label: string
+}
+
+const ssoProviders = ref<SSOProviderItem[]>([])
+
+onMounted(async () => {
+  try {
+    const res = await authApi.getSSOProviders()
+    if (res.data?.providers?.length) {
+      ssoProviders.value = res.data.providers.map((p: string) => ({
+        type: p,
+        label: SSO_PROVIDER_LABELS[p] || p,
+      }))
+    }
+  } catch {
+    // SSO 未启用或不可用，静默忽略
+  }
+
+  // 处理 SSO 回调
+  const code = route.query.code as string
+  const state = route.query.state as string
+  const provider = route.query.provider as string
+  if (code && state && provider) {
+    await handleSSOCallback(provider, code, state)
+  }
+})
 
 const demoAccounts = [
   { id: 'admin001', password: 'admin123', role: '管理员' },
@@ -126,6 +207,41 @@ async function handleLogin() {
     errorMsg.value = message || detail || '登录失败，请检查用户名和密码'
   } finally {
     loading.value = false
+  }
+}
+
+async function handleSSOLogin(providerType: string) {
+  ssoLoading.value = true
+  errorMsg.value = ''
+
+  try {
+    const res = await authApi.ssoAuthorize({ provider: providerType })
+    if (res.data?.authorization_url) {
+      window.location.href = res.data.authorization_url
+    }
+  } catch (err: any) {
+    const message = err.response?.data?.message
+    errorMsg.value = message || 'SSO 登录发起失败'
+  } finally {
+    ssoLoading.value = false
+  }
+}
+
+async function handleSSOCallback(provider: string, code: string, state: string) {
+  ssoLoading.value = true
+  errorMsg.value = ''
+
+  try {
+    const res = await authApi.ssoCallback({ provider, code, state })
+    if (res.data) {
+      authStore.setAuth(res.data)
+      router.push('/')
+    }
+  } catch (err: any) {
+    const message = err.response?.data?.message
+    errorMsg.value = message || 'SSO 登录失败'
+  } finally {
+    ssoLoading.value = false
   }
 }
 </script>
@@ -355,5 +471,87 @@ async function handleLogin() {
   color: var(--color-text-secondary);
   font-family: var(--font-mono);
   font-size: 11px;
+}
+
+.sso-section {
+  margin-top: 20px;
+}
+
+.sso-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.sso-divider-line {
+  flex: 1;
+  height: 1px;
+  background: var(--color-border-light);
+}
+
+.sso-divider-text {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.sso-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.btn-sso {
+  width: 100%;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--color-bg);
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-text);
+  transition: all var(--transition-fast);
+}
+
+.btn-sso:hover:not(:disabled) {
+  border-color: var(--color-primary-light);
+  background: var(--color-primary-bg);
+}
+
+.btn-sso:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.sso-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+}
+
+.sso-icon--entra_id {
+  color: #00a4ef;
+}
+
+.sso-icon--okta {
+  color: #007dc1;
+}
+
+.sso-icon--wecom {
+  color: #07c160;
+}
+
+.sso-icon--dingtalk {
+  color: #0089ff;
+}
+.sso-icon--feishu {
+  color: #3370ff;
 }
 </style>

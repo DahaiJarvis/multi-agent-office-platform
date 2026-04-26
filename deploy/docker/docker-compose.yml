@@ -215,7 +215,37 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - ENVIRONMENT=development
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      # SSO 配置
+      - SSO_ENABLED=${SSO_ENABLED:-false}
+      - SSO_ENTRA_ID_ENABLED=${SSO_ENTRA_ID_ENABLED:-false}
+      - SSO_ENTRA_ID_CLIENT_ID=${SSO_ENTRA_ID_CLIENT_ID:-}
+      - SSO_ENTRA_ID_CLIENT_SECRET=${SSO_ENTRA_ID_CLIENT_SECRET:-}
+      - SSO_ENTRA_ID_TENANT_ID=${SSO_ENTRA_ID_TENANT_ID:-common}
+      - SSO_OKTA_ENABLED=${SSO_OKTA_ENABLED:-false}
+      - SSO_OKTA_CLIENT_ID=${SSO_OKTA_CLIENT_ID:-}
+      - SSO_OKTA_CLIENT_SECRET=${SSO_OKTA_CLIENT_SECRET:-}
+      - SSO_OKTA_DOMAIN=${SSO_OKTA_DOMAIN:-}
+      - SSO_WECOM_ENABLED=${SSO_WECOM_ENABLED:-false}
+      - SSO_WECOM_CORP_ID=${SSO_WECOM_CORP_ID:-}
+      - SSO_WECOM_AGENT_ID=${SSO_WECOM_AGENT_ID:-}
+      - SSO_WECOM_SECRET=${SSO_WECOM_SECRET:-}
+      - SSO_DINGTALK_ENABLED=${SSO_DINGTALK_ENABLED:-false}
+      - SSO_DINGTALK_CLIENT_ID=${SSO_DINGTALK_CLIENT_ID:-}
+      - SSO_DINGTALK_CLIENT_SECRET=${SSO_DINGTALK_CLIENT_SECRET:-}
+      # 加密配置
+      - ENCRYPTION_ENABLED=${ENCRYPTION_ENABLED:-true}
+      - ENCRYPTION_KEY_PROVIDER=${ENCRYPTION_KEY_PROVIDER:-env}
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:-}
+      # 数据驻留
+      - DATA_RESIDENCY_REGION=${DATA_RESIDENCY_REGION:-cn-north}
+      - DATA_RESIDENCY_ENFORCED=${DATA_RESIDENCY_ENFORCED:-true}
+      # 多租户
+      - MULTI_TENANT_ENABLED=${MULTI_TENANT_ENABLED:-false}
+      - TENANT_DEFAULT_ISOLATION=${TENANT_DEFAULT_ISOLATION:-row}
+      - TENANT_DEFAULT_REGION=${TENANT_DEFAULT_REGION:-cn-north}
+    volumes:
+      - encryption_keys:/app/instance
     depends_on:
       redis:
         condition: service_healthy
@@ -227,3 +257,4 @@ volumes:
   pg_data:
   grafana_data:
   prometheus_data:
+  encryption_keys:

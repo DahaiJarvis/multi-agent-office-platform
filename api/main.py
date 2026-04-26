@@ -13,7 +13,7 @@ from agent.core.mcp_integration import close_all_connections
 from api.middleware.auth import AuthMiddleware
 from api.middleware.rate_limit import DistributedRateLimitMiddleware
 from api.middleware.tracing import TracingMiddleware
-from api.routes import agent_routes, session_routes, admin_routes, auth_routes
+from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes
 from api.errors import AppException, app_exception_handler, generic_exception_handler
 from observability.logging_config import setup_logging
 from observability.tracing import setup_tracing
@@ -63,6 +63,54 @@ async def lifespan(app: FastAPI):
         logger.info("连接池管理器初始化完成")
     except Exception as e:
         logger.warning("连接池管理器初始化失败（非致命）: %s", e)
+
+    # 初始化 SSO 提供者
+    if settings.sso_enabled:
+        try:
+            from security.sso import init_sso_providers_from_config
+            init_sso_providers_from_config(settings.sso_provider_configs)
+            logger.info("SSO 提供者初始化完成: providers=%s", list(settings.sso_provider_configs.keys()))
+        except Exception as e:
+            logger.warning("SSO 提供者初始化失败（非致命）: %s", e)
+
+    # 初始化静态数据加密
+    if settings.encryption_enabled:
+        try:
+            from security.encryption import init_encryption
+            init_encryption(
+                key_provider_type=settings.encryption_key_provider,
+                key_file_path=settings.encryption_key_file,
+            )
+            logger.info("静态数据加密初始化完成")
+        except Exception as e:
+            logger.warning("静态数据加密初始化失败（非致命）: %s", e)
+
+    # 初始化数据驻留控制
+    try:
+        from security.data_residency import get_data_residency_manager, DataRegion
+        residency_mgr = get_data_residency_manager()
+        if settings.data_residency_region in [e.value for e in DataRegion]:
+            residency_mgr.set_current_region(DataRegion(settings.data_residency_region))
+        logger.info("数据驻留控制初始化完成: region=%s enforced=%s", settings.data_residency_region, settings.data_residency_enforced)
+    except Exception as e:
+        logger.warning("数据驻留控制初始化失败（非致命）: %s", e)
+
+    # 初始化多租户管理器
+    if settings.multi_tenant_enabled:
+        try:
+            from security.tenant import get_tenant_manager
+            get_tenant_manager()
+            logger.info("多租户管理器初始化完成: isolation=%s region=%s", settings.tenant_default_isolation, settings.tenant_default_region)
+        except Exception as e:
+            logger.warning("多租户管理器初始化失败（非致命）: %s", e)
+
+    # 注册已发布的自定义 Agent
+    try:
+        from agent.agents.agent_builder import register_all_published_agents
+        register_all_published_agents()
+        logger.info("自定义 Agent 运行时注册完成")
+    except Exception as e:
+        logger.warning("自定义 Agent 注册失败（非致命）: %s", e)
 
     logger.info(
         "应用启动完成: host=%s port=%d env=%s api_version=%s",
@@ -146,6 +194,18 @@ def create_app() -> FastAPI:
     app.include_router(agent_routes.router, prefix=api_prefix)
     app.include_router(session_routes.router, prefix=api_prefix)
     app.include_router(admin_routes.router, prefix=api_prefix)
+    app.include_router(tenant_routes.router, prefix=api_prefix)
+    app.include_router(compliance_routes.router, prefix=api_prefix)
+    app.include_router(agent_builder_routes.router, prefix=api_prefix)
+    app.include_router(embed_routes.router, prefix=api_prefix)
+    app.include_router(multimodal_routes.router, prefix=api_prefix)
+    app.include_router(search_routes.router, prefix=api_prefix)
+    app.include_router(analytics_routes.router, prefix=api_prefix)
+    app.include_router(prompt_template_routes.router, prefix=api_prefix)
+    app.include_router(workflow_routes.router, prefix=api_prefix)
+    app.include_router(plugin_routes.router, prefix=api_prefix)
+    app.include_router(sla_routes.router, prefix=api_prefix)
+    app.include_router(region_routes.router, prefix=api_prefix)
 
     # Prometheus 指标端点
     from observability.metrics import metrics_endpoint
