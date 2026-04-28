@@ -1,4 +1,18 @@
-"""全局配置管理"""
+"""全局配置管理
+
+使用 pydantic-settings 从环境变量加载配置，支持 .env 文件。
+所有配置项通过 Field 定义默认值和环境变量别名。
+
+配置分类：
+- LLM 配置：多供应商 API 密钥和模型参数
+- 数据库配置：PostgreSQL / Redis 连接参数
+- 可观测性配置：Langfuse / OpenTelemetry
+- API 服务配置：端口/Worker/CORS
+- 安全配置：JWT / SSO / 加密
+- 多租户配置：隔离策略/区域
+- 限流配置：QPS/突发量
+- MCP 配置：注册中心/IDA 集成
+"""
 
 import logging
 import secrets
@@ -87,9 +101,15 @@ class Settings(BaseSettings):
     )
 
     # 安全
-    jwt_secret_key: str = Field(default="", alias="JWT_SECRET_KEY")
-    jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    jwt_algorithm: str = Field(default="RS256", alias="JWT_ALGORITHM")
     jwt_expire_minutes: int = Field(default=60, alias="JWT_EXPIRE_MINUTES")
+    # RSA 非对称密钥（RS256 签名）
+    # 私钥用于签发 Token，公钥用于验证 Token
+    # 开发模式下未配置时自动生成临时 RSA 密钥对
+    jwt_private_key: str = Field(default="", alias="JWT_PRIVATE_KEY")
+    jwt_public_key: str = Field(default="", alias="JWT_PUBLIC_KEY")
+    # 兼容旧配置：jwt_secret_key 作为 fallback，仅在 HS256 模式下使用
+    jwt_secret_key: str = Field(default="", alias="JWT_SECRET_KEY")
 
     # SSO 企业身份集成
     sso_enabled: bool = Field(default=False, alias="SSO_ENABLED")
@@ -146,20 +166,121 @@ class Settings(BaseSettings):
         default="http://localhost:9099", alias="MCP_REGISTRY_URL"
     )
 
+    # 智能文档助手集成配置
+    # 注意：IDA 服务默认端口为 9100，与 docker-compose.yml 中的端口映射保持一致
+    ida_backend_url: str = Field(default="http://localhost:9100", alias="IDA_BACKEND_URL")
+    ida_mcp_sse_url: str = Field(default="http://localhost:9100/sse", alias="IDA_MCP_SSE_URL")
+    # SSE 连接认证密钥，用于 MCP 客户端连接 IDA SSE 端点时的 API Key 验证
+    mcp_api_key: str = Field(default="", alias="MCP_API_KEY")
+    # 映射 Token 有效期（秒），用于主平台向 IDA 签发的 RSA-JWT Token
+    # 取值范围: 60~86400，默认 3600（1 小时）
+    ida_token_ttl_seconds: int = Field(default=3600, alias="IDA_TOKEN_TTL_SECONDS")
+
+    # RSA 非对称密钥 JWT 认证配置
+    platform_jwt_private_key: str = Field(default="", alias="PLATFORM_JWT_PRIVATE_KEY")
+    platform_jwt_issuer: str = Field(default="multi-agent-platform", alias="PLATFORM_JWT_ISSUER")
+    platform_jwt_audience: str = Field(default="ida-service", alias="PLATFORM_JWT_AUDIENCE")
+    platform_role_mapping: str = Field(
+        default='{"platform_admin":"admin","platform_user":"user","platform_viewer":"viewer"}',
+        alias="PLATFORM_ROLE_MAPPING",
+    )
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @model_validator(mode="after")
     def _validate_security_config(self) -> "Settings":
-        """安全配置校验：非开发环境必须设置 JWT 密钥"""
-        if self.environment != "development" and not self.jwt_secret_key:
-            raise ValueError(
-                "生产环境必须设置 JWT_SECRET_KEY 环境变量，"
-                "可通过 `python -c \"import secrets; print(secrets.token_urlsafe(32))\"` 生成"
+        """安全配置校验：RS256 密钥对校验与自动生成；RSA 私钥格式规范化"""
+        # JWT 私钥/公钥 PEM 格式规范化（.env 中 \n 字面量转实际换行）
+        self.jwt_private_key = self._normalize_pem_key(self.jwt_private_key, "JWT_PRIVATE_KEY")
+        self.jwt_public_key = self._normalize_pem_key(self.jwt_public_key, "JWT_PUBLIC_KEY")
+
+        if self.jwt_algorithm == "RS256":
+            # RS256 模式：必须有私钥和公钥
+            if not self.jwt_private_key or not self.jwt_public_key:
+                if self.environment == "development":
+                    self._auto_generate_rsa_keypair()
+                else:
+                    raise ValueError(
+                        "生产环境使用 RS256 算法必须配置 JWT_PRIVATE_KEY 和 JWT_PUBLIC_KEY 环境变量，"
+                        "可通过 `python -c \"from cryptography.hazmat.primitives.asymmetric import rsa; "
+                        "from cryptography.hazmat.primitives import serialization; "
+                        "key = rsa.generate_private_key(public_exponent=65537, key_size=2048); "
+                        "print(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()); "
+                        "print(key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode())\"` 生成"
+                    )
+        else:
+            # HS256 等对称算法：必须有 jwt_secret_key
+            if not self.jwt_secret_key:
+                if self.environment == "development":
+                    self.jwt_secret_key = secrets.token_urlsafe(32)
+                    logger.warning("开发模式: 已自动生成临时 JWT 密钥，生产环境必须显式配置")
+                else:
+                    raise ValueError(
+                        "生产环境必须设置 JWT_SECRET_KEY 环境变量，"
+                        "可通过 `python -c \"import secrets; print(secrets.token_urlsafe(32))\"` 生成"
+                    )
+
+        # platform_jwt_private_key 格式规范化
+        if self.platform_jwt_private_key:
+            self.platform_jwt_private_key = self._normalize_pem_key(
+                self.platform_jwt_private_key, "PLATFORM_JWT_PRIVATE_KEY"
             )
-        if self.environment == "development" and not self.jwt_secret_key:
-            self.jwt_secret_key = secrets.token_urlsafe(32)
-            logger.warning("开发模式: 已自动生成临时 JWT 密钥，生产环境必须显式配置")
+            if self.platform_jwt_private_key and not self.platform_jwt_private_key.startswith("-----BEGIN"):
+                logger.warning("PLATFORM_JWT_PRIVATE_KEY 格式无效: 缺少 PEM 头标记")
+                self.platform_jwt_private_key = ""
+
         return self
+
+    @staticmethod
+    def _normalize_pem_key(key: str, name: str) -> str:
+        """PEM 密钥格式规范化
+
+        .env 文件中的 PEM 密钥通常使用 \\n 字面量表示换行，
+        pydantic-settings 不会自动转换，需要在此处处理。
+
+        Args:
+            key: 原始密钥字符串
+            name: 配置项名称（用于日志）
+
+        Returns:
+            规范化后的 PEM 密钥字符串
+        """
+        if not key:
+            return ""
+        key = key.strip()
+        if "\\n" in key and "\n" not in key:
+            key = key.replace("\\n", "\n")
+        return key
+
+    def _auto_generate_rsa_keypair(self) -> None:
+        """开发模式自动生成临时 RSA 密钥对
+
+        生成 2048 位 RSA 密钥对，用于 RS256 签名。
+        仅在开发模式下使用，生产环境必须显式配置。
+        """
+        try:
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.hazmat.primitives import serialization
+
+            private_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=2048,
+            )
+            self.jwt_private_key = private_key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ).decode("utf-8")
+            self.jwt_public_key = private_key.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            ).decode("utf-8")
+            logger.warning("开发模式: 已自动生成临时 RSA 密钥对，生产环境必须显式配置 JWT_PRIVATE_KEY 和 JWT_PUBLIC_KEY")
+        except ImportError:
+            logger.warning("cryptography 库未安装，降级使用 HS256 对称签名")
+            self.jwt_algorithm = "HS256"
+            if not self.jwt_secret_key:
+                self.jwt_secret_key = secrets.token_urlsafe(32)
 
     @property
     def postgres_dsn(self) -> str:

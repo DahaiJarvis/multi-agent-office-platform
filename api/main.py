@@ -13,7 +13,7 @@ from agent.core.mcp_integration import close_all_connections
 from api.middleware.auth import AuthMiddleware
 from api.middleware.rate_limit import DistributedRateLimitMiddleware
 from api.middleware.tracing import TracingMiddleware
-from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes
+from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes
 from api.errors import AppException, app_exception_handler, generic_exception_handler
 from observability.logging_config import setup_logging
 from observability.tracing import setup_tracing
@@ -22,6 +22,41 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 API_VERSION = settings.api_version
+
+
+async def check_ida_compatibility() -> bool:
+    """启动时检查智能文档助手兼容性
+
+    消费 IDA 的 /api/monitoring/compatibility 端点，
+    确认版本和工具兼容性。不可达时记录警告，不阻止启动。
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{settings.ida_backend_url}/api/monitoring/compatibility"
+            )
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(
+                    "IDA 兼容性检查通过: service=%s, api_versions=%s, mcp_tools=%d",
+                    data.get("service"),
+                    data.get("api_versions"),
+                    len(data.get("mcp_tools", [])),
+                )
+
+                breaking_changes = data.get("breaking_changes", [])
+                if breaking_changes:
+                    logger.warning("IDA 存在破坏性变更: %s", breaking_changes)
+
+                return True
+            else:
+                logger.warning("IDA 兼容性检查失败: status=%d", response.status_code)
+                return False
+    except Exception as e:
+        logger.warning("IDA 兼容性检查跳过（服务不可达）: %s", str(e))
+        return False
 
 # 审计日志后台刷新任务
 _audit_flush_task: asyncio.Task | None = None
@@ -112,6 +147,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("自定义 Agent 注册失败（非致命）: %s", e)
 
+    # 智能文档助手兼容性检查
+    try:
+        await check_ida_compatibility()
+    except Exception as e:
+        logger.warning("智能文档助手兼容性检查失败（非致命）: %s", e)
+
     logger.info(
         "应用启动完成: host=%s port=%d env=%s api_version=%s",
         settings.api_host,
@@ -144,6 +185,13 @@ async def lifespan(app: FastAPI):
 
     await session_mgr.close()
     await close_all_connections()
+
+    # 关闭知识库代理 HTTP 客户端，释放连接池资源
+    try:
+        from api.routes.knowledge_proxy_routes import close_knowledge_proxy_client
+        await close_knowledge_proxy_client()
+    except Exception:
+        pass
 
     # 关闭连接池管理器
     try:
@@ -206,6 +254,7 @@ def create_app() -> FastAPI:
     app.include_router(plugin_routes.router, prefix=api_prefix)
     app.include_router(sla_routes.router, prefix=api_prefix)
     app.include_router(region_routes.router, prefix=api_prefix)
+    app.include_router(knowledge_proxy_routes.router, prefix=api_prefix)
 
     # Prometheus 指标端点
     from observability.metrics import metrics_endpoint

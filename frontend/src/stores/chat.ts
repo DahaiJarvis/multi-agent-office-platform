@@ -13,6 +13,13 @@ export interface Message {
   streaming?: boolean
 }
 
+let _msgSeq = 0
+
+function _nextMsgId(prefix: string = 'msg'): string {
+  _msgSeq += 1
+  return `${prefix}-${Date.now()}-${_msgSeq}`
+}
+
 export const useChatStore = defineStore('chat', () => {
   const sessionId = ref('')
   const messages = ref<Message[]>([])
@@ -21,7 +28,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function addUserMessage(content: string) {
     messages.value.push({
-      id: `msg-${Date.now()}`,
+      id: _nextMsgId(),
       role: 'user',
       content,
       timestamp: Date.now(),
@@ -30,7 +37,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function addAssistantMessage(content: string, meta?: { agentName?: string; intent?: string; mode?: string }) {
     messages.value.push({
-      id: `msg-${Date.now()}`,
+      id: _nextMsgId(),
       role: 'assistant',
       content,
       timestamp: Date.now(),
@@ -42,7 +49,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function addStreamingMessage(): string {
-    const id = `msg-${Date.now()}`
+    const id = _nextMsgId('stream')
     messages.value.push({
       id,
       role: 'assistant',

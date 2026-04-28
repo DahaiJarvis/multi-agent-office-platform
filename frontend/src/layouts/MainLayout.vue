@@ -26,12 +26,13 @@
             </transition>
           </router-link>
 
-          <router-link to="/sessions" class="nav-item" :class="{ active: $route.name === 'Sessions' }">
+          <router-link to="/knowledge" class="nav-item" :class="{ active: $route.name === 'Knowledge' || $route.name === 'KbDocs' }">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-              <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" />
+              <path d="M7 2a2 2 0 00-2 2v12a2 2 0 002 2h6a2 2 0 002-2V7.414A2 2 0 0014.414 6L11 2.586A2 2 0 009.586 2H7zm0 2h2.586L13 7.414V16H7V4z" />
+              <path d="M9 9h2v2H9V9zm0 4h2v2H9v-2z" opacity="0.5" />
             </svg>
             <transition name="fade">
-              <span v-if="!sidebarCollapsed" class="nav-label">会话管理</span>
+              <span v-if="!sidebarCollapsed" class="nav-label">知识库</span>
             </transition>
           </router-link>
         </div>
@@ -150,7 +151,8 @@ const healthStatus = ref<'healthy' | 'degraded' | 'checking'>('checking')
 
 const pageTitles: Record<string, string> = {
   Chat: '智能对话',
-  Sessions: '会话管理',
+  Knowledge: '知识库管理',
+  KbDocs: '知识库文档',
   Dashboard: '运营仪表盘',
   Health: '健康检查',
   Canary: '灰度发布',

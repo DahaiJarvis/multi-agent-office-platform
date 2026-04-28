@@ -179,7 +179,8 @@ service-account.json
 
 # ==================== 文档构建 ====================
 site/
-docs/_build/
+docs/
+docs/_build/s
 
 # ==================== Jupyter Notebook ====================
 .ipynb_checkpoints/
@@ -193,3 +194,8 @@ docker-compose.override.yml
 *.pid.lock
 .eslintcache
 .stylelintcache
+
+# ==================== 密钥 ====================
+instance/
+instance/keys/
+instance/keys/platform_private.pem

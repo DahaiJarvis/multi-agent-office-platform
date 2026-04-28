@@ -14,12 +14,13 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
     children: [
       { path: '', name: 'Chat', component: () => import('../views/chat/ChatView.vue') },
-      { path: 'sessions', name: 'Sessions', component: () => import('../views/chat/SessionView.vue') },
       { path: 'admin', name: 'Dashboard', component: () => import('../views/admin/DashboardView.vue') },
       { path: 'admin/health', name: 'Health', component: () => import('../views/admin/HealthView.vue') },
       { path: 'admin/canary', name: 'Canary', component: () => import('../views/admin/CanaryView.vue') },
       { path: 'admin/audit', name: 'Audit', component: () => import('../views/admin/AuditView.vue') },
       { path: 'admin/token', name: 'TokenBudget', component: () => import('../views/admin/TokenBudgetView.vue') },
+      { path: 'knowledge', name: 'Knowledge', component: () => import('../views/knowledge/KnowledgeView.vue') },
+      { path: 'knowledge/:kbId', name: 'KbDocs', component: () => import('../views/knowledge/KbDocsView.vue') },
     ],
   },
 ]

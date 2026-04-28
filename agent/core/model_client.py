@@ -8,28 +8,43 @@
 """
 
 from autogen_ext.models.openai import OpenAIChatCompletionClient
+from autogen_core.models import ModelInfo
 from agent.core.config import get_settings
 
 _settings = get_settings()
 
-# 模型分级配置
 MODEL_TIERS = {
     "max": _settings.model_qwen_max,
     "plus": _settings.model_qwen_plus,
     "turbo": _settings.model_qwen_turbo,
 }
 
-# 已创建的客户端缓存
 _client_cache: dict[str, OpenAIChatCompletionClient] = {}
 
+_QWEN_MODEL_INFO = ModelInfo(
+    vision=False,
+    function_calling=True,
+    json_output=True,
+    structured_output=True,
+    family="unknown",
+)
 
-def _create_client(model: str) -> OpenAIChatCompletionClient:
-    """创建通义千问模型客户端"""
-    return OpenAIChatCompletionClient(
-        model=model,
-        api_key=_settings.dashscope_api_key,
-        base_url=_settings.dashscope_base_url,
-    )
+
+def _create_client(model: str, temperature: float | None = None) -> OpenAIChatCompletionClient:
+    """创建通义千问模型客户端
+
+    通义千问模型名称（如 qwen-max）不属于 OpenAI 标准模型，
+    AutoGen 要求提供 model_info 以声明模型能力。
+    """
+    kwargs: dict = {
+        "model": model,
+        "api_key":_settings.dashscope_api_key,
+        "base_url": _settings.dashscope_base_url,
+        "model_info": _QWEN_MODEL_INFO,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    return OpenAIChatCompletionClient(**kwargs)
 
 
 def get_model_client(tier: str = "plus") -> OpenAIChatCompletionClient:
@@ -60,12 +75,7 @@ def get_reviewer_client() -> OpenAIChatCompletionClient:
     cache_key = f"{model_name}:reviewer"
 
     if cache_key not in _client_cache:
-        _client_cache[cache_key] = OpenAIChatCompletionClient(
-            model=model_name,
-            api_key=_settings.dashscope_api_key,
-            base_url=_settings.dashscope_base_url,
-            temperature=0.1,
-        )
+        _client_cache[cache_key] = _create_client(model_name, temperature=0.1)
 
     return _client_cache[cache_key]
 

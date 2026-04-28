@@ -197,6 +197,33 @@ services:
     depends_on:
       - mcp-registry
 
+  # 智能文档助手 (IDA)
+  ida:
+    image: ${IDA_IMAGE:-ida:latest}
+    ports:
+      - "9100:9100"
+    environment:
+      - IDA_HOST=0.0.0.0
+      - IDA_PORT=9100
+      - IDA_LLM_PROVIDER=${IDA_LLM_PROVIDER:-dashscope}
+      - IDA_LLM_MODEL=${IDA_LLM_MODEL:-qwen-plus}
+      - IDA_LLM_API_KEY=${IDA_LLM_API_KEY:-${DASHSCOPE_API_KEY}}
+      - IDA_LLM_BASE_URL=${IDA_LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      - IDA_EMBEDDING_MODEL=${IDA_EMBEDDING_MODEL:-text-embedding-v3}
+      - IDA_VECTOR_STORE=${IDA_VECTOR_STORE:-pgvector}
+      - IDA_DB_HOST=postgres
+      - IDA_DB_PORT=5432
+      - IDA_DB_NAME=ida
+      - IDA_DB_USER=postgres
+      - IDA_DB_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - IDA_SSE_API_KEY=${IDA_SSE_API_KEY}
+      - IDA_JWT_PUBLIC_KEY=${IDA_JWT_PUBLIC_KEY}
+    volumes:
+      - ida_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # Agent API 主服务
   agent-api:
     build:
@@ -244,6 +271,13 @@ services:
       - MULTI_TENANT_ENABLED=${MULTI_TENANT_ENABLED:-false}
       - TENANT_DEFAULT_ISOLATION=${TENANT_DEFAULT_ISOLATION:-row}
       - TENANT_DEFAULT_REGION=${TENANT_DEFAULT_REGION:-cn-north}
+      # IDA 智能文档助手集成
+      - IDA_BACKEND_URL=${IDA_BACKEND_URL:-http://ida:9100}
+      - IDA_SSE_API_KEY=${IDA_SSE_API_KEY}
+      - IDA_MCP_SSE_URL=${IDA_MCP_SSE_URL:-http://ida:9100/sse}
+      - PLATFORM_JWT_PRIVATE_KEY=${PLATFORM_JWT_PRIVATE_KEY}
+      - PLATFORM_JWT_AUDIENCE=${PLATFORM_JWT_AUDIENCE:-multi-agent-platform}
+      - PLATFORM_JWT_ISSUER=${PLATFORM_JWT_ISSUER:-multi-agent-platform}
     volumes:
       - encryption_keys:/app/instance
     depends_on:
@@ -258,3 +292,4 @@ volumes:
   grafana_data:
   prometheus_data:
   encryption_keys:
+  ida_data:

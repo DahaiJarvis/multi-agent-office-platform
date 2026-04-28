@@ -88,9 +88,9 @@ MCP_SERVER_REGISTRY: dict[str, MCPServerConfig] = {
     ),
     "knowledge": MCPServerConfig(
         name="knowledge-mcp-server",
-        description="知识库 MCP 服务",
+        description="知识库 MCP 服务 - 由智能文档助手提供",
         transport="sse",
-        url="http://localhost:9010/sse",
+        url="http://localhost:9100/sse",
     ),
 }
 
@@ -104,6 +104,7 @@ AGENT_TOOL_BINDINGS: dict[str, list[str]] = {
     "HRAgent": ["hr"],
     "FinanceAgent": ["finance"],
     "Reviewer": ["oa", "approval", "hr", "finance"],
+    "KnowledgeAgent": ["knowledge"],
 }
 
 # 工具缓存
@@ -239,7 +240,7 @@ async def load_mcp_tools(server_names: list[str]) -> list[Any]:
             continue
 
         try:
-            tools = await _connect_and_load(config)
+            tools = await _connect_and_load(name, config)
             _tool_cache[name] = tools
             all_tools.extend(tools)
             logger.info("成功加载 MCP 服务 %s 的 %d 个工具", name, len(tools))
@@ -249,10 +250,23 @@ async def load_mcp_tools(server_names: list[str]) -> list[Any]:
     return all_tools
 
 
-async def _connect_and_load(config: MCPServerConfig) -> list[Any]:
-    """连接 MCP 服务并加载工具"""
+async def _connect_and_load(service_key: str, config: MCPServerConfig) -> list[Any]:
+    """连接 MCP 服务并加载工具
+
+    对于 knowledge 服务，SSE 连接时传递 X-MCP-API-Key 请求头，
+    以通过智能文档助手 MCP Server 的 MCPAuthMiddleware 认证。
+
+    Args:
+        service_key: 服务标识，如 "knowledge"
+        config: MCP 服务配置
+    """
+    settings = get_settings()
+
     if config.transport == "sse":
-        workbench = McpWorkbench(SseMcpToolAdapter(url=config.url))
+        connect_kwargs: dict[str, Any] = {"url": config.url}
+        if service_key == "knowledge" and settings.mcp_api_key:
+            connect_kwargs["headers"] = {"X-MCP-API-Key": settings.mcp_api_key}
+        workbench = McpWorkbench(SseMcpToolAdapter(**connect_kwargs))
     else:
         workbench = McpWorkbench(
             StdioMcpToolAdapter(command=config.command, args=config.args, env=config.env)

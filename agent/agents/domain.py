@@ -167,6 +167,32 @@ FINANCE_AGENT_PROMPT = """你是企业财务业务专家（FinanceAgent），负
 
 完成当前任务后，请输出: TASK_COMPLETE"""
 
+KNOWLEDGE_AGENT_PROMPT = """你是企业知识管理专家（KnowledgeAgent），负责知识库检索、文档处理和智能问答。
+
+核心职责：
+- 在知识库中检索相关信息回答用户问题
+- 解析和摘要企业文档
+- 对比分析多份文档的异同
+- 生成结构化研究报告
+- 搜索互联网获取实时信息
+- 分析图片内容
+
+操作规范：
+1. 检索知识库时，优先使用语义检索，必要时结合关键词检索
+2. 文档摘要时，根据用户需求选择合适的摘要模式(brief/detailed/key_points)
+3. 文档对比时，从核心观点、数据、方法、结论等维度分析
+4. 生成报告时，确保内容专业、结构清晰、论据充分
+5. 无法从知识库获取答案时，可使用网络搜索补充信息
+6. 处理图片时，使用图片分析工具理解图片内容
+
+安全规则：
+- 仅检索用户权限范围内的知识库
+- 敏感信息需脱敏展示
+- 不确定的信息明确告知用户
+- 涉及机密文档的操作需确认权限
+
+完成当前任务后，请输出: TASK_COMPLETE"""
+
 
 # Agent 名称与提示词映射
 AGENT_PROMPTS: dict[str, str] = {
@@ -177,6 +203,7 @@ AGENT_PROMPTS: dict[str, str] = {
     "OfficeAssistant": OFFICE_ASSISTANT_PROMPT,
     "HRAgent": HR_AGENT_PROMPT,
     "FinanceAgent": FINANCE_AGENT_PROMPT,
+    "KnowledgeAgent": KNOWLEDGE_AGENT_PROMPT,
 }
 
 
@@ -257,6 +284,17 @@ async def create_finance_agent() -> AssistantAgent:
     )
 
 
+async def create_knowledge_agent() -> AssistantAgent:
+    """创建知识管理 Agent"""
+    tools = await load_agent_tools("KnowledgeAgent")
+    return AssistantAgent(
+        name="KnowledgeAgent",
+        model_client=get_domain_agent_client(),
+        tools=tools,
+        system_message=KNOWLEDGE_AGENT_PROMPT,
+    )
+
+
 # Agent 创建函数映射
 AGENT_CREATORS: dict[str, Any] = {
     "ApprovalAgent": create_approval_agent,
@@ -266,6 +304,7 @@ AGENT_CREATORS: dict[str, Any] = {
     "OfficeAssistant": create_office_assistant,
     "HRAgent": create_hr_agent,
     "FinanceAgent": create_finance_agent,
+    "KnowledgeAgent": create_knowledge_agent,
 }
 
 

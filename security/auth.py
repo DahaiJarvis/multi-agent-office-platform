@@ -2,6 +2,9 @@
 
 Token 签发、验证、刷新与撤销，与架构文档 7.2.1 节对齐。
 支持 OAuth2.0 / SSO 对接，当前实现 JWT 基础认证。
+默认使用 RS256（RSA 非对称密钥）签名算法：
+  - 私钥（jwt_private_key）用于签发 Token
+  - 公钥（jwt_public_key）用于验证 Token
 Token 黑名单基于 Redis 存储，支持分布式部署。
 """
 
@@ -15,6 +18,34 @@ from pydantic import BaseModel, Field
 from agent.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _get_signing_key() -> str:
+    """获取 JWT 签名密钥
+
+    RS256 模式返回私钥用于签发，HS256 模式返回对称密钥。
+
+    Returns:
+        签名密钥字符串
+    """
+    settings = get_settings()
+    if settings.jwt_algorithm == "RS256":
+        return settings.jwt_private_key
+    return settings.jwt_secret_key
+
+
+def _get_verify_key() -> str:
+    """获取 JWT 验证密钥
+
+    RS256 模式返回公钥用于验证，HS256 模式返回对称密钥。
+
+    Returns:
+        验证密钥字符串
+    """
+    settings = get_settings()
+    if settings.jwt_algorithm == "RS256":
+        return settings.jwt_public_key
+    return settings.jwt_secret_key
 
 
 class TokenPayload(BaseModel):
@@ -72,7 +103,7 @@ def create_token_pair(user_id: str, roles: list[str] | None = None, departments:
     )
     access_token = jwt.encode(
         access_payload.model_dump(),
-        settings.jwt_secret_key,
+        _get_signing_key(),
         algorithm=settings.jwt_algorithm,
     )
 
@@ -88,7 +119,7 @@ def create_token_pair(user_id: str, roles: list[str] | None = None, departments:
     )
     refresh_token = jwt.encode(
         refresh_payload.model_dump(),
-        settings.jwt_secret_key,
+        _get_signing_key(),
         algorithm=settings.jwt_algorithm,
     )
 
@@ -116,7 +147,7 @@ def verify_token(token: str, expected_type: str = "access") -> TokenPayload | No
     try:
         payload_dict = jwt.decode(
             token,
-            settings.jwt_secret_key,
+            _get_verify_key(),
             algorithms=[settings.jwt_algorithm],
         )
         payload = TokenPayload.model_validate(payload_dict)

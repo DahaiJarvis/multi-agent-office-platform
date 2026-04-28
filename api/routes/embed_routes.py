@@ -94,9 +94,11 @@ def _generate_embed_token(domain: str, config: dict[str, Any]) -> str:
     """生成嵌入 Token
 
     使用 HMAC-SHA256 签名，包含域名、配置哈希和过期时间。
+    签名密钥优先使用 jwt_secret_key（HS256 模式），
+    RS256 模式下使用 mcp_api_key 作为 HMAC 密钥。
     """
     settings = get_settings()
-    secret = settings.jwt_secret_key
+    secret = settings.jwt_secret_key or settings.mcp_api_key or "embed-default-secret"
 
     payload = f"{domain}:{config.get('agent_name', '')}:{int(time.time())}:{uuid.uuid4().hex[:8]}"
     signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()

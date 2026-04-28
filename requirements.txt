@@ -36,3 +36,4 @@ structlog>=24.0
 
 # 安全与加密
 cryptography>=42.0
+PyJWT[crypto]>=2.8
