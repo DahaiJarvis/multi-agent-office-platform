@@ -363,7 +363,8 @@ async function handleFileUpload(files: File[]) {
 
   try {
     const res = await knowledgeApi.parseFiles(files)
-    const parsedContent = res.data?.results?.map((r: ParseResultItem) => r.content || r.text || '').join('\n\n')
+    const parsePayload = res.data?.data || res.data
+    const parsedContent = parsePayload?.results?.map((r: ParseResultItem) => r.content || r.text || '').join('\n\n')
     if (parsedContent) {
       inputText.value = inputText.value
         ? `${inputText.value}\n\n[文件内容]\n${parsedContent}`

@@ -14,7 +14,6 @@ from deploy.multi_region import (
     route_request,
     DeployRegion,
     RegionStatus,
-    RegionRole,
     RoutingDecision,
 )
 

@@ -9,18 +9,15 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from autogen_agentchat.messages import ChatMessage
+from autogen_agentchat.messages import TextMessage, ToolCallSummaryMessage, HandoffMessage
 
 from agent.agents.supervisor import (
     classify_intent,
-    create_supervisor_agent,
     IntentResult,
     CollaborationMode,
 )
 from agent.teams.team_factory import create_team
 from agent.core.session_manager import SessionState, get_session_manager
-from agent.core.context_manager import prepare_context_for_agent, extract_session_history
-from agent.agents.domain import AGENT_PROMPTS
 from observability.metrics import record_agent_call
 from observability.tracing import langfuse_tracer
 
@@ -35,11 +32,12 @@ async def route_and_execute(
     session_id: str,
     user_id: str,
     session: SessionState | None = None,
+    knowledge_base_id: str | None = None,
 ) -> dict[str, Any]:
     """路由并执行用户请求
 
     完整流程：
-    1. 意图分类
+    1. 意图分类（选择知识库时跳过，直接路由到 KnowledgeAgent）
     2. 置信度校验
     3. 路由表匹配
     4. 创建团队
@@ -52,6 +50,7 @@ async def route_and_execute(
         session_id: 会话ID
         user_id: 用户ID
         session: 会话状态（可选，传入时直接使用，否则从 SessionManager 获取）
+        knowledge_base_id: 知识库ID（可选，选择知识库后直接路由到 KnowledgeAgent）
 
     Returns:
         执行结果字典
@@ -63,15 +62,29 @@ async def route_and_execute(
         session_mgr = await get_session_manager()
         session = await session_mgr.get_session(session_id)
 
-    # 1. 意图分类
-    intent = await classify_intent(user_message)
-    logger.info(
-        "意图分类: intent=%s confidence=%.2f agent=%s mode=%s",
-        intent.intent,
-        intent.confidence,
-        intent.target_agent,
-        intent.collaboration_mode.value,
-    )
+    # 1. 意图分类（选择知识库时跳过，直接路由到 KnowledgeAgent）
+    if knowledge_base_id:
+        intent = IntentResult(
+            intent="knowledge_query",
+            confidence=1.0,
+            target_agent="KnowledgeAgent",
+            collaboration_mode=CollaborationMode.DIRECT,
+            review_required=False,
+        )
+        logger.info(
+            "知识库直路由: kb_id=%s agent=%s",
+            knowledge_base_id,
+            intent.target_agent,
+        )
+    else:
+        intent = await classify_intent(user_message)
+        logger.info(
+            "意图分类: intent=%s confidence=%.2f agent=%s mode=%s",
+            intent.intent,
+            intent.confidence,
+            intent.target_agent,
+            intent.collaboration_mode.value,
+        )
 
     # 2. 置信度校验
     if intent.confidence < CONFIDENCE_THRESHOLD:
@@ -94,7 +107,7 @@ async def route_and_execute(
         }
 
     # 4. 构建带上下文的任务描述
-    task = await _build_contextual_task(user_message, intent, session)
+    task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
 
     # 5. 执行任务
     try:
@@ -181,51 +194,53 @@ async def _build_contextual_task(
     user_message: str,
     intent: IntentResult,
     session: SessionState | None,
+    knowledge_base_id: str | None = None,
 ) -> str:
     """构建带上下文的任务描述
 
     将会话历史注入到任务描述中，使 Agent 能够理解对话上下文。
     对于 DIRECT 模式，注入简短的历史摘要；
     对于 SELECTOR/SWARM 模式，注入更完整的上下文。
+    当指定知识库时，在任务描述中注入知识库标识，引导 Agent 使用对应知识库。
 
     Args:
         user_message: 用户原始消息
         intent: 意图分类结果
         session: 会话状态
+        knowledge_base_id: 知识库ID（可选，指定后注入到任务上下文）
 
     Returns:
         带上下文的任务描述
     """
-    if session is None or not session.message_history:
-        return user_message
+    parts = []
 
-    # 提取最近的对话历史（取最近几轮，避免过长）
-    recent_history = session.message_history[-6:]
-    history_parts = []
-    for msg in recent_history:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if role and content:
-            role_label = "用户" if role == "user" else "助手"
-            history_parts.append(f"{role_label}: {content}")
+    # 注入知识库上下文
+    if knowledge_base_id:
+        parts.append(f"[知识库ID] {knowledge_base_id}")
+        parts.append("请使用知识库检索工具在指定知识库中搜索相关信息来回答用户问题。")
 
-    if not history_parts:
-        return user_message
+    if session is not None and session.message_history:
+        # 提取最近的对话历史（取最近几轮，避免过长）
+        recent_history = session.message_history[-6:]
+        history_parts = []
+        for msg in recent_history:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role and content:
+                role_label = "用户" if role == "user" else "助手"
+                history_parts.append(f"{role_label}: {content}")
 
-    history_text = "\n".join(history_parts)
+        if history_parts:
+            history_text = "\n".join(history_parts)
 
-    # 注入上下文摘要（如果有）
-    summary_prefix = ""
-    if session.context_summary:
-        summary_prefix = f"[前情摘要] {session.context_summary}\n\n"
+            if session.context_summary:
+                parts.append(f"[前情摘要] {session.context_summary}")
 
-    task = (
-        f"{summary_prefix}"
-        f"[对话历史]\n{history_text}\n\n"
-        f"[当前请求] {user_message}"
-    )
+            parts.append(f"[对话历史]\n{history_text}")
 
-    return task
+    parts.append(f"[当前请求] {user_message}")
+
+    return "\n\n".join(parts)
 
 
 async def route_and_execute_stream(
@@ -233,6 +248,7 @@ async def route_and_execute_stream(
     session_id: str,
     user_id: str,
     session: SessionState | None = None,
+    knowledge_base_id: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """路由并流式执行用户请求
 
@@ -253,15 +269,29 @@ async def route_and_execute_stream(
         session_mgr = await get_session_manager()
         session = await session_mgr.get_session(session_id)
 
-    # 1. 意图分类
-    intent = await classify_intent(user_message)
-    logger.info(
-        "流式-意图分类: intent=%s confidence=%.2f agent=%s mode=%s",
-        intent.intent,
-        intent.confidence,
-        intent.target_agent,
-        intent.collaboration_mode.value,
-    )
+    # 1. 意图分类（选择知识库时跳过，直接路由到 KnowledgeAgent）
+    if knowledge_base_id:
+        intent = IntentResult(
+            intent="knowledge_query",
+            confidence=1.0,
+            target_agent="KnowledgeAgent",
+            collaboration_mode=CollaborationMode.DIRECT,
+            review_required=False,
+        )
+        logger.info(
+            "流式-知识库直路由: kb_id=%s agent=%s",
+            knowledge_base_id,
+            intent.target_agent,
+        )
+    else:
+        intent = await classify_intent(user_message)
+        logger.info(
+            "流式-意图分类: intent=%s confidence=%.2f agent=%s mode=%s",
+            intent.intent,
+            intent.confidence,
+            intent.target_agent,
+            intent.collaboration_mode.value,
+        )
 
     yield {
         "type": "intent",
@@ -291,7 +321,7 @@ async def route_and_execute_stream(
         return
 
     # 4. 构建带上下文的任务描述
-    task = await _build_contextual_task(user_message, intent, session)
+    task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
 
     # 5. 流式执行任务
     full_response = ""
@@ -299,7 +329,7 @@ async def route_and_execute_stream(
 
     try:
         async for message in team.run_stream(task=task):
-            if isinstance(message, ChatMessage):
+            if isinstance(message, (TextMessage, ToolCallSummaryMessage, HandoffMessage)):
                 content = message.content if hasattr(message, "content") else str(message)
                 if content and isinstance(content, str):
                     source_name = getattr(message, "source", current_agent)

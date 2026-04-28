@@ -284,8 +284,103 @@ def _detect_chinese_names(content: str) -> list[PIIDetection]:
     return detections
 
 
+def _apply_builtin_rules(content: str, categories: set[PIICategory] | None) -> list[PIIDetection]:
+    """应用内置 PII 规则检测
+
+    Args:
+        content: 待检测文本
+        categories: 指定检测类别
+
+    Returns:
+        检测结果列表
+    """
+    detections: list[PIIDetection] = []
+    for rule in BUILTIN_RULES:
+        if categories and rule["category"] not in categories:
+            continue
+        pattern = re.compile(rule["pattern"])
+        for match in pattern.finditer(content):
+            value = match.group()
+            if rule.get("validator") and not rule["validator"](value):
+                continue
+            detections.append(PIIDetection(
+                category=rule["category"],
+                sensitivity=rule["sensitivity"],
+                value=value,
+                start=match.start(),
+                end=match.end(),
+                confidence=rule["confidence"],
+                rule_name=rule["name"],
+            ))
+    return detections
+
+
+def _apply_custom_rules(content: str, categories: set[PIICategory] | None) -> list[PIIDetection]:
+    """应用自定义 PII 规则检测
+
+    Args:
+        content: 待检测文本
+        categories: 指定检测类别
+
+    Returns:
+        检测结果列表
+    """
+    detections: list[PIIDetection] = []
+    for custom_rule in _custom_rules:
+        if not custom_rule.enabled:
+            continue
+        if categories and custom_rule.category not in categories:
+            continue
+        try:
+            pattern = re.compile(custom_rule.pattern)
+            for match in pattern.finditer(content):
+                value = match.group()
+                if custom_rule.keywords:
+                    context_start = max(0, match.start() - 50)
+                    context_end = min(len(content), match.end() + 50)
+                    context = content[context_start:context_end]
+                    if not any(kw in context for kw in custom_rule.keywords):
+                        continue
+                detections.append(PIIDetection(
+                    category=custom_rule.category,
+                    sensitivity=custom_rule.sensitivity,
+                    value=value,
+                    start=match.start(),
+                    end=match.end(),
+                    confidence=0.75,
+                    rule_name=custom_rule.name,
+                ))
+        except re.error:
+            logger.warning("自定义规则 %s 正则编译失败", custom_rule.name)
+    return detections
+
+
+def _deduplicate_detections(detections: list[PIIDetection]) -> list[PIIDetection]:
+    """去重检测结果（同一位置可能被多个规则匹配）
+
+    按置信度降序排列，保留每个位置的最高置信度结果。
+
+    Args:
+        detections: 原始检测结果列表
+
+    Returns:
+        去重后的检测结果列表
+    """
+    seen_positions: set[tuple[int, int]] = set()
+    unique: list[PIIDetection] = []
+    for det in sorted(detections, key=lambda d: d.confidence, reverse=True):
+        pos = (det.start, det.end)
+        if pos not in seen_positions:
+            seen_positions.add(pos)
+            unique.append(det)
+    return unique
+
+
 def detect_pii(content: str, categories: set[PIICategory] | None = None) -> PIIDetectionResult:
     """检测文本中的 PII 信息
+
+    依次执行内置规则、中文姓名检测、自定义规则检测，
+    合并结果后去重、脱敏并生成统计摘要。
 
     Args:
         content: 待检测文本
@@ -297,71 +392,17 @@ def detect_pii(content: str, categories: set[PIICategory] | None = None) -> PIID
     all_detections: list[PIIDetection] = []
 
     # 内置规则检测
-    for rule in BUILTIN_RULES:
-        if categories and rule["category"] not in categories:
-            continue
-
-        pattern = re.compile(rule["pattern"])
-        for match in pattern.finditer(content):
-            value = match.group()
-
-            if rule.get("validator") and not rule["validator"](value):
-                continue
-
-            all_detections.append(PIIDetection(
-                category=rule["category"],
-                sensitivity=rule["sensitivity"],
-                value=value,
-                start=match.start(),
-                end=match.end(),
-                confidence=rule["confidence"],
-                rule_name=rule["name"],
-            ))
+    all_detections.extend(_apply_builtin_rules(content, categories))
 
     # 中文姓名检测
     if not categories or PIICategory.NAME in categories:
-        name_detections = _detect_chinese_names(content)
-        all_detections.extend(name_detections)
+        all_detections.extend(_detect_chinese_names(content))
 
     # 自定义规则检测
-    for custom_rule in _custom_rules:
-        if not custom_rule.enabled:
-            continue
-        if categories and custom_rule.category not in categories:
-            continue
+    all_detections.extend(_apply_custom_rules(content, categories))
 
-        try:
-            pattern = re.compile(custom_rule.pattern)
-            for match in pattern.finditer(content):
-                value = match.group()
-
-                if custom_rule.keywords:
-                    context_start = max(0, match.start() - 50)
-                    context_end = min(len(content), match.end() + 50)
-                    context = content[context_start:context_end]
-                    if not any(kw in context for kw in custom_rule.keywords):
-                        continue
-
-                all_detections.append(PIIDetection(
-                    category=custom_rule.category,
-                    sensitivity=custom_rule.sensitivity,
-                    value=value,
-                    start=match.start(),
-                    end=match.end(),
-                    confidence=0.75,
-                    rule_name=custom_rule.name,
-                ))
-        except re.error:
-            logger.warning("自定义规则 %s 正则编译失败", custom_rule.name)
-
-    # 去重（同一位置可能被多个规则匹配）
-    seen_positions: set[tuple[int, int]] = set()
-    unique_detections: list[PIIDetection] = []
-    for det in sorted(all_detections, key=lambda d: d.confidence, reverse=True):
-        pos = (det.start, det.end)
-        if pos not in seen_positions:
-            seen_positions.add(pos)
-            unique_detections.append(det)
+    # 去重
+    unique_detections = _deduplicate_detections(all_detections)
 
     # 生成脱敏内容
     redacted = _redact_content(content, unique_detections)

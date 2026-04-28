@@ -19,7 +19,6 @@
 
 import json
 import random
-import time
 
 from locust import HttpUser, task, between, events
 

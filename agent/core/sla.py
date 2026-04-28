@@ -158,6 +158,7 @@ _start_time: float = time.time()
 
 def record_latency(duration_ms: float) -> None:
     """记录延迟采样"""
+    global _total_count
     _latency_samples.append(duration_ms)
     _total_count += 1
 
@@ -167,6 +168,7 @@ def record_latency(duration_ms: float) -> None:
 
 def record_error() -> None:
     """记录错误"""
+    global _error_count, _total_count
     _error_count += 1
     _total_count += 1
 

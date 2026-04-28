@@ -9,7 +9,7 @@ from typing import Any
 
 from autogen_agentchat.agents import AssistantAgent
 
-from agent.core.model_client import get_domain_agent_client, get_reviewer_client
+from agent.core.model_client import get_domain_agent_client
 from agent.core.mcp_integration import load_agent_tools
 
 logger = logging.getLogger(__name__)
@@ -207,104 +207,43 @@ AGENT_PROMPTS: dict[str, str] = {
 }
 
 
-async def create_approval_agent() -> AssistantAgent:
-    """创建审批处理 Agent"""
-    tools = await load_agent_tools("ApprovalAgent")
+async def _create_single_agent(agent_name: str) -> AssistantAgent:
+    """通用领域 Agent 创建函数
+
+    根据名称从映射表查找提示词和工具，创建 AssistantAgent。
+    所有领域 Agent 共用此函数，避免重复代码。
+
+    Args:
+        agent_name: Agent 名称，须在 AGENT_PROMPTS 中注册
+
+    Returns:
+        AssistantAgent 实例
+
+    Raises:
+        ValueError: 不支持的 Agent 名称
+    """
+    prompt = AGENT_PROMPTS.get(agent_name)
+    if prompt is None:
+        raise ValueError(f"不支持的 Agent: {agent_name}，可选: {list(AGENT_PROMPTS.keys())}")
+    tools = await load_agent_tools(agent_name)
     return AssistantAgent(
-        name="ApprovalAgent",
+        name=agent_name,
         model_client=get_domain_agent_client(),
         tools=tools,
-        system_message=APPROVAL_AGENT_PROMPT,
+        system_message=prompt,
     )
 
 
-async def create_email_agent() -> AssistantAgent:
-    """创建邮件处理 Agent"""
-    tools = await load_agent_tools("EmailAgent")
-    return AssistantAgent(
-        name="EmailAgent",
-        model_client=get_domain_agent_client(),
-        tools=tools,
-        system_message=EMAIL_AGENT_PROMPT,
-    )
-
-
-async def create_calendar_agent() -> AssistantAgent:
-    """创建日程管理 Agent"""
-    tools = await load_agent_tools("CalendarAgent")
-    return AssistantAgent(
-        name="CalendarAgent",
-        model_client=get_domain_agent_client(),
-        tools=tools,
-        system_message=CALENDAR_AGENT_PROMPT,
-    )
-
-
-async def create_crm_agent() -> AssistantAgent:
-    """创建 CRM 业务 Agent"""
-    tools = await load_agent_tools("CRMAgent")
-    return AssistantAgent(
-        name="CRMAgent",
-        model_client=get_domain_agent_client(),
-        tools=tools,
-        system_message=CRM_AGENT_PROMPT,
-    )
-
-
-async def create_office_assistant() -> AssistantAgent:
-    """创建通用办公助手"""
-    tools = await load_agent_tools("OfficeAssistant")
-    return AssistantAgent(
-        name="OfficeAssistant",
-        model_client=get_domain_agent_client(),
-        tools=tools,
-        system_message=OFFICE_ASSISTANT_PROMPT,
-    )
-
-
-async def create_hr_agent() -> AssistantAgent:
-    """创建 HR 人事 Agent"""
-    tools = await load_agent_tools("HRAgent")
-    return AssistantAgent(
-        name="HRAgent",
-        model_client=get_domain_agent_client(),
-        tools=tools,
-        system_message=HR_AGENT_PROMPT,
-    )
-
-
-async def create_finance_agent() -> AssistantAgent:
-    """创建财务业务 Agent"""
-    tools = await load_agent_tools("FinanceAgent")
-    return AssistantAgent(
-        name="FinanceAgent",
-        model_client=get_domain_agent_client(),
-        tools=tools,
-        system_message=FINANCE_AGENT_PROMPT,
-    )
-
-
-async def create_knowledge_agent() -> AssistantAgent:
-    """创建知识管理 Agent"""
-    tools = await load_agent_tools("KnowledgeAgent")
-    return AssistantAgent(
-        name="KnowledgeAgent",
-        model_client=get_domain_agent_client(),
-        tools=tools,
-        system_message=KNOWLEDGE_AGENT_PROMPT,
-    )
-
-
-# Agent 创建函数映射
+# Agent 创建函数映射（统一使用 _create_single_agent）
 AGENT_CREATORS: dict[str, Any] = {
-    "ApprovalAgent": create_approval_agent,
-    "EmailAgent": create_email_agent,
-    "CalendarAgent": create_calendar_agent,
-    "CRMAgent": create_crm_agent,
-    "OfficeAssistant": create_office_assistant,
-    "HRAgent": create_hr_agent,
-    "FinanceAgent": create_finance_agent,
-    "KnowledgeAgent": create_knowledge_agent,
+    "ApprovalAgent": lambda: _create_single_agent("ApprovalAgent"),
+    "EmailAgent": lambda: _create_single_agent("EmailAgent"),
+    "CalendarAgent": lambda: _create_single_agent("CalendarAgent"),
+    "CRMAgent": lambda: _create_single_agent("CRMAgent"),
+    "OfficeAssistant": lambda: _create_single_agent("OfficeAssistant"),
+    "HRAgent": lambda: _create_single_agent("HRAgent"),
+    "FinanceAgent": lambda: _create_single_agent("FinanceAgent"),
+    "KnowledgeAgent": lambda: _create_single_agent("KnowledgeAgent"),
 }
 
 

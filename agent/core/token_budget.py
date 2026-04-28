@@ -17,11 +17,11 @@
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from agent.core.config import get_settings
-from agent.core.performance.model_router import ModelTier, TIER_CONFIGS, estimate_cost
+from agent.core.performance.model_router import ModelTier, estimate_cost
 
 logger = logging.getLogger(__name__)
 

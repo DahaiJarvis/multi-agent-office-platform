@@ -104,8 +104,9 @@ async function loadKnowledgeBases() {
   loading.value = true
   try {
     const res = await knowledgeApi.listKnowledgeBases(page.value, perPage)
-    knowledgeBases.value = res.data?.knowledge_bases || res.data?.items || []
-    total.value = res.data?.total || knowledgeBases.value.length
+    const payload = res.data?.data || res.data
+    knowledgeBases.value = payload?.knowledge_bases || payload?.items || []
+    total.value = payload?.total || knowledgeBases.value.length
   } catch (err) {
     ElMessage.error('加载知识库列表失败')
   } finally {

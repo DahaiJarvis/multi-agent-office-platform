@@ -10,10 +10,12 @@ import logging
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from api.errors import AppException, ErrorCode
 from api.models.request import ChatRequest
 from api.models.response import ChatResponse
+from agent.core.feedback import FeedbackType
 from agent.core.session_manager import get_session_manager
 from agent.teams.routing import route_and_execute, route_and_execute_stream
 
@@ -50,6 +52,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         session_id=session.session_id,
         user_id=request.user_id,
         session=session,
+        knowledge_base_id=request.knowledge_base_id,
     )
 
     reply = result.get("message", "处理完成")
@@ -67,6 +70,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
             "collaboration_mode": collaboration_mode,
         },
     )
+
+    # 自动归档到 L3，确保历史列表可查询
+    try:
+        await session_mgr.archive_session(session.session_id)
+    except Exception:
+        logger.debug("自动归档会话失败: %s", session.session_id)
 
     return ChatResponse(
         session_id=session.session_id,
@@ -116,6 +125,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 session_id=session.session_id,
                 user_id=request.user_id,
                 session=session,
+                knowledge_base_id=request.knowledge_base_id,
             ):
                 event_type = event.get("type")
 
@@ -162,6 +172,12 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                     },
                 )
 
+                # 自动归档到 L3，确保历史列表可查询
+                try:
+                    await session_mgr.archive_session(session.session_id)
+                except Exception:
+                    logger.debug("自动归档会话失败: %s", session.session_id)
+
         except Exception as e:
             logger.error("流式响应异常: %s", e)
             yield _format_sse("error", str(e))
@@ -193,9 +209,6 @@ def _format_sse(event: str, data: str) -> str:
 
 
 # ==================== 对话反馈 ====================
-
-from pydantic import BaseModel, Field
-from agent.core.feedback import FeedbackType
 
 
 class FeedbackRequestBody(BaseModel):

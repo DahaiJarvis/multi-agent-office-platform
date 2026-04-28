@@ -2,11 +2,19 @@
 
 将前端请求转发到智能文档助手(IDA) REST API，实现跨系统调用。
 
-认证流程：
-1. 前端请求携带主平台 JWT Token
-2. AuthMiddleware 解析主平台 JWT，提取 user_id 和 user_roles
-3. 本模块使用 RSA 私钥签发映射 Token（包含 IDA 角色映射）
-4. 映射 Token 发送给 IDA，IDA 使用 RSA 公钥验证
+认证流程（双模式支持）：
+
+  direct 模式（IDA_AUTH_MODE=direct，推荐）：
+  1. 前端请求携带主平台 JWT Token
+  2. AuthMiddleware 解析主平台 JWT，提取 user_id 和 user_roles
+  3. 直接透传主平台 Token 给 IDA
+  4. IDA 通过 JWKS 端点验证主平台 Token
+
+  legacy 模式（IDA_AUTH_MODE=legacy，兼容旧系统）：
+  1. 前端请求携带主平台 JWT Token
+  2. AuthMiddleware 解析主平台 JWT，提取 user_id 和 user_roles
+  3. 本模块使用 RSA 私钥签发映射 Token（包含 IDA 角色映射）
+  4. 映射 Token 发送给 IDA，IDA 使用 RSA 公钥验证
 
 设计要点：
 - 使用模块级共享 httpx.AsyncClient 避免连接泄漏
@@ -14,6 +22,7 @@
 - Token 有效期通过 config.py 的 ida_token_ttl_seconds 配置
 - 请求体通过 Pydantic 模型校验，防止非法参数透传
 - SSE 流式代理错误事件格式与前端解析逻辑对齐
+- 双模式支持确保 IDA 改造期间主平台可独立部署
 """
 
 import json
@@ -230,9 +239,10 @@ def _build_mapped_token(user_id: str, user_roles: list[str]) -> str:
 
 
 async def _get_mapped_token(request: Request) -> str:
-    """从请求上下文提取用户信息并签发映射 Token
+    """从请求上下文提取用户信息并签发映射 Token（legacy 模式）
 
     依赖 AuthMiddleware 在 request.state 上设置的 user_id 和 user_roles。
+    此函数仅在 IDA_AUTH_MODE=legacy 时使用。
 
     Args:
         request: FastAPI 请求对象
@@ -255,13 +265,61 @@ async def _get_mapped_token(request: Request) -> str:
     return _build_mapped_token(user_id, user_roles or [])
 
 
+async def _get_user_token(request: Request) -> str:
+    """获取用于 IDA 认证的 Token（双模式支持）
+
+    根据 IDA_AUTH_MODE 配置选择认证模式：
+    - direct: 直接透传主平台 Token，IDA 通过 JWKS 验证
+    - legacy: 签发映射 Token，IDA 使用 RSA 公钥验证
+
+    direct 模式下，直接从请求头提取原始 Bearer Token 透传给 IDA，
+    无需签发新 Token，消除映射层，实现统一身份源。
+    IDA 通过主平台的 /.well-known/jwks.json 端点获取公钥验证 Token。
+
+    legacy 模式下，保留原有的映射 Token 签发逻辑，
+    确保 IDA 尚未完成改造时主平台可独立部署运行。
+
+    Args:
+        request: FastAPI 请求对象
+
+    Returns:
+        JWT Token 字符串
+
+    Raises:
+        AppException: 用户信息缺失或 Token 提取失败时抛出 401 错误
+    """
+    auth_mode = getattr(settings, "ida_auth_mode", "legacy") or "legacy"
+
+    if auth_mode == "direct":
+        # direct 模式：直接透传主平台 Token
+        auth_header = request.headers.get("Authorization")
+        token = auth_header.replace("Bearer ", "") if auth_header and auth_header.startswith("Bearer ") else ""
+
+        if not token:
+            raise AppException(
+                ErrorCode.UNAUTHORIZED,
+                message="需要登录后才能访问知识库功能",
+            )
+
+        logger.debug("使用 direct 模式透传主平台 Token")
+        return token
+    else:
+        # legacy 模式：签发映射 Token
+        logger.debug("使用 legacy 模式签发映射 Token")
+        return await _get_mapped_token(request)
+
+
 def _get_ida_headers(token: str) -> dict[str, str]:
     """构建 IDA 请求头
 
     包含 Bearer Token 认证和来源标识，用于 IDA 识别请求来源。
 
+    direct 模式下，Token 为主平台原始 Token，IDA 通过 JWKS 验证；
+    legacy 模式下，Token 为映射 Token，IDA 使用 RSA 公钥验证。
+    X-Source 头保留用于日志追踪，不影响认证流程。
+
     Args:
-        token: RSA-JWT 映射 Token
+        token: JWT Token（主平台原始 Token 或映射 Token）
 
     Returns:
         包含认证和来源标识的请求头字典
@@ -405,7 +463,7 @@ async def proxy_list_knowledge_bases(
     Returns:
         IDA 知识库列表响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     return await _ida_request(
         "GET", "/api/knowledge-bases", token,
         params={"page": page, "per_page": per_page},
@@ -429,7 +487,7 @@ async def proxy_create_knowledge_base(
     Returns:
         IDA 创建知识库响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     return await _ida_request(
         "POST", "/api/knowledge-bases", token,
         json=body.model_dump(exclude_none=True),
@@ -447,7 +505,7 @@ async def proxy_get_knowledge_base(kb_id: str, request: Request):
     Returns:
         IDA 知识库详情响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     return await _ida_request(
         "GET", f"/api/knowledge-bases/{kb_id}", token,
     )
@@ -472,7 +530,7 @@ async def proxy_update_knowledge_base(
     Returns:
         IDA 更新知识库响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     return await _ida_request(
         "PUT", f"/api/knowledge-bases/{kb_id}", token,
         json=body.model_dump(exclude_none=True),
@@ -490,7 +548,7 @@ async def proxy_delete_knowledge_base(kb_id: str, request: Request):
     Returns:
         IDA 删除知识库响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     return await _ida_request(
         "DELETE", f"/api/knowledge-bases/{kb_id}", token,
     )
@@ -509,7 +567,7 @@ async def proxy_list_documents(kb_id: str, request: Request, page: int = 1, per_
     Returns:
         IDA 文档列表响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     return await _ida_request(
         "GET", f"/api/knowledge-bases/{kb_id}/documents", token,
         params={"page": page, "per_page": per_page},
@@ -537,7 +595,7 @@ async def proxy_upload_document(
     Returns:
         IDA 上传文档响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     file_content = await file.read()
 
     try:
@@ -572,7 +630,7 @@ async def proxy_delete_document(kb_id: str, doc_id: str, request: Request):
     Returns:
         IDA 删除文档响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     return await _ida_request(
         "DELETE", f"/api/knowledge-bases/{kb_id}/documents/{doc_id}", token,
     )
@@ -595,7 +653,7 @@ async def proxy_qa_ask(
     Returns:
         IDA 问答响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     return await _ida_request(
         "POST", "/api/qa/ask", token,
         json=body.model_dump(exclude_none=True),
@@ -625,7 +683,7 @@ async def proxy_qa_ask_stream(
     Returns:
         StreamingResponse: SSE 事件流
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
 
     async def stream_generator():
         """SSE 流生成器
@@ -697,7 +755,7 @@ async def proxy_parse_files(request: Request):
     Returns:
         IDA 文件解析响应，包含每个文件的解析结果
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     form = await request.form()
     files = form.getlist("files")
 
@@ -743,7 +801,7 @@ async def proxy_analyze_image(
     Returns:
         IDA 图片分析响应
     """
-    token = await _get_mapped_token(request)
+    token = await _get_user_token(request)
     image_content = await image.read()
 
     try:

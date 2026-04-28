@@ -8,7 +8,7 @@ import logging
 from fastapi import APIRouter
 
 from api.errors import AppException, ErrorCode
-from api.models.request import SessionCreateRequest, SessionHistoryRequest
+from api.models.request import SessionCreateRequest
 from api.models.response import SessionResponse
 from agent.core.session_manager import get_session_manager
 

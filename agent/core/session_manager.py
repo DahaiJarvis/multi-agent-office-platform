@@ -12,7 +12,6 @@
   4. 查询历史 -> 优先 L2，未命中则从 L3 恢复
 """
 
-import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -71,6 +70,7 @@ class SessionManager:
             新创建的 SessionState
         """
         import uuid
+        import time
 
         session = SessionState(
             session_id=str(uuid.uuid4()),
@@ -81,6 +81,13 @@ class SessionManager:
         redis = await self._get_redis()
         key = self._session_key(session.session_id)
         await redis.setex(key, self.SESSION_TTL, session.model_dump_json())
+
+        # 添加到用户会话索引（Redis Sorted Set，score 为时间戳）
+        index_key = self._user_sessions_key(user_id)
+        await redis.zadd(index_key, {session.session_id: time.time()})
+        # 索引保留 7 天
+        await redis.expire(index_key, 86400 * 7)
+
         logger.info("创建会话: %s, 用户: %s", session.session_id, user_id)
         return session
 
@@ -151,10 +158,16 @@ class SessionManager:
         Args:
             session: 更新后的 SessionState
         """
+        import time
+
         session.updated_at = datetime.now()
         redis = await self._get_redis()
         key = self._session_key(session.session_id)
         await redis.setex(key, self.SESSION_TTL, session.model_dump_json())
+
+        # 更新用户会话索引的时间戳
+        index_key = self._user_sessions_key(session.user_id)
+        await redis.zadd(index_key, {session.session_id: time.time()})
 
     async def append_message(
         self, session_id: str, role: str, content: str, metadata: dict | None = None
@@ -185,9 +198,18 @@ class SessionManager:
 
     async def delete_session(self, session_id: str) -> None:
         """删除会话"""
+        # 先获取会话信息以清理索引
+        session = await self.get_session(session_id)
+
         redis = await self._get_redis()
         key = self._session_key(session_id)
         await redis.delete(key)
+
+        # 从用户会话索引中移除
+        if session:
+            index_key = self._user_sessions_key(session.user_id)
+            await redis.zrem(index_key, session_id)
+
         logger.info("删除会话: %s", session_id)
 
     async def archive_session(self, session_id: str) -> bool:
@@ -225,7 +247,62 @@ class SessionManager:
     async def list_archived_sessions(
         self, user_id: str, limit: int = 20, offset: int = 0
     ) -> list[dict[str, Any]]:
-        """查询用户的归档会话列表
+        """查询用户的会话列表
+
+        合并 Redis 活跃会话索引和 L3 PostgreSQL 归档会话，
+        按时间倒序排列后去重返回。
+
+        Args:
+            user_id: 用户ID
+            limit: 返回数量上限
+            offset: 偏移量
+
+        Returns:
+            会话摘要列表
+        """
+        redis_sessions = await self._list_sessions_from_redis(user_id, limit, offset)
+
+        # 尝试从 L3 补充归档会话
+        l3_sessions: list[dict[str, Any]] = []
+        try:
+            from agent.core.long_term_memory import get_long_term_memory
+
+            ltm = get_long_term_memory()
+            l3_sessions = await ltm.list_user_sessions(user_id, limit, offset)
+        except Exception as e:
+            logger.error("查询归档会话失败: user_id=%s error=%s", user_id, e)
+
+        # 如果 L3 无数据，直接返回 Redis 结果
+        if not l3_sessions:
+            return redis_sessions
+
+        # 如果 Redis 无数据，直接返回 L3 结果
+        if not redis_sessions:
+            return l3_sessions
+
+        # 合并去重：以 session_id 为键，Redis 数据优先（更新鲜）
+        merged: dict[str, dict[str, Any]] = {}
+        for s in l3_sessions:
+            merged[s["session_id"]] = s
+        for s in redis_sessions:
+            merged[s["session_id"]] = s
+
+        # 按更新时间倒序排列
+        sorted_sessions = sorted(
+            merged.values(),
+            key=lambda x: x.get("updated_at", ""),
+            reverse=True,
+        )
+
+        return sorted_sessions[:limit]
+
+    async def _list_sessions_from_redis(
+        self, user_id: str, limit: int = 20, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        """从 Redis 索引查询用户的活跃会话列表
+
+        通过 Redis Sorted Set 索引查找用户的会话ID列表，
+        再逐个获取会话详情。
 
         Args:
             user_id: 用户ID
@@ -236,12 +313,34 @@ class SessionManager:
             会话摘要列表
         """
         try:
-            from agent.core.long_term_memory import get_long_term_memory
+            redis = await self._get_redis()
+            index_key = self._user_sessions_key(user_id)
 
-            ltm = get_long_term_memory()
-            return await ltm.list_user_sessions(user_id, limit, offset)
+            # 按时间倒序获取会话ID（zrevrange: score 从大到小）
+            session_ids = await redis.zrevrange(index_key, offset, offset + limit - 1)
+            if not session_ids:
+                return []
+
+            sessions = []
+            for sid in session_ids:
+                session = await self.get_session(sid)
+                if session is not None:
+                    sessions.append({
+                        "session_id": session.session_id,
+                        "user_id": session.user_id,
+                        "channel": session.channel,
+                        "created_at": session.created_at.isoformat(),
+                        "updated_at": session.updated_at.isoformat(),
+                        "message_count": len(session.message_history),
+                        "active_agents": session.active_agents,
+                    })
+                else:
+                    # 会话已过期，从索引中清理
+                    await redis.zrem(index_key, sid)
+
+            return sessions
         except Exception as e:
-            logger.error("查询归档会话失败: user_id=%s error=%s", user_id, e)
+            logger.warning("从 Redis 索引查询会话失败: user_id=%s error=%s", user_id, e)
             return []
 
     async def close(self) -> None:
@@ -254,6 +353,11 @@ class SessionManager:
     def _session_key(session_id: str) -> str:
         """生成 Redis 存储键"""
         return f"session:{session_id}"
+
+    @staticmethod
+    def _user_sessions_key(user_id: str) -> str:
+        """生成用户会话索引的 Redis 键"""
+        return f"user_sessions:{user_id}"
 
 
 # 全局会话管理器单例

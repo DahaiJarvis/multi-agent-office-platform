@@ -13,7 +13,7 @@ from agent.core.mcp_integration import close_all_connections
 from api.middleware.auth import AuthMiddleware
 from api.middleware.rate_limit import DistributedRateLimitMiddleware
 from api.middleware.tracing import TracingMiddleware
-from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes
+from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes, jwks_routes
 from api.errors import AppException, app_exception_handler, generic_exception_handler
 from observability.logging_config import setup_logging
 from observability.tracing import setup_tracing
@@ -153,6 +153,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("智能文档助手兼容性检查失败（非致命）: %s", e)
 
+    # 初始化用户凭证存储（数据库持久化）
+    try:
+        from security.user_store import get_user_store
+        user_store = get_user_store()
+        await user_store.initialize()
+        logger.info("用户凭证存储初始化完成")
+    except Exception as e:
+        logger.warning("用户凭证存储初始化失败（非致命）: %s", e)
+
     logger.info(
         "应用启动完成: host=%s port=%d env=%s api_version=%s",
         settings.api_host,
@@ -255,6 +264,7 @@ def create_app() -> FastAPI:
     app.include_router(sla_routes.router, prefix=api_prefix)
     app.include_router(region_routes.router, prefix=api_prefix)
     app.include_router(knowledge_proxy_routes.router, prefix=api_prefix)
+    app.include_router(jwks_routes.router)
 
     # Prometheus 指标端点
     from observability.metrics import metrics_endpoint

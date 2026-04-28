@@ -92,7 +92,7 @@ const totalPages = computed(() => Math.ceil(total.value / perPage))
 async function loadKbInfo() {
   try {
     const res = await knowledgeApi.getKnowledgeBase(kbId)
-    kbInfo.value = res.data || {}
+    kbInfo.value = res.data?.data || res.data || {}
   } catch (err) {
     ElMessage.error('加载知识库信息失败')
   }
@@ -102,8 +102,9 @@ async function loadDocuments() {
   loading.value = true
   try {
     const res = await knowledgeApi.listDocuments(kbId, page.value, perPage)
-    documents.value = res.data?.documents || res.data?.items || []
-    total.value = res.data?.total || documents.value.length
+    const payload = res.data?.data || res.data
+    documents.value = payload?.documents || payload?.items || []
+    total.value = payload?.total || documents.value.length
   } catch (err) {
     ElMessage.error('加载文档列表失败')
   } finally {

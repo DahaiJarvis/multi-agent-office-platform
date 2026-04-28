@@ -281,8 +281,10 @@ class LongTermMemory:
                         "user_id": row["user_id"],
                         "channel": row["channel"],
                         "context_summary": row["context_summary"],
-                        "archived_at": row["archived_at"].isoformat() if row["archived_at"] else "",
+                        "created_at": row["archived_at"].isoformat() if row["archived_at"] else "",
+                        "updated_at": row["archived_at"].isoformat() if row["archived_at"] else "",
                         "message_count": row["message_count"],
+                        "active_agents": [],
                     })
 
                 return sessions

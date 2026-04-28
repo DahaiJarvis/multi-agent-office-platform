@@ -10,14 +10,10 @@ from enum import Enum
 from typing import Any
 
 from autogen_agentchat.agents import AssistantAgent
-from autogen_agentchat.conditions import TextMentionTermination, MaxMessageTermination
-from autogen_agentchat.teams import SelectorGroupChat
 from pydantic import BaseModel, Field
 
 from agent.core.model_client import get_supervisor_client, get_lightweight_client
-from agent.core.mcp_integration import load_agent_tools
 from observability.metrics import record_agent_call
-from observability.tracing import langfuse_tracer
 
 logger = logging.getLogger(__name__)
 

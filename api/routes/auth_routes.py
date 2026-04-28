@@ -4,10 +4,10 @@
 支持 JWT 基础认证和 OAuth2.0/OIDC SSO 企业身份集成。
 """
 
-import hashlib
 import logging
 import time
 
+import bcrypt
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
@@ -18,16 +18,15 @@ from security.auth import (
     verify_token,
     extract_token_from_header,
     revoke_token_async,
-    revoke_all_user_tokens,
 )
 from security.audit import record_auth_audit
+from security.user_store import get_user_store
 from security.sso import (
     SSOProviderType,
     build_sso_authorization,
     handle_sso_callback,
     map_sso_user_to_local,
     list_sso_providers,
-    init_sso_providers_from_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,24 +66,80 @@ class LogoutRequest(BaseModel):
 
 
 def _hash_password(password: str) -> str:
-    """密码哈希（生产环境应使用 bcrypt/argon2）"""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """使用 bcrypt 对密码进行哈希
+
+    bcrypt 自带盐值，计算成本因子为 12，可有效抵御暴力破解。
+    返回值为 UTF-8 解码的哈希字符串，便于存储和比对。
+
+    Args:
+        password: 明文密码
+
+    Returns:
+        bcrypt 哈希字符串
+    """
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
 
 
 def _verify_password(password: str, password_hash: str) -> bool:
-    """验证密码"""
-    return _hash_password(password) == password_hash
+    """验证密码是否匹配 bcrypt 哈希
+
+    同时兼容旧版 SHA-256 哈希：如果哈希长度为 64（SHA-256 特征），
+    则使用 SHA-256 比对并自动升级为 bcrypt 哈希。
+
+    Args:
+        password: 明文密码
+        password_hash: 存储的哈希值（bcrypt 或旧版 SHA-256）
+
+    Returns:
+        密码是否匹配
+    """
+    if len(password_hash) == 64 and all(c in "0123456789abcdef" for c in password_hash):
+        # 旧版 SHA-256 哈希兼容
+        import hashlib
+        sha256_hash = hashlib.sha256(password.encode()).hexdigest()
+        if sha256_hash == password_hash:
+            # 自动升级：将旧哈希替换为 bcrypt
+            _upgrade_user_password_hash(password)
+            return True
+        return False
+
+    return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
 
 
-# 模拟用户凭证存储（生产环境替换为企业用户中心）
-# key: user_id, value: {password_hash, roles}
-_USER_STORE: dict[str, dict] = {
-    "admin001": {"password_hash": _hash_password("admin123"), "roles": ["admin"]},
-    "mgr001": {"password_hash": _hash_password("mgr123"), "roles": ["manager"]},
-    "hr001": {"password_hash": _hash_password("hr123"), "roles": ["hr_specialist"]},
-    "fin001": {"password_hash": _hash_password("fin123"), "roles": ["finance"]},
-    "emp001": {"password_hash": _hash_password("emp123"), "roles": ["employee"]},
-}
+def _upgrade_user_password_hash(password: str) -> None:
+    """将旧版 SHA-256 哈希升级为 bcrypt
+
+    在用户存储中找到使用 SHA-256 哈希且密码匹配的用户，
+    将其哈希升级为 bcrypt 并持久化到数据库。
+
+    Args:
+        password: 明文密码
+    """
+    import hashlib
+    sha256_hash = hashlib.sha256(password.encode()).hexdigest()
+    store = get_user_store()
+    for user_id, user_record in store._cache.items():
+        if user_record.password_hash == sha256_hash:
+            new_hash = _hash_password(password)
+            store._cache[user_id].password_hash = new_hash
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(store.update_password_hash(user_id, new_hash))
+            except RuntimeError:
+                pass
+            logger.info("用户密码哈希已升级为 bcrypt: user_id=%s", user_id)
+            break
+
+
+# 内存用户存储（启动时从数据库加载，作为 L1 缓存使用）
+# 数据库不可用时作为降级存储
+_USER_STORE: dict[str, dict] = {}
+
+# 统一身份映射表：SSO 外部标识 -> 本地 uid
+# 用于将不同 SSO 提供者的用户映射到统一的全局用户标识
+# key 格式: "{provider_type}:{external_id}"，value 为本地 user_id
+_USER_IDENTITIES: dict[str, str] = {}
 
 # 登录失败计数（防暴力破解）
 _login_fail_count: dict[str, list[float]] = {}
@@ -121,7 +176,7 @@ def _record_login_failure(user_id: str) -> None:
 def _get_user_roles(user_id: str) -> list[str]:
     """获取用户角色
 
-    优先从用户存储获取，降级使用前缀推断。
+    优先从数据库用户存储获取，降级使用前缀推断。
 
     Args:
         user_id: 用户ID
@@ -129,9 +184,10 @@ def _get_user_roles(user_id: str) -> list[str]:
     Returns:
         角色列表
     """
-    user = _USER_STORE.get(user_id)
-    if user:
-        return user.get("roles", ["employee"])
+    store = get_user_store()
+    record = store._cache.get(user_id)
+    if record:
+        return record.roles
 
     if user_id.startswith("admin"):
         return ["admin"]
@@ -170,10 +226,11 @@ async def login(request: LoginRequest) -> LoginResponse:
         )
         raise AppException(ErrorCode.LOGIN_RATE_LIMITED, message="登录尝试过于频繁，请5分钟后重试")
 
-    # 验证用户凭证
-    user = _USER_STORE.get(request.user_id)
-    if user:
-        if not _verify_password(request.password, user["password_hash"]):
+    # 验证用户凭证（从数据库查询）
+    store = get_user_store()
+    user_record = await store.get_user(request.user_id)
+    if user_record:
+        if not _verify_password(request.password, user_record.password_hash):
             _record_login_failure(request.user_id)
             record_auth_audit(
                 trace_id="",
@@ -402,15 +459,27 @@ async def sso_callback(request: SSOCallbackRequest) -> LoginResponse:
         logger.error("SSO 用户映射失败: %s", e)
         raise AppException(ErrorCode.SSO_USER_MAPPING_FAILED, message="SSO 用户映射失败")
 
+    # 统一身份映射：确保 SSO 用户的 user_id 作为全局唯一的 sub
+    # 查找或注册 SSO 外部标识到本地 uid 的映射
+    identity_key = f"{request.provider}:{sso_result.user_info.external_id}"
+    if identity_key in _USER_IDENTITIES:
+        unified_uid = _USER_IDENTITIES[identity_key]
+        logger.info("SSO 用户身份映射命中: %s -> %s", identity_key, unified_uid)
+    else:
+        unified_uid = local_user["user_id"]
+        _USER_IDENTITIES[identity_key] = unified_uid
+        logger.info("SSO 用户身份映射注册: %s -> %s", identity_key, unified_uid)
+
+    # 使用统一 uid 签发 Token，确保 sub 与 user_id 一致
     token_pair = create_token_pair(
-        user_id=local_user["user_id"],
+        user_id=unified_uid,
         roles=local_user["roles"],
         departments=local_user.get("departments", []),
     )
 
     record_auth_audit(
         trace_id="",
-        user_id=local_user["user_id"],
+        user_id=unified_uid,
         channel=request.provider,
         status="success",
         detail=f"SSO 登录成功: provider={request.provider} external_id={sso_result.user_info.external_id}",
@@ -421,6 +490,6 @@ async def sso_callback(request: SSOCallbackRequest) -> LoginResponse:
         refresh_token=token_pair.refresh_token,
         token_type=token_pair.token_type,
         expires_in=token_pair.expires_in,
-        user_id=local_user["user_id"],
+        user_id=unified_uid,
         roles=local_user["roles"],
     )

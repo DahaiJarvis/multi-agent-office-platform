@@ -7,7 +7,7 @@
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -117,7 +117,7 @@ def load_enterprise_config(prefix: str) -> EnterpriseAPIConfig:
     Returns:
         EnterpriseAPIConfig 实例
     """
-    base_url = os.getenv(f"{prefix}_API_URL", f"http://localhost:3000/api")
+    base_url = os.getenv(f"{prefix}_API_URL", "http://localhost:3000/api")
     token = os.getenv(f"{prefix}_API_TOKEN", "")
     timeout = float(os.getenv(f"{prefix}_API_TIMEOUT", "10.0"))
     return EnterpriseAPIConfig(base_url=base_url, token=token, timeout=timeout)

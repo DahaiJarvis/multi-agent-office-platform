@@ -8,8 +8,6 @@ from agent.core.search_engine import (
     enterprise_search,
     SearchRequest,
     SearchResponse,
-    SearchType,
-    DataSource,
 )
 
 logger = logging.getLogger(__name__)

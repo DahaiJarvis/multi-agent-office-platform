@@ -16,19 +16,41 @@ export interface KnowledgeBase {
   id: string
   name: string
   description: string
-  access_level: 'private' | 'team' | 'public'
+  access_level: string
   document_count: number
   created_at: string
   updated_at: string
+  is_public?: boolean
+  owner_id?: string
+  status?: string
+  user_permission?: string
+  department_id?: string | null
+  department_name?: string | null
+  total_chunks?: number
+  chunk_size?: number
+  chunk_overlap?: number
+  chunk_strategy?: string
+  similarity_threshold?: number
+  top_k?: number
 }
 
-/** 知识库列表响应接口 */
-export interface KnowledgeBaseListResponse {
-  items: KnowledgeBase[]
+/** IDA 统一响应包装层 */
+export interface IdaResponse<T> {
+  code: number
+  data: T
+  message?: string
+}
+
+/** 知识库列表数据接口（IDA data 字段内容） */
+export interface KnowledgeBaseListData {
+  knowledge_bases: KnowledgeBase[]
   total: number
   page: number
   per_page: number
 }
+
+/** 知识库列表响应接口（完整 IDA 响应） */
+export type KnowledgeBaseListResponse = IdaResponse<KnowledgeBaseListData>
 
 /** 文档信息接口 */
 export interface Document {
@@ -40,12 +62,12 @@ export interface Document {
 }
 
 /** 文档列表响应接口 */
-export interface DocumentListResponse {
-  items: Document[]
+export type DocumentListResponse = IdaResponse<{
+  documents: Document[]
   total: number
   page: number
   per_page: number
-}
+}>
 
 /** 文件解析结果项接口 */
 export interface ParseResultItem {

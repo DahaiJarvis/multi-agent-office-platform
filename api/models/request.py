@@ -12,6 +12,7 @@ class ChatRequest(BaseModel):
     channel: str = Field(default="web", description="接入渠道: web/wechat/dingtalk")
     image_urls: list[str] = Field(default_factory=list, description="图像URL列表（多模态输入）")
     audio_url: str = Field(default="", description="语音URL（多模态输入）")
+    knowledge_base_id: str | None = Field(default=None, description="知识库ID，选择知识库后直接路由到知识库问答")
 
 
 class SessionCreateRequest(BaseModel):

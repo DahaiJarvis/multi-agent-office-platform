@@ -13,7 +13,6 @@ from api.errors import AppException, ErrorCode
 from security.auth import require_roles
 from security.tenant import (
     Tenant,
-    TenantManager,
     TenantStatus,
     TenantPlan,
     IsolationLevel,

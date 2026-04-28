@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     # 兼容旧配置：jwt_secret_key 作为 fallback，仅在 HS256 模式下使用
     jwt_secret_key: str = Field(default="", alias="JWT_SECRET_KEY")
 
+    # OIDC 标准配置（统一身份源）
+    # Token 签发者标识，子系统验证 Token 时校验此值
+    jwt_issuer: str = Field(default="multi-agent-platform", alias="JWT_ISSUER")
+    # Token 受众列表（逗号分隔），包含所有授权访问的子系统标识
+    # 例如: "platform,ida-service" 表示 Token 可被主平台和 IDA 服务验证
+    jwt_audiences: str = Field(default="platform,ida-service", alias="JWT_AUDIENCES")
+
     # SSO 企业身份集成
     sso_enabled: bool = Field(default=False, alias="SSO_ENABLED")
 
@@ -176,6 +183,12 @@ class Settings(BaseSettings):
     # 取值范围: 60~86400，默认 3600（1 小时）
     ida_token_ttl_seconds: int = Field(default=3600, alias="IDA_TOKEN_TTL_SECONDS")
 
+    # IDA 认证模式：legacy(映射Token) / direct(透传Token)
+    # legacy: 使用 RSA 私钥签发映射 Token，IDA 使用 RSA 公钥验证（兼容旧系统）
+    # direct: 直接透传主平台 Token，IDA 通过 JWKS 端点验证（推荐，统一身份源）
+    # 改造期间使用 legacy 模式保持兼容，IDA 改造完成后切换为 direct 模式
+    ida_auth_mode: str = Field(default="legacy", alias="IDA_AUTH_MODE")
+
     # RSA 非对称密钥 JWT 认证配置
     platform_jwt_private_key: str = Field(default="", alias="PLATFORM_JWT_PRIVATE_KEY")
     platform_jwt_issuer: str = Field(default="multi-agent-platform", alias="PLATFORM_JWT_ISSUER")
@@ -228,6 +241,22 @@ class Settings(BaseSettings):
             if self.platform_jwt_private_key and not self.platform_jwt_private_key.startswith("-----BEGIN"):
                 logger.warning("PLATFORM_JWT_PRIVATE_KEY 格式无效: 缺少 PEM 头标记")
                 self.platform_jwt_private_key = ""
+
+        # IDA 认证模式校验
+        if self.ida_auth_mode not in ("legacy", "direct"):
+            logger.warning("IDA_AUTH_MODE 配置无效: %s，使用默认值 legacy", self.ida_auth_mode)
+            self.ida_auth_mode = "legacy"
+
+        # direct 模式下校验 OIDC 配置完整性
+        if self.ida_auth_mode == "direct":
+            if not self.jwt_issuer:
+                logger.warning("IDA_AUTH_MODE=direct 但 JWT_ISSUER 未配置，使用默认值")
+                self.jwt_issuer = "multi-agent-platform"
+            if not self.jwt_audiences:
+                logger.warning("IDA_AUTH_MODE=direct 但 JWT_AUDIENCES 未配置，使用默认值")
+                self.jwt_audiences = "platform,ida-service"
+            if self.jwt_algorithm != "RS256":
+                logger.warning("IDA_AUTH_MODE=direct 建议使用 RS256 算法，当前: %s", self.jwt_algorithm)
 
         return self
 

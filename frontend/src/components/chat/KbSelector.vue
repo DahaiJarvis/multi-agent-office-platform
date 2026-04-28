@@ -78,7 +78,8 @@ onMounted(async () => {
   loading.value = true
   try {
     const res = await knowledgeApi.listKnowledgeBases()
-    knowledgeBases.value = res.data?.knowledge_bases || res.data?.items || []
+    const payload = res.data?.data || res.data
+    knowledgeBases.value = payload?.knowledge_bases || payload?.items || []
   } catch (err) {
     ElMessage.error('加载知识库列表失败')
   } finally {

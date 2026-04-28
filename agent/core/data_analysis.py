@@ -11,14 +11,12 @@
 """
 
 import logging
-import re
 import time
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from agent.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 

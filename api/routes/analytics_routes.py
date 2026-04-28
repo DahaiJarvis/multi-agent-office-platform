@@ -9,8 +9,6 @@ from agent.core.data_analysis import (
     NLQueryRequest,
     AnalysisReport,
     detect_query_intent,
-    suggest_visualization,
-    QueryIntent,
 )
 
 logger = logging.getLogger(__name__)

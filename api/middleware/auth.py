@@ -28,6 +28,8 @@ SKIP_AUTH_PATHS = {
     "/auth/sso/authorize",
     "/auth/sso/callback",
     "/auth/sso/providers",
+    "/.well-known/openid-configuration",
+    "/.well-known/jwks.json",
     "/metrics",
 }
 
@@ -82,9 +84,32 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
 
         # 开发模式降级：从 X-User-ID 头提取用户信息
+        # 需验证用户存在于用户存储中，防止伪造身份
         if settings.environment == "development":
             user_id = request.headers.get("X-User-ID", "dev-user")
             user_roles_str = request.headers.get("X-User-Roles", "employee")
+
+            # 验证用户是否存在于用户存储中
+            try:
+                from security.user_store import get_user_store
+                store = get_user_store()
+                user_exists = await store.user_exists(user_id)
+                if not user_exists:
+                    record_auth_audit(
+                        trace_id=request_id,
+                        user_id=user_id,
+                        channel=request.headers.get("X-Channel", "unknown"),
+                        status="failed",
+                        detail=f"开发模式降级: 用户 {user_id} 不存在于用户存储中",
+                    )
+                    return JSONResponse(
+                        status_code=401,
+                        content={"error": "unauthorized", "message": f"用户 {user_id} 不存在"},
+                    )
+            except Exception:
+                # 用户存储不可用时，允许通过（避免阻塞开发调试）
+                pass
+
             request.state.user_id = user_id
             request.state.user_roles = [r.strip() for r in user_roles_str.split(",")]
             request.state.user_departments = []

@@ -15,7 +15,6 @@
 
 import logging
 import re
-import time
 from enum import Enum
 from typing import Any
 
@@ -121,41 +120,40 @@ def _rule_engine_check(content: str) -> DetectionResult:
 # ==================== 第二层：启发式语义分析 ====================
 
 
-def _heuristic_check(content: str) -> DetectionResult:
-    """第二层：启发式语义分析
+def _check_keyword_density(content: str, keywords: list[str], threshold: int, signal_name: str, score_add: float) -> tuple[list[str], float]:
+    """检查关键词密度并累加评分
 
-    通过文本特征统计和结构异常检测识别潜在注入：
-    - 指令性语言密度
-    - 系统相关关键词密度
-    - 文本结构异常（过多换行、特殊符号）
-    - 语言混合异常
+    Args:
+        content: 待检测文本
+        keywords: 关键词列表
+        threshold: 触发阈值
+        signal_name: 信号名称
+        score_add: 匹配时增加的评分
+
+    Returns:
+        (信号列表, 累加评分)
+    """
+    lower_content = content.lower()
+    count = sum(1 for kw in keywords if kw in lower_content)
+    if count >= threshold:
+        return [signal_name], score_add
+    return [], 0.0
+
+
+def _check_text_structure(content: str) -> tuple[list[str], float]:
+    """检查文本结构异常
+
+    检测换行比例和特殊字符比例是否异常。
+
+    Args:
+        content: 待检测文本
+
+    Returns:
+        (信号列表, 累加评分)
     """
     signals: list[str] = []
     score = 0.0
 
-    # 指令性语言密度
-    imperative_words = [
-        "must", "should", "need to", "have to", "required to",
-        "always", "never", "do not", "don't", "stop", "start",
-        "begin", "end", "continue", "repeat",
-    ]
-    imperative_count = sum(1 for w in imperative_words if w in content.lower())
-    if imperative_count >= 3:
-        signals.append("high_imperative_density")
-        score += 0.2
-
-    # 系统相关关键词密度
-    system_keywords = [
-        "system", "prompt", "instruction", "rule", "configuration",
-        "setting", "admin", "root", "privilege", "access",
-        "bypass", "override", "jailbreak", "hack", "exploit",
-    ]
-    system_count = sum(1 for kw in system_keywords if kw in content.lower())
-    if system_count >= 3:
-        signals.append("high_system_keyword_density")
-        score += 0.3
-
-    # 文本结构异常
     newline_ratio = content.count("\n") / max(len(content), 1)
     if newline_ratio > 0.15:
         signals.append("abnormal_newline_ratio")
@@ -167,29 +165,80 @@ def _heuristic_check(content: str) -> DetectionResult:
         signals.append("abnormal_special_char_ratio")
         score += 0.15
 
+    return signals, score
+
+
+def _check_pattern_match(content: str, patterns: list[str], signal_name: str, score_add: float) -> tuple[list[str], float]:
+    """检查正则模式匹配
+
+    Args:
+        content: 待检测文本
+        patterns: 正则表达式列表
+        signal_name: 信号名称
+        score_add: 匹配时增加的评分
+
+    Returns:
+        (信号列表, 累加评分)
+    """
+    for pattern in patterns:
+        if re.search(pattern, content, re.IGNORECASE):
+            return [signal_name], score_add
+    return [], 0.0
+
+
+def _heuristic_check(content: str) -> DetectionResult:
+    """第二层：启发式语义分析
+
+    通过文本特征统计和结构异常检测识别潜在注入：
+    - 指令性语言密度
+    - 系统相关关键词密度
+    - 文本结构异常（过多换行、特殊符号）
+    - 角色切换信号
+    - 上下文边界攻击
+    """
+    signals: list[str] = []
+    score = 0.0
+
+    # 指令性语言密度
+    s, sc = _check_keyword_density(content, [
+        "must", "should", "need to", "have to", "required to",
+        "always", "never", "do not", "don't", "stop", "start",
+        "begin", "end", "continue", "repeat",
+    ], 3, "high_imperative_density", 0.2)
+    signals.extend(s)
+    score += sc
+
+    # 系统相关关键词密度
+    s, sc = _check_keyword_density(content, [
+        "system", "prompt", "instruction", "rule", "configuration",
+        "setting", "admin", "root", "privilege", "access",
+        "bypass", "override", "jailbreak", "hack", "exploit",
+    ], 3, "high_system_keyword_density", 0.3)
+    signals.extend(s)
+    score += sc
+
+    # 文本结构异常
+    s, sc = _check_text_structure(content)
+    signals.extend(s)
+    score += sc
+
     # 角色切换信号
-    role_switch_patterns = [
+    s, sc = _check_pattern_match(content, [
         r"as\s+an?\s+(AI|LLM|GPT|Claude|assistant|model)",
         r"you\s+(are|were|become)\s+",
         r"your\s+(new|real|true)\s+(name|role|identity|purpose)",
-    ]
-    for pattern in role_switch_patterns:
-        if re.search(pattern, content, re.IGNORECASE):
-            signals.append("role_switch_signal")
-            score += 0.2
-            break
+    ], "role_switch_signal", 0.2)
+    signals.extend(s)
+    score += sc
 
     # 上下文边界攻击
-    boundary_patterns = [
+    s, sc = _check_pattern_match(content, [
         r"---+\s*(end|start|system|user|assistant)",
         r"===+\s*(end|start|system|user|assistant)",
         r"\[END\s+OF\s+\w+\]",
-    ]
-    for pattern in boundary_patterns:
-        if re.search(pattern, content, re.IGNORECASE):
-            signals.append("boundary_attack")
-            score += 0.25
-            break
+    ], "boundary_attack", 0.25)
+    signals.extend(s)
+    score += sc
 
     score = min(1.0, score)
     threat = ThreatLevel.SAFE

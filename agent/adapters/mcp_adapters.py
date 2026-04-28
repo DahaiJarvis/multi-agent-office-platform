@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from agent.core.config import get_settings
 

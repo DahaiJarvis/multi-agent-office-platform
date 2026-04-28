@@ -4,7 +4,6 @@
 通过 MCP 协议供 Agent 调用，底层对接 OA 系统标准 API。
 """
 
-import json
 import logging
 from typing import Any
 

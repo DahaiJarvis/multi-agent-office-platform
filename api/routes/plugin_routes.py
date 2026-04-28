@@ -16,7 +16,6 @@ from agent.core.plugin_system import (
     execute_hooks,
     search_marketplace,
     install_from_marketplace,
-    publish_to_marketplace,
     PluginManifest,
     PluginInstance,
     PluginStatus,

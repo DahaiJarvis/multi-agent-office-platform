@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from security.permission import check_permission, is_sensitive_action
+from security.permission import check_permission
 from security.desensitize import desensitize_content, has_pii, detect_pii
 
 logger = logging.getLogger(__name__)

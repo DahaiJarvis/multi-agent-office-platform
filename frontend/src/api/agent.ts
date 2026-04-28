@@ -5,6 +5,7 @@ export interface ChatParams {
   session_id?: string
   user_id: string
   channel?: string
+  knowledge_base_id?: string
 }
 
 export interface ChatResult {
@@ -71,6 +72,7 @@ export const agentApi = {
 
         const decoder = new TextDecoder()
         let buffer = ''
+        let currentEvent = ''
 
         while (true) {
           const { done, value } = await reader.read()
@@ -81,13 +83,30 @@ export const agentApi = {
           buffer = lines.pop() || ''
 
           for (const line of lines) {
+            // 解析 SSE event 行，记录当前事件类型
+            if (line.startsWith('event: ')) {
+              currentEvent = line.slice(7).trim()
+              continue
+            }
+
             if (line.startsWith('data: ')) {
               try {
                 const payload = JSON.parse(line.slice(6))
+                // 将 SSE event 类型注入 payload，便于上层区分处理
+                if (currentEvent) {
+                  payload._sseEvent = currentEvent
+                }
+                // 错误事件特殊处理
+                if (currentEvent === 'error' || payload.event === 'error') {
+                  onError(payload)
+                  continue
+                }
                 onChunk(payload)
               } catch {
                 // skip malformed
               }
+              // data 行处理完毕后重置 event 类型
+              currentEvent = ''
             }
           }
         }

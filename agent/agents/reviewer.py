@@ -6,7 +6,6 @@
 """
 
 import logging
-from typing import Any
 
 from autogen_agentchat.agents import AssistantAgent
 

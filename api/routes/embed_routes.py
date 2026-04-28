@@ -154,9 +154,6 @@ async def generate_embed_token(request: Request, body: EmbedTokenRequest) -> Emb
         "created_by": getattr(getattr(request.state, "auth_payload", None), "user_id", "unknown"),
     }
 
-    settings = get_settings()
-    api_base = f"http://{settings.api_host}:{settings.api_port}" if settings.environment == "development" else ""
-
     return EmbedTokenResponse(
         token=token,
         expires_in=EMBED_TOKEN_TTL,
