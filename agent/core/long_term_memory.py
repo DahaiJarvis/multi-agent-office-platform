@@ -105,6 +105,34 @@ class LongTermMemory:
                 CREATE INDEX IF NOT EXISTS idx_sessions_archived_at ON sessions(archived_at)
             """))
 
+            # 用户知识表（After-turn 知识沉淀）
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS user_knowledge (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id VARCHAR(64) NOT NULL,
+                    tenant_id VARCHAR(64) DEFAULT '',
+                    knowledge_type VARCHAR(32) NOT NULL,
+                    content TEXT NOT NULL,
+                    source_session_id VARCHAR(36) DEFAULT '',
+                    ttl_days INT DEFAULT 30,
+                    weight FLOAT DEFAULT 1.0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    expires_at TIMESTAMP
+                )
+            """))
+
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_user_knowledge_user_id ON user_knowledge(user_id)
+            """))
+
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_user_knowledge_type ON user_knowledge(knowledge_type)
+            """))
+
+            await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_user_knowledge_tenant ON user_knowledge(tenant_id)
+            """))
+
     async def archive_session(
         self,
         session_id: str,
@@ -391,6 +419,215 @@ class LongTermMemory:
         except Exception as e:
             logger.error("更新上下文摘要失败: session_id=%s error=%s", session_id, e)
             return False
+
+    async def store_user_knowledge(
+        self,
+        user_id: str,
+        knowledge_type: str,
+        content: str,
+        source_session_id: str,
+        ttl_days: int = 30,
+        tenant_id: str = "",
+    ) -> bool:
+        """存储用户知识
+
+        将 After-turn 提取的知识写入 user_knowledge 表。
+        支持偏好、决策、事实、待办等类型。
+
+        Args:
+            user_id: 用户ID
+            knowledge_type: 知识类型 (preference/decision/fact/todo)
+            content: 知识内容
+            source_session_id: 来源会话ID
+            ttl_days: 保留天数，默认30天
+            tenant_id: 租户ID
+
+        Returns:
+            是否存储成功
+        """
+        if not tenant_id:
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+
+        pool = await self._get_pool()
+        if pool is None:
+            return False
+
+        try:
+            async with pool() as session:
+                from sqlalchemy import text
+                from datetime import timedelta
+
+                expires_at = datetime.now() + timedelta(days=ttl_days)
+
+                await session.execute(
+                    text("""
+                        INSERT INTO user_knowledge
+                            (user_id, tenant_id, knowledge_type, content, source_session_id, ttl_days, expires_at)
+                        VALUES
+                            (:uid, :tid, :ktype, :content, :sid, :ttl, :exp)
+                    """),
+                    {
+                        "uid": user_id,
+                        "tid": tenant_id,
+                        "ktype": knowledge_type,
+                        "content": content,
+                        "sid": source_session_id,
+                        "ttl": ttl_days,
+                        "exp": expires_at,
+                    },
+                )
+                await session.commit()
+
+            logger.info(
+                "用户知识已存储: user=%s type=%s content=%.50s",
+                user_id, knowledge_type, content,
+            )
+            return True
+
+        except Exception as e:
+            logger.error("存储用户知识失败: user=%s error=%s", user_id, e)
+            return False
+
+    async def query_user_knowledge(
+        self,
+        user_id: str,
+        query: str = "",
+        knowledge_type: str | None = None,
+        limit: int = 10,
+        tenant_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """查询用户知识
+
+        支持按类型过滤和关键词搜索。
+        过期知识自动降权（weight 降为 0.5）。
+
+        Args:
+            user_id: 用户ID
+            query: 搜索关键词（可选）
+            knowledge_type: 知识类型过滤（可选）
+            limit: 返回数量上限
+            tenant_id: 租户ID
+
+        Returns:
+            知识列表
+        """
+        if not tenant_id:
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+
+        pool = await self._get_pool()
+        if pool is None:
+            return []
+
+        try:
+            async with pool() as session:
+                from sqlalchemy import text
+
+                conditions = ["user_id = :uid"]
+                params: dict[str, Any] = {"uid": user_id, "limit": limit}
+
+                if tenant_id:
+                    conditions.append("tenant_id = :tid")
+                    params["tid"] = tenant_id
+
+                if knowledge_type:
+                    conditions.append("knowledge_type = :ktype")
+                    params["ktype"] = knowledge_type
+
+                if query:
+                    conditions.append("content ILIKE :q")
+                    params["q"] = f"%{query}%"
+
+                where_clause = " AND ".join(conditions)
+
+                result = await session.execute(
+                    text(f"""
+                        SELECT id, user_id, knowledge_type, content,
+                               source_session_id, weight, created_at, expires_at
+                        FROM user_knowledge
+                        WHERE {where_clause}
+                        ORDER BY weight DESC, created_at DESC
+                        LIMIT :limit
+                    """),
+                    params,
+                )
+
+                knowledge_list = []
+                for row in result.mappings().all():
+                    knowledge_list.append({
+                        "id": row["id"],
+                        "user_id": row["user_id"],
+                        "knowledge_type": row["knowledge_type"],
+                        "content": row["content"],
+                        "source_session_id": row["source_session_id"],
+                        "weight": row["weight"],
+                        "created_at": row["created_at"].isoformat() if row["created_at"] else "",
+                        "expires_at": row["expires_at"].isoformat() if row["expires_at"] else "",
+                    })
+
+                return knowledge_list
+
+        except Exception as e:
+            logger.error("查询用户知识失败: user=%s error=%s", user_id, e)
+            return []
+
+    async def expire_user_knowledge(self, user_id: str) -> int:
+        """过期知识降权/清除
+
+        将已过期的知识 weight 降为 0.5（降权），
+        超过 TTL 2 倍时间的知识直接删除。
+
+        Args:
+            user_id: 用户ID
+
+        Returns:
+            处理的知识条数
+        """
+        pool = await self._get_pool()
+        if pool is None:
+            return 0
+
+        try:
+            async with pool() as session:
+                from sqlalchemy import text
+
+                # 过期知识降权
+                await session.execute(
+                    text("""
+                        UPDATE user_knowledge SET weight = 0.5
+                        WHERE user_id = :uid
+                          AND expires_at < NOW()
+                          AND weight > 0.5
+                    """),
+                    {"uid": user_id},
+                )
+
+                # 超过 TTL 2 倍时间删除
+                result = await session.execute(
+                    text("""
+                        DELETE FROM user_knowledge
+                        WHERE user_id = :uid
+                          AND expires_at < NOW() - INTERVAL '1 day' * ttl_days * 2
+                    """),
+                    {"uid": user_id},
+                )
+
+                await session.commit()
+                deleted = result.rowcount if result else 0
+                if deleted > 0:
+                    logger.info("过期知识清理: user=%s deleted=%d", user_id, deleted)
+                return deleted
+
+        except Exception as e:
+            logger.error("过期知识处理失败: user=%s error=%s", user_id, e)
+            return 0
 
     async def close(self) -> None:
         """关闭连接池"""

@@ -42,7 +42,11 @@ class MetricType(str, Enum):
 
 
 class SLADefinition(BaseModel):
-    """SLA 定义"""
+    """SLA 定义
+
+    包含性能承诺和预算额度，SLA 层级越高，
+    预算额度越大，可用的模型层级越高。
+    """
 
     tier: SLATier
     availability_target: float = Field(default=99.9, description="可用性目标 (%)")
@@ -54,6 +58,13 @@ class SLADefinition(BaseModel):
 
     support_response_hours: int = Field(default=8, description="支持响应时间 (小时)")
     incident_resolution_hours: int = Field(default=24, description="故障恢复时间 (小时)")
+
+    # 预算额度
+    user_daily_budget: int = Field(default=500000, description="用户日 Token 预算")
+    session_budget: int = Field(default=100000, description="会话 Token 预算")
+    tenant_daily_budget: int = Field(default=5000000, description="租户日 Token 预算")
+    agent_per_call_budget: int = Field(default=50000, description="Agent 单次调用 Token 预算")
+    max_model_tier: str = Field(default="max", description="最高可用模型层级")
 
 
 class MetricSample(BaseModel):
@@ -112,6 +123,11 @@ _SLA_DEFINITIONS: dict[SLATier, SLADefinition] = {
         throughput_target_rps=50,
         support_response_hours=24,
         incident_resolution_hours=48,
+        user_daily_budget=100000,
+        session_budget=30000,
+        tenant_daily_budget=1000000,
+        agent_per_call_budget=20000,
+        max_model_tier="turbo",
     ),
     SLATier.PROFESSIONAL: SLADefinition(
         tier=SLATier.PROFESSIONAL,
@@ -123,6 +139,11 @@ _SLA_DEFINITIONS: dict[SLATier, SLADefinition] = {
         throughput_target_rps=200,
         support_response_hours=8,
         incident_resolution_hours=24,
+        user_daily_budget=500000,
+        session_budget=100000,
+        tenant_daily_budget=5000000,
+        agent_per_call_budget=50000,
+        max_model_tier="plus",
     ),
     SLATier.ENTERPRISE: SLADefinition(
         tier=SLATier.ENTERPRISE,
@@ -134,6 +155,11 @@ _SLA_DEFINITIONS: dict[SLATier, SLADefinition] = {
         throughput_target_rps=1000,
         support_response_hours=1,
         incident_resolution_hours=4,
+        user_daily_budget=2000000,
+        session_budget=500000,
+        tenant_daily_budget=20000000,
+        agent_per_call_budget=100000,
+        max_model_tier="max",
     ),
 }
 
@@ -146,6 +172,65 @@ def get_sla_definition(tier: SLATier) -> SLADefinition:
 def list_sla_definitions() -> list[SLADefinition]:
     """列出所有 SLA 定义"""
     return list(_SLA_DEFINITIONS.values())
+
+
+def get_budget_for_tier(tier: SLATier) -> dict[str, Any]:
+    """获取 SLA 层级对应的预算额度
+
+    Args:
+        tier: SLA 层级
+
+    Returns:
+        预算额度字典
+    """
+    definition = _SLA_DEFINITIONS[tier]
+    return {
+        "tier": tier.value,
+        "user_daily_budget": definition.user_daily_budget,
+        "session_budget": definition.session_budget,
+        "tenant_daily_budget": definition.tenant_daily_budget,
+        "agent_per_call_budget": definition.agent_per_call_budget,
+        "max_model_tier": definition.max_model_tier,
+    }
+
+
+def get_budget_config_for_tier(tier: SLATier) -> Any:
+    """根据 SLA 层级生成 BudgetConfig
+
+    将 SLA 层级的预算额度映射为 TokenBudgetManager 可用的配置。
+
+    Args:
+        tier: SLA 层级
+
+    Returns:
+        BudgetConfig 实例
+    """
+    from agent.core.token_budget import BudgetConfig
+
+    definition = _SLA_DEFINITIONS[tier]
+    return BudgetConfig(
+        user_daily_budget=definition.user_daily_budget,
+        session_budget=definition.session_budget,
+        tenant_daily_budget=definition.tenant_daily_budget,
+        agent_per_call_budget=definition.agent_per_call_budget,
+        enable_auto_downgrade=True,
+    )
+
+
+def get_max_model_tier(tier: SLATier) -> str:
+    """获取 SLA 层级允许的最高模型层级
+
+    在路由选择模型时，需检查用户 SLA 层级是否允许使用该模型。
+    例如 STANDARD 层级只能使用 turbo 模型。
+
+    Args:
+        tier: SLA 层级
+
+    Returns:
+        最高可用模型层级名称
+    """
+    definition = _SLA_DEFINITIONS[tier]
+    return definition.max_model_tier
 
 
 # ==================== 指标采集 ====================

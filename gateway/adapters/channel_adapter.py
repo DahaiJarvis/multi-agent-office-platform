@@ -344,3 +344,126 @@ async def push_notification(
     except Exception as e:
         logger.error("推送通知失败: channel=%s user=%s error=%s", channel, user_id, e)
         return False
+
+
+class ChannelSessionManager:
+    """渠道与会话绑定管理器
+
+    维护渠道维度的会话映射，支持：
+      - 渠道会话亲和：同一用户在同一渠道复用同一会话
+      - 跨渠道会话关联：同一用户在不同渠道的会话可关联
+      - 会话生命周期管理：渠道会话超时自动解绑
+    """
+
+    # 渠道会话超时时间（秒）
+    CHANNEL_SESSION_TTL = 7200
+
+    def __init__(self) -> None:
+        # key: "channel:user_id", value: session_id
+        self._channel_sessions: dict[str, str] = {}
+        # key: "channel:user_id", value: 绑定时间戳
+        self._bind_timestamps: dict[str, float] = {}
+
+    def bind_session(self, channel: str, user_id: str, session_id: str) -> None:
+        """绑定渠道用户到会话
+
+        当用户通过某渠道开始对话时，建立渠道-会话绑定关系。
+        后续同一渠道的请求自动路由到同一会话。
+
+        Args:
+            channel: 渠道名称
+            user_id: 用户ID
+            session_id: 会话ID
+        """
+        key = f"{channel}:{user_id}"
+        self._channel_sessions[key] = session_id
+        self._bind_timestamps[key] = time.time()
+        logger.debug("渠道会话绑定: %s -> %s", key, session_id)
+
+    def unbind_session(self, channel: str, user_id: str) -> None:
+        """解绑渠道用户的会话
+
+        当会话结束或超时时，解除渠道-会话绑定。
+
+        Args:
+            channel: 渠道名称
+            user_id: 用户ID
+        """
+        key = f"{channel}:{user_id}"
+        self._channel_sessions.pop(key, None)
+        self._bind_timestamps.pop(key, None)
+
+    def get_session_id(self, channel: str, user_id: str) -> str | None:
+        """获取渠道用户绑定的会话ID
+
+        如果绑定已超时，自动解绑并返回 None。
+
+        Args:
+            channel: 渠道名称
+            user_id: 用户ID
+
+        Returns:
+            会话ID 或 None
+        """
+        key = f"{channel}:{user_id}"
+        session_id = self._channel_sessions.get(key)
+        if session_id is None:
+            return None
+
+        # 检查绑定是否超时
+        bind_time = self._bind_timestamps.get(key, 0)
+        if time.time() - bind_time > self.CHANNEL_SESSION_TTL:
+            self.unbind_session(channel, user_id)
+            return None
+
+        return session_id
+
+    def get_user_all_sessions(self, user_id: str) -> dict[str, str]:
+        """获取用户在所有渠道的会话绑定
+
+        Args:
+            user_id: 用户ID
+
+        Returns:
+            渠道 -> 会话ID 的映射
+        """
+        result = {}
+        prefix = f":{user_id}"
+        for key, session_id in self._channel_sessions.items():
+            if key.endswith(prefix):
+                channel = key.split(":")[0]
+                result[channel] = session_id
+        return result
+
+    def cleanup_expired(self) -> int:
+        """清理所有过期的渠道会话绑定
+
+        Returns:
+            清理的绑定数量
+        """
+        now = time.time()
+        expired_keys = [
+            key for key, ts in self._bind_timestamps.items()
+            if now - ts > self.CHANNEL_SESSION_TTL
+        ]
+
+        for key in expired_keys:
+            self._channel_sessions.pop(key, None)
+            self._bind_timestamps.pop(key, None)
+
+        if expired_keys:
+            logger.info("清理过期渠道会话绑定: %d 条", len(expired_keys))
+
+        return len(expired_keys)
+
+
+# 全局渠道会话管理器
+_channel_session_manager: ChannelSessionManager | None = None
+
+
+def get_channel_session_manager() -> ChannelSessionManager:
+    """获取全局渠道会话管理器"""
+    global _channel_session_manager
+    if _channel_session_manager is None:
+        _channel_session_manager = ChannelSessionManager()
+    return _channel_session_manager

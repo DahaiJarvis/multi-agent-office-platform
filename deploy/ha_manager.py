@@ -151,6 +151,32 @@ class HealthChecker:
         self._components["llm"] = health
         return health
 
+    async def check_ida(self) -> ComponentHealth:
+        """检查 IDA（智能文档助手）服务可用性"""
+        health = ComponentHealth(name="ida", last_check=time.time())
+        start = time.monotonic()
+        try:
+            import httpx
+            from agent.core.config import get_settings
+
+            settings = get_settings()
+            ida_base_url = getattr(settings, "ida_base_url", "http://localhost:3001")
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(f"{ida_base_url}/api/v1/health")
+                health.latency_ms = (time.monotonic() - start) * 1000
+                if response.status_code == 200:
+                    health.status = HealthStatus.HEALTHY
+                else:
+                    health.status = HealthStatus.DEGRADED
+                    health.error = f"HTTP {response.status_code}"
+        except Exception as e:
+            health.status = HealthStatus.UNHEALTHY
+            health.error = str(e)
+            health.latency_ms = (time.monotonic() - start) * 1000
+
+        self._components["ida"] = health
+        return health
+
     async def full_check(self) -> dict[str, Any]:
         """执行全量健康检查"""
         checks = await asyncio.gather(
@@ -158,6 +184,7 @@ class HealthChecker:
             self.check_postgres(),
             self.check_mcp_registry(),
             self.check_llm(),
+            self.check_ida(),
             return_exceptions=True,
         )
 
@@ -295,15 +322,79 @@ DEGRADATION_RULES: dict[DegradationLevel, dict[str, Any]] = {
 class DegradationManager:
     """服务降级管理器
 
-    根据系统健康状态自动调整降级级别。
+    根据系统健康状态自动调整降级级别，
+    并执行组件级别的降级回调（如切换存储后端、降级模型等）。
     """
+
+    # 组件降级回调注册表
+    # key: 组件名称, value: (on_degraded, on_recovered) 回调元组
+    _degradation_handlers: dict[str, tuple[Any, Any]] = {}
 
     def __init__(self) -> None:
         self._level = DegradationLevel.NORMAL
+        self._component_status: dict[str, HealthStatus] = {}
+
+    @classmethod
+    def register_handler(
+        cls,
+        component: str,
+        on_degraded: Any,
+        on_recovered: Any | None = None,
+    ) -> None:
+        """注册组件降级回调
+
+        Args:
+            component: 组件名称（如 redis、postgres、llm、ida）
+            on_degraded: 降级时调用的异步回调
+            on_recovered: 恢复时调用的异步回调（可选）
+        """
+        cls._degradation_handlers[component] = (on_degraded, on_recovered)
 
     @property
     def level(self) -> DegradationLevel:
         return self._level
+
+    async def evaluate_and_act(self, health_status: dict[str, Any]) -> DegradationLevel:
+        """评估降级级别并自动执行降级/恢复回调
+
+        在 evaluate 的基础上，当检测到组件状态变化时，
+        自动调用注册的降级回调（如切换存储后端）。
+
+        Args:
+            health_status: 健康检查结果
+
+        Returns:
+            当前降级级别
+        """
+        components = health_status.get("components", {})
+
+        # 检测组件状态变化并触发回调
+        for name, info in components.items():
+            status_str = info.get("status", "healthy")
+            new_status = HealthStatus(status_str) if status_str in (s.value for s in HealthStatus) else HealthStatus.HEALTHY
+            old_status = self._component_status.get(name)
+
+            if old_status != new_status:
+                logger.info("组件状态变化: %s %s -> %s", name, old_status, new_status)
+                self._component_status[name] = new_status
+
+                handlers = self._degradation_handlers.get(name)
+                if handlers:
+                    on_degraded, on_recovered = handlers
+                    try:
+                        if new_status in (HealthStatus.UNHEALTHY, HealthStatus.DEGRADED):
+                            if on_degraded:
+                                await on_degraded()
+                                logger.info("已执行 %s 降级回调", name)
+                        elif new_status == HealthStatus.HEALTHY and old_status is not None:
+                            if on_recovered:
+                                await on_recovered()
+                                logger.info("已执行 %s 恢复回调", name)
+                    except Exception as e:
+                        logger.error("执行 %s 降级回调失败: %s", name, e)
+
+        # 评估全局降级级别
+        return self.evaluate(health_status)
 
     def evaluate(self, health_status: dict[str, Any]) -> DegradationLevel:
         """根据健康状态评估降级级别
@@ -350,6 +441,7 @@ class DegradationManager:
             "level": self._level.value,
             "description": rules.get("description", ""),
             "disabled_features": rules.get("disabled_features", []),
+            "component_status": {k: v.value for k, v in self._component_status.items()},
         }
 
 

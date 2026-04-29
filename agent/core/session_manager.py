@@ -48,7 +48,11 @@ class SessionState(BaseModel):
 
 
 class SessionManager:
-    """会话管理器，负责会话的创建、读取、更新和归档"""
+    """会话管理器，负责会话的创建、读取、更新和归档
+
+    支持 Redis 不可用时自动降级为内存存储，
+    通过 DegradationManager 注册回调实现自动切换。
+    """
 
     SESSION_TTL = 7200  # 2小时
     ARCHIVE_THRESHOLD = 7200  # 2小时无交互则归档
@@ -56,6 +60,10 @@ class SessionManager:
     def __init__(self) -> None:
         self._redis: aioredis.Redis | None = None
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # 内存降级存储
+        self._memory_store: dict[str, str] = {}
+        self._memory_index: dict[str, dict[str, float]] = {}
+        self._use_memory_fallback: bool = False
 
     async def _get_redis(self) -> aioredis.Redis:
         """获取 Redis 连接"""
@@ -65,6 +73,41 @@ class SessionManager:
                 decode_responses=True,
             )
         return self._redis
+
+    async def _redis_or_fallback(self) -> aioredis.Redis | None:
+        """获取 Redis 连接，不可用时返回 None 并启用内存降级"""
+        if self._use_memory_fallback:
+            return None
+        try:
+            redis = await self._get_redis()
+            await redis.ping()
+            return redis
+        except Exception as e:
+            logger.warning("Redis 不可用，启用内存降级存储: %s", e)
+            self._use_memory_fallback = True
+            return None
+
+    async def switch_to_memory_fallback(self) -> None:
+        """降级回调：切换到内存存储"""
+        if not self._use_memory_fallback:
+            logger.info("SessionManager 切换到内存降级存储")
+            self._use_memory_fallback = True
+
+    async def switch_to_redis(self) -> None:
+        """恢复回调：切换回 Redis 存储"""
+        if self._use_memory_fallback:
+            try:
+                redis = await self._get_redis()
+                await redis.ping()
+                logger.info("SessionManager 恢复 Redis 存储，迁移内存数据")
+                # 将内存数据迁移到 Redis
+                for key, value in self._memory_store.items():
+                    await redis.setex(key, self.SESSION_TTL, value)
+                self._memory_store.clear()
+                self._memory_index.clear()
+                self._use_memory_fallback = False
+            except Exception as e:
+                logger.warning("恢复 Redis 失败，继续使用内存存储: %s", e)
 
     async def create_session(self, user_id: str, channel: str = "web", tenant_id: str = "") -> SessionState:
         """创建新会话
@@ -95,15 +138,19 @@ class SessionManager:
             channel=channel,
         )
 
-        redis = await self._get_redis()
+        redis = await self._redis_or_fallback()
         key = self._session_key(session.session_id)
-        await redis.setex(key, self.SESSION_TTL, session.model_dump_json())
-
-        # 添加到用户会话索引（Redis Sorted Set，score 为时间戳）
-        index_key = self._user_sessions_key(user_id)
-        await redis.zadd(index_key, {session.session_id: time.time()})
-        # 索引保留 7 天
-        await redis.expire(index_key, 86400 * 7)
+        if redis:
+            await redis.setex(key, self.SESSION_TTL, session.model_dump_json())
+            index_key = self._user_sessions_key(user_id)
+            await redis.zadd(index_key, {session.session_id: time.time()})
+            await redis.expire(index_key, 86400 * 7)
+        else:
+            self._memory_store[key] = session.model_dump_json()
+            index_key = self._user_sessions_key(user_id)
+            if index_key not in self._memory_index:
+                self._memory_index[index_key] = {}
+            self._memory_index[index_key][session.session_id] = time.time()
 
         logger.info("创建会话: %s, 用户: %s", session.session_id, user_id)
         return session
@@ -123,7 +170,7 @@ class SessionManager:
             SessionState 或 None
         """
         # 先查 L2（尝试多种键格式）
-        redis = await self._get_redis()
+        redis = await self._redis_or_fallback()
 
         # 尝试从当前租户上下文获取 tenant_id
         tenant_id = ""
@@ -133,12 +180,20 @@ class SessionManager:
         except Exception:
             pass
 
-        # 优先尝试带租户前缀的键
-        for tid in ([tenant_id, ""] if tenant_id else [""]):
-            key = self._session_key(session_id, tid)
-            data = await redis.get(key)
-            if data is not None:
-                return SessionState.model_validate_json(data)
+        if redis:
+            # 优先尝试带租户前缀的键
+            for tid in ([tenant_id, ""] if tenant_id else [""]):
+                key = self._session_key(session_id, tid)
+                data = await redis.get(key)
+                if data is not None:
+                    return SessionState.model_validate_json(data)
+        else:
+            # 内存降级模式
+            for tid in ([tenant_id, ""] if tenant_id else [""]):
+                key = self._session_key(session_id, tid)
+                data = self._memory_store.get(key)
+                if data is not None:
+                    return SessionState.model_validate_json(data)
 
         # L2 未命中，尝试从 L3 恢复
         return await self._restore_from_l3(session_id)
@@ -170,9 +225,12 @@ class SessionManager:
             )
 
             # 写回 L2
-            redis = await self._get_redis()
+            redis = await self._redis_or_fallback()
             key = self._session_key(session.session_id)
-            await redis.setex(key, self.SESSION_TTL, session.model_dump_json())
+            if redis:
+                await redis.setex(key, self.SESSION_TTL, session.model_dump_json())
+            else:
+                self._memory_store[key] = session.model_dump_json()
 
             logger.info("从 L3 恢复会话: %s", session_id)
             return session
@@ -190,13 +248,18 @@ class SessionManager:
         import time
 
         session.updated_at = datetime.now()
-        redis = await self._get_redis()
+        redis = await self._redis_or_fallback()
         key = self._session_key(session.session_id, session.tenant_id)
-        await redis.setex(key, self.SESSION_TTL, session.model_dump_json())
-
-        # 添加到用户会话索引（Redis Sorted Set，score 为时间戳）
-        index_key = self._user_sessions_key(session.user_id, session.tenant_id)
-        await redis.zadd(index_key, {session.session_id: time.time()})
+        if redis:
+            await redis.setex(key, self.SESSION_TTL, session.model_dump_json())
+            index_key = self._user_sessions_key(session.user_id, session.tenant_id)
+            await redis.zadd(index_key, {session.session_id: time.time()})
+        else:
+            self._memory_store[key] = session.model_dump_json()
+            index_key = self._user_sessions_key(session.user_id, session.tenant_id)
+            if index_key not in self._memory_index:
+                self._memory_index[index_key] = {}
+            self._memory_index[index_key][session.session_id] = time.time()
 
     async def append_message(
         self, session_id: str, role: str, content: str, metadata: dict | None = None
@@ -241,13 +304,17 @@ class SessionManager:
         if session is None:
             return False
 
-        redis = await self._get_redis()
+        redis = await self._redis_or_fallback()
         key = self._session_key(session_id, session.tenant_id)
-        await redis.delete(key)
-
-        # 从用户会话索引中移除
-        index_key = self._user_sessions_key(session.user_id, session.tenant_id)
-        await redis.zrem(index_key, session_id)
+        if redis:
+            await redis.delete(key)
+            index_key = self._user_sessions_key(session.user_id, session.tenant_id)
+            await redis.zrem(index_key, session_id)
+        else:
+            self._memory_store.pop(key, None)
+            index_key = self._user_sessions_key(session.user_id, session.tenant_id)
+            if index_key in self._memory_index:
+                self._memory_index[index_key].pop(session_id, None)
 
         return True
 
@@ -362,11 +429,19 @@ class SessionManager:
                 pass
 
         try:
-            redis = await self._get_redis()
+            redis = await self._redis_or_fallback()
             index_key = self._user_sessions_key(user_id, tenant_id)
 
-            # 按时间倒序获取会话ID（zrevrange: score 从大到小）
-            session_ids = await redis.zrevrange(index_key, offset, offset + limit - 1)
+            if redis:
+                session_ids = await redis.zrevrange(index_key, offset, offset + limit - 1)
+            else:
+                # 内存降级模式：从内存索引获取
+                index_data = self._memory_index.get(index_key, {})
+                sorted_ids = sorted(
+                    index_data.items(), key=lambda x: x[1], reverse=True,
+                )
+                session_ids = [sid for sid, _ in sorted_ids[offset:offset + limit]]
+
             if not session_ids:
                 return []
 
@@ -384,8 +459,8 @@ class SessionManager:
                         "active_agents": session.active_agents,
                     })
                 else:
-                    # 会话已过期，从索引中清理
-                    await redis.zrem(index_key, sid)
+                    if redis:
+                        await redis.zrem(index_key, sid)
 
             return sessions
         except Exception as e:
@@ -420,6 +495,50 @@ class SessionManager:
         lock = self._session_locks.pop(session_id, None)
         if lock and lock.locked():
             lock.release()
+
+    async def transfer_session(self, session_id: str, target_agent: str) -> bool:
+        """转移会话到其他 Agent
+
+        将会话的 active_agents 更新为目标 Agent，
+        并在 metadata 中记录转移历史。
+
+        Args:
+            session_id: 会话ID
+            target_agent: 目标 Agent 名称
+
+        Returns:
+            是否转移成功
+        """
+        session = await self.get_session(session_id)
+        if session is None:
+            logger.warning("会话 %s 不存在，无法转移", session_id)
+            return False
+
+        from_agent = session.active_agents[-1] if session.active_agents else ""
+
+        # 更新活跃 Agent 列表
+        if from_agent:
+            session.active_agents = [target_agent]
+        else:
+            session.active_agents.append(target_agent)
+
+        # 记录转移历史
+        transfer_record = {
+            "from_agent": from_agent,
+            "to_agent": target_agent,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if "transfer_history" not in session.metadata:
+            session.metadata["transfer_history"] = []
+        session.metadata["transfer_history"].append(transfer_record)
+
+        await self.update_session(session)
+
+        logger.info(
+            "会话转移完成: session=%s %s -> %s",
+            session_id, from_agent, target_agent,
+        )
+        return True
 
     async def close(self) -> None:
         """关闭 Redis 连接"""
@@ -472,4 +591,14 @@ async def get_session_manager() -> SessionManager:
     global _session_manager
     if _session_manager is None:
         _session_manager = SessionManager()
+        # 注册 Redis 降级回调
+        try:
+            from deploy.ha_manager import DegradationManager
+            DegradationManager.register_handler(
+                "redis",
+                on_degraded=_session_manager.switch_to_memory_fallback,
+                on_recovered=_session_manager.switch_to_redis,
+            )
+        except Exception:
+            pass
     return _session_manager

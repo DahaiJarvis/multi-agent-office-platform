@@ -269,6 +269,25 @@ async def route_and_execute(
             "agent_name": intent.target_agent,
             "intent": intent.intent,
         }
+    finally:
+        # After-turn 知识提取（异步，不阻塞主流程）
+        try:
+            from agent.core.context_manager import extract_and_store_knowledge
+            tenant_id = ""
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+            if session and session.message_history:
+                await extract_and_store_knowledge(
+                    user_id=user_id,
+                    session_id=session_id,
+                    messages=session.message_history,
+                    tenant_id=tenant_id,
+                )
+        except Exception:
+            pass
 
 
 async def _build_contextual_task(
@@ -530,6 +549,25 @@ async def route_and_execute_stream(
             "mode": intent.collaboration_mode.value,
             "full_message": full_response,
         }
+
+        # After-turn 知识提取（流式完成后异步执行，不阻塞主流程）
+        try:
+            from agent.core.context_manager import extract_and_store_knowledge
+            tenant_id = ""
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+            if session and session.message_history:
+                await extract_and_store_knowledge(
+                    user_id=user_id,
+                    session_id=session_id,
+                    messages=session.message_history,
+                    tenant_id=tenant_id,
+                )
+        except Exception:
+            pass
 
     except Exception as e:
         duration = time.time() - start_time

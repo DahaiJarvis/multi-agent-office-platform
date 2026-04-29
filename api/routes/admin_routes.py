@@ -266,3 +266,83 @@ async def flush_audit_buffer() -> dict:
     audit = get_audit_logger()
     count = await audit.flush_buffer()
     return {"flushed": count, "message": f"已持久化 {count} 条审计日志"}
+
+
+# ==================== 成本报表 ====================
+
+@router.get("/cost/report")
+async def get_cost_report(date: str = "") -> dict:
+    """获取成本报表
+
+    汇总全局和按 Agent 分类的 Token 消耗与成本数据。
+
+    Args:
+        date: 日期（格式 YYYY-MM-DD，默认今天）
+    """
+    from agent.core.token_budget import get_token_budget_manager
+
+    budget_mgr = get_token_budget_manager()
+    return await budget_mgr.get_cost_report(date)
+
+
+@router.get("/cost/tenant/{tenant_id}")
+async def get_tenant_cost(tenant_id: str) -> dict:
+    """获取租户当日成本统计"""
+    from agent.core.token_budget import get_token_budget_manager
+
+    budget_mgr = get_token_budget_manager()
+    return await budget_mgr.get_tenant_daily_usage(tenant_id)
+
+
+@router.get("/cost/agent/{agent_name}")
+async def get_agent_cost(agent_name: str) -> dict:
+    """获取 Agent 当日成本统计"""
+    from agent.core.token_budget import get_token_budget_manager
+
+    budget_mgr = get_token_budget_manager()
+    return await budget_mgr.get_agent_daily_usage(agent_name)
+
+
+# ==================== SLA 预算管理 ====================
+
+@router.get("/sla/definitions")
+async def list_sla_with_budget() -> dict:
+    """列出所有 SLA 层级及其预算额度"""
+    from agent.core.sla import list_sla_definitions
+
+    definitions = list_sla_definitions()
+    return {
+        "definitions": [
+            {
+                "tier": d.tier.value,
+                "availability_target": d.availability_target,
+                "latency_p50_target_ms": d.latency_p50_target_ms,
+                "latency_p90_target_ms": d.latency_p90_target_ms,
+                "latency_p99_target_ms": d.latency_p99_target_ms,
+                "error_rate_target": d.error_rate_target,
+                "throughput_target_rps": d.throughput_target_rps,
+                "user_daily_budget": d.user_daily_budget,
+                "session_budget": d.session_budget,
+                "tenant_daily_budget": d.tenant_daily_budget,
+                "agent_per_call_budget": d.agent_per_call_budget,
+                "max_model_tier": d.max_model_tier,
+            }
+            for d in definitions
+        ]
+    }
+
+
+@router.get("/sla/budget/{tier}")
+async def get_sla_budget(tier: str) -> dict:
+    """获取指定 SLA 层级的预算额度
+
+    Args:
+        tier: SLA 层级 (standard/professional/enterprise)
+    """
+    from agent.core.sla import SLATier, get_budget_for_tier
+
+    try:
+        sla_tier = SLATier(tier)
+        return get_budget_for_tier(sla_tier)
+    except ValueError:
+        return {"error": f"无效的 SLA 层级: {tier}", "valid_tiers": [t.value for t in SLATier]}

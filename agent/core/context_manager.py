@@ -100,6 +100,124 @@ async def compress_context(
     return compressed
 
 
+async def extract_and_store_knowledge(
+    user_id: str,
+    session_id: str,
+    messages: list[dict[str, Any]],
+    tenant_id: str = "",
+) -> list[dict[str, Any]]:
+    """After-turn 知识提取
+
+    调用轻量级 LLM 从对话中提取关键信息：
+      - 用户偏好（如"我喜欢简洁的回复"）
+      - 决策记录（如"项目A的预算已批准"）
+      - 业务事实（如"下周一有产品评审会"）
+      - 待办事项（如"我需要在本周五前提交报告"）
+
+    提取后自动写入 L3 长期记忆的 user_knowledge 表。
+
+    Args:
+        user_id: 用户ID
+        session_id: 会话ID
+        messages: 对话消息列表
+        tenant_id: 租户ID
+
+    Returns:
+        提取的知识列表
+    """
+    if not messages or len(messages) < 2:
+        return []
+
+    # 构建对话文本
+    conversation = ""
+    for msg in messages[-10:]:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role and content:
+            role_label = "用户" if role == "user" else "助手"
+            conversation += f"{role_label}: {content}\n"
+
+    if not conversation.strip():
+        return []
+
+    # 调用 LLM 提取知识
+    prompt = (
+        "请从以下对话中提取关键信息，按类型分类输出，每条一行，格式为：\n"
+        "类型|内容\n"
+        "类型包括：preference(用户偏好)、decision(决策记录)、fact(业务事实)、todo(待办事项)\n"
+        "如果没有关键信息，输出空。\n\n"
+        f"对话内容：\n{conversation}"
+    )
+
+    extracted: list[dict[str, Any]] = []
+    try:
+        client = get_lightweight_client()
+        response = await client.create(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500,
+        )
+        result_text = response.choices[0].message.content or ""
+
+        # 解析提取结果
+        for line in result_text.strip().split("\n"):
+            line = line.strip()
+            if "|" not in line:
+                continue
+
+            parts = line.split("|", 1)
+            if len(parts) != 2:
+                continue
+
+            knowledge_type = parts[0].strip().lower()
+            content = parts[1].strip()
+
+            # 类型映射
+            type_map = {
+                "preference": "preference",
+                "决策": "decision",
+                "decision": "decision",
+                "事实": "fact",
+                "fact": "fact",
+                "待办": "todo",
+                "todo": "todo",
+            }
+            mapped_type = type_map.get(knowledge_type, "")
+            if not mapped_type or not content:
+                continue
+
+            extracted.append({
+                "knowledge_type": mapped_type,
+                "content": content,
+                "source_session_id": session_id,
+            })
+
+    except Exception as e:
+        logger.error("After-turn 知识提取失败: %s", e)
+        return []
+
+    # 写入 L3 长期记忆
+    if extracted:
+        try:
+            from agent.core.long_term_memory import get_long_term_memory
+            ltm = get_long_term_memory()
+            for item in extracted:
+                await ltm.store_user_knowledge(
+                    user_id=user_id,
+                    knowledge_type=item["knowledge_type"],
+                    content=item["content"],
+                    source_session_id=item["source_session_id"],
+                    tenant_id=tenant_id,
+                )
+            logger.info(
+                "After-turn 知识提取完成: user=%s session=%s count=%d",
+                user_id, session_id, len(extracted),
+            )
+        except Exception as e:
+            logger.warning("After-turn 知识存储失败: %s", e)
+
+    return extracted
+
+
 async def _generate_summary(messages: list[dict[str, Any]]) -> str:
     """使用 LLM 生成对话摘要
 

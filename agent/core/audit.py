@@ -57,14 +57,17 @@ class AuditLogger:
     写入: 审计事件 -> Redis List（缓冲队列）
     消费: 后台任务 -> 批量写入 PostgreSQL
     查询: 从 PostgreSQL 查询历史审计日志
+    降级: PostgreSQL 不可用时，写入本地文件
     """
 
     BUFFER_KEY = "audit_log:buffer"
     BUFFER_BATCH_SIZE = 100
     BUFFER_MAX_LEN = 100000
+    FALLBACK_DIR = "logs/audit_fallback"
 
     def __init__(self) -> None:
         self._redis: Any = None
+        self._use_file_fallback: bool = False
 
     async def _get_redis(self) -> Any:
         """获取 Redis 客户端"""
@@ -204,7 +207,10 @@ class AuditLogger:
             return 0
 
     async def _persist_events(self, events_raw: list[str]) -> int:
-        """将审计事件批量写入 PostgreSQL"""
+        """将审计事件批量写入 PostgreSQL，不可用时降级到本地文件"""
+        if self._use_file_fallback:
+            return await self._persist_to_file(events_raw)
+
         try:
             from agent.core.config import get_settings
             from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
@@ -279,8 +285,55 @@ class AuditLogger:
             return count
 
         except Exception as e:
-            logger.error("审计日志持久化失败: %s", e)
-            return 0
+            logger.error("审计日志持久化失败，降级到本地文件: %s", e)
+            self._use_file_fallback = True
+            return await self._persist_to_file(events_raw)
+
+    async def _persist_to_file(self, events_raw: list[str]) -> int:
+        """将审计事件写入本地文件（PostgreSQL 降级方案）
+
+        按日期滚动写入 logs/audit_fallback/ 目录，
+        文件名格式: audit_YYYYMMDD.jsonl
+
+        Args:
+            events_raw: 原始事件 JSON 列表
+
+        Returns:
+            写入的事件条数
+        """
+        import os
+        from datetime import datetime
+
+        try:
+            os.makedirs(self.FALLBACK_DIR, exist_ok=True)
+        except Exception:
+            pass
+
+        today = datetime.now().strftime("%Y%m%d")
+        filepath = os.path.join(self.FALLBACK_DIR, f"audit_{today}.jsonl")
+
+        count = 0
+        try:
+            with open(filepath, "a", encoding="utf-8") as f:
+                for raw in events_raw:
+                    f.write(raw + "\n")
+                    count += 1
+        except Exception as e:
+            logger.error("审计日志写入本地文件失败: %s", e)
+
+        return count
+
+    async def switch_to_file_fallback(self) -> None:
+        """降级回调：切换到本地文件存储"""
+        if not self._use_file_fallback:
+            logger.info("AuditLogger 切换到本地文件降级存储")
+            self._use_file_fallback = True
+
+    async def switch_to_postgres(self) -> None:
+        """恢复回调：切换回 PostgreSQL 存储"""
+        if self._use_file_fallback:
+            logger.info("AuditLogger 恢复 PostgreSQL 存储")
+            self._use_file_fallback = False
 
     async def query_logs(
         self,
@@ -381,6 +434,16 @@ def get_audit_logger() -> AuditLogger:
     global _audit_logger
     if _audit_logger is None:
         _audit_logger = AuditLogger()
+        # 注册 PostgreSQL 降级回调
+        try:
+            from deploy.ha_manager import DegradationManager
+            DegradationManager.register_handler(
+                "postgres",
+                on_degraded=_audit_logger.switch_to_file_fallback,
+                on_recovered=_audit_logger.switch_to_postgres,
+            )
+        except Exception:
+            pass
     return _audit_logger
 
 

@@ -403,6 +403,7 @@ def get_model_client_for_tier(tier: str = "plus") -> Any:
 
     此函数保持与原有 model_client.py 的兼容性，
     同时支持多提供商路由。
+    当系统处于降级状态时，自动降低模型级别以节省成本。
 
     Args:
         tier: 模型级别 max/plus/turbo
@@ -415,6 +416,52 @@ def get_model_client_for_tier(tier: str = "plus") -> Any:
         "plus": ModelTier.STANDARD,
         "turbo": ModelTier.ECONOMY,
     }
-    model_tier = tier_mapping.get(tier, ModelTier.STANDARD)
+
+    # 降级策略：根据 DegradationManager 状态自动降级模型
+    effective_tier = _apply_degradation_tier(tier)
+    model_tier = tier_mapping.get(effective_tier, ModelTier.STANDARD)
     decision = resolve_route(model_tier)
     return create_client_from_route(decision)
+
+
+def _apply_degradation_tier(requested_tier: str) -> str:
+    """根据系统降级级别调整模型层级
+
+    降级映射：
+      - NORMAL: 使用请求的层级
+      - L1_LIGHT: max -> plus, plus/turbo 不变
+      - L2_MEDIUM: max -> plus, plus -> turbo, turbo 不变
+      - L3_HEAVY: 全部降级到 turbo
+      - L4_EXTREME: 全部降级到 turbo
+
+    Args:
+        requested_tier: 请求的模型层级
+
+    Returns:
+        实际使用的模型层级
+    """
+    try:
+        from deploy.ha_manager import get_degradation_manager, DegradationLevel
+
+        manager = get_degradation_manager()
+        level = manager.level
+
+        downgrade_map = {
+            DegradationLevel.L1_LIGHT: {"max": "plus"},
+            DegradationLevel.L2_MEDIUM: {"max": "plus", "plus": "turbo"},
+            DegradationLevel.L3_HEAVY: {"max": "turbo", "plus": "turbo", "turbo": "turbo"},
+            DegradationLevel.L4_EXTREME: {"max": "turbo", "plus": "turbo", "turbo": "turbo"},
+        }
+
+        tier_map = downgrade_map.get(level, {})
+        effective = tier_map.get(requested_tier, requested_tier)
+
+        if effective != requested_tier:
+            logger.info(
+                "模型降级: %s -> %s (降级级别: %s)",
+                requested_tier, effective, level.value,
+            )
+
+        return effective
+    except Exception:
+        return requested_tier

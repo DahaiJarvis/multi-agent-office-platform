@@ -40,12 +40,22 @@ class TokenUsage:
 
 @dataclass
 class BudgetConfig:
-    """预算配置"""
+    """预算配置
+
+    多维度预算体系：
+      - 用户维度: 每用户每天 Token 消耗上限
+      - 会话维度: 单会话 Token 消耗上限
+      - 全局维度: 平台整体日消耗上限
+      - 租户维度: 每租户每天 Token 消耗上限
+      - Agent 维度: 单次 Agent 调用 Token 消耗上限
+    """
 
     user_daily_budget: int = 500000
     session_budget: int = 100000
     global_daily_budget: int = 50000000
     enable_auto_downgrade: bool = True
+    tenant_daily_budget: int = 5000000
+    agent_per_call_budget: int = 50000
 
 
 @dataclass
@@ -94,8 +104,12 @@ class TokenBudgetManager:
         tier: str,
         prompt_tokens: int,
         completion_tokens: int,
+        tenant_id: str = "",
+        agent_name: str = "",
     ) -> TokenUsage:
         """记录 Token 用量
+
+        支持多维度追踪：用户、会话、租户、Agent。
 
         Args:
             user_id: 用户ID
@@ -104,6 +118,8 @@ class TokenBudgetManager:
             tier: 模型级别
             prompt_tokens: 输入 Token 数
             completion_tokens: 输出 Token 数
+            tenant_id: 租户ID
+            agent_name: Agent 名称
 
         Returns:
             TokenUsage 记录
@@ -129,7 +145,7 @@ class TokenBudgetManager:
             pass
 
         # 异步更新 Redis 中的用量统计
-        await self._update_usage_stats(user_id, session_id, usage)
+        await self._update_usage_stats(user_id, session_id, usage, tenant_id, agent_name)
 
         return usage
 
@@ -138,8 +154,18 @@ class TokenBudgetManager:
         user_id: str,
         session_id: str,
         usage: TokenUsage,
+        tenant_id: str = "",
+        agent_name: str = "",
     ) -> None:
-        """更新 Redis 中的用量统计"""
+        """更新 Redis 中的用量统计
+
+        多维度统计：
+          - 用户维度: token_usage:user:{user_id}:{date}
+          - 会话维度: token_usage:session:{session_id}
+          - 全局维度: token_usage:global:{date}
+          - 租户维度: token_usage:tenant:{tenant_id}:{date}
+          - Agent 维度: token_usage:agent:{agent_name}:{date}
+        """
         redis = await self._get_redis()
         if redis is None:
             return
@@ -171,42 +197,81 @@ class TokenBudgetManager:
             await redis.hincrbyfloat(global_key, "cost", usage.cost)
             await redis.expire(global_key, 86400 * 2)
 
+            # 租户日用量
+            if tenant_id:
+                tenant_key = f"token_usage:tenant:{tenant_id}:{today}"
+                await redis.hincrby(tenant_key, "total_tokens", usage.total_tokens)
+                await redis.hincrbyfloat(tenant_key, "cost", usage.cost)
+                await redis.hincrby(tenant_key, "call_count", 1)
+                await redis.expire(tenant_key, 86400 * 2)
+
+            # Agent 日用量
+            if agent_name:
+                agent_key = f"token_usage:agent:{agent_name}:{today}"
+                await redis.hincrby(agent_key, "total_tokens", usage.total_tokens)
+                await redis.hincrbyfloat(agent_key, "cost", usage.cost)
+                await redis.hincrby(agent_key, "call_count", 1)
+                await redis.expire(agent_key, 86400 * 2)
+
         except Exception as e:
             logger.warning("更新 Token 用量统计失败: %s", e)
 
-    async def check_budget(self, user_id: str, session_id: str) -> dict[str, Any]:
+    async def check_budget(
+        self,
+        user_id: str,
+        session_id: str,
+        tenant_id: str = "",
+    ) -> dict[str, Any]:
         """检查预算是否充足
+
+        多维度预算检查：用户、会话、全局、租户。
 
         Args:
             user_id: 用户ID
             session_id: 会话ID
+            tenant_id: 租户ID
 
         Returns:
             预算检查结果，包含是否超预算和建议的模型级别
         """
         redis = await self._get_redis()
+        today = time.strftime("%Y-%m-%d")
 
-        user_usage = await self._get_usage(redis, f"token_usage:user:{user_id}:{time.strftime('%Y-%m-%d')}")
+        user_usage = await self._get_usage(redis, f"token_usage:user:{user_id}:{today}")
         session_usage = await self._get_usage(redis, f"token_usage:session:{session_id}")
-        global_usage = await self._get_usage(redis, f"token_usage:global:{time.strftime('%Y-%m-%d')}")
+        global_usage = await self._get_usage(redis, f"token_usage:global:{today}")
 
         user_exceeded = user_usage.total_tokens >= self._config.user_daily_budget
         session_exceeded = session_usage.total_tokens >= self._config.session_budget
         global_exceeded = global_usage.total_tokens >= self._config.global_daily_budget
 
+        # 租户预算检查
+        tenant_exceeded = False
+        tenant_usage_data: dict[str, Any] = {}
+        if tenant_id:
+            tenant_usage = await self._get_usage(redis, f"token_usage:tenant:{tenant_id}:{today}")
+            tenant_exceeded = tenant_usage.total_tokens >= self._config.tenant_daily_budget
+            tenant_usage_data = {
+                "total_tokens": tenant_usage.total_tokens,
+                "cost": round(tenant_usage.cost, 4),
+                "budget": self._config.tenant_daily_budget,
+                "remaining": max(0, self._config.tenant_daily_budget - tenant_usage.total_tokens),
+            }
+
         # 确定建议的模型级别（自动降级）
         suggested_tier = "max"
         if self._config.enable_auto_downgrade:
-            if user_exceeded or global_exceeded:
+            if user_exceeded or global_exceeded or tenant_exceeded:
                 suggested_tier = "turbo"
             elif session_exceeded:
                 suggested_tier = "plus"
 
-        return {
+        result: dict[str, Any] = {
             "user_exceeded": user_exceeded,
             "session_exceeded": session_exceeded,
             "global_exceeded": global_exceeded,
-            "any_exceeded": user_exceeded or session_exceeded or global_exceeded,
+            "tenant_exceeded": tenant_exceeded,
+            "any_exceeded": user_exceeded or session_exceeded or global_exceeded or tenant_exceeded,
             "suggested_tier": suggested_tier,
             "user_usage": {
                 "total_tokens": user_usage.total_tokens,
@@ -221,6 +286,11 @@ class TokenBudgetManager:
                 "remaining": max(0, self._config.session_budget - session_usage.total_tokens),
             },
         }
+
+        if tenant_usage_data:
+            result["tenant_usage"] = tenant_usage_data
+
+        return result
 
     async def get_user_daily_usage(self, user_id: str) -> dict[str, Any]:
         """获取用户当日用量统计
@@ -245,6 +315,101 @@ class TokenBudgetManager:
             "call_count": usage.call_count,
             "budget": self._config.user_daily_budget,
             "remaining": max(0, self._config.user_daily_budget - usage.total_tokens),
+        }
+
+    async def get_tenant_daily_usage(self, tenant_id: str) -> dict[str, Any]:
+        """获取租户当日用量统计
+
+        Args:
+            tenant_id: 租户ID
+
+        Returns:
+            租户用量统计字典
+        """
+        redis = await self._get_redis()
+        today = time.strftime("%Y-%m-%d")
+        usage = await self._get_usage(redis, f"token_usage:tenant:{tenant_id}:{today}")
+
+        return {
+            "tenant_id": tenant_id,
+            "date": today,
+            "total_tokens": usage.total_tokens,
+            "cost": round(usage.cost, 4),
+            "call_count": usage.call_count,
+            "budget": self._config.tenant_daily_budget,
+            "remaining": max(0, self._config.tenant_daily_budget - usage.total_tokens),
+        }
+
+    async def get_agent_daily_usage(self, agent_name: str) -> dict[str, Any]:
+        """获取 Agent 当日用量统计
+
+        Args:
+            agent_name: Agent 名称
+
+        Returns:
+            Agent 用量统计字典
+        """
+        redis = await self._get_redis()
+        today = time.strftime("%Y-%m-%d")
+        usage = await self._get_usage(redis, f"token_usage:agent:{agent_name}:{today}")
+
+        return {
+            "agent_name": agent_name,
+            "date": today,
+            "total_tokens": usage.total_tokens,
+            "cost": round(usage.cost, 4),
+            "call_count": usage.call_count,
+            "per_call_budget": self._config.agent_per_call_budget,
+        }
+
+    async def get_cost_report(self, date: str = "") -> dict[str, Any]:
+        """获取成本报表
+
+        汇总全局、按 Agent 分类的成本数据。
+
+        Args:
+            date: 日期（默认今天）
+
+        Returns:
+            成本报表字典
+        """
+        redis = await self._get_redis()
+        if not date:
+            date = time.strftime("%Y-%m-%d")
+
+        global_usage = await self._get_usage(redis, f"token_usage:global:{date}")
+
+        # 扫描所有 Agent 的用量
+        agent_reports = {}
+        if redis:
+            try:
+                cursor = 0
+                while True:
+                    cursor, keys = await redis.scan(
+                        cursor, match=f"token_usage:agent:*:{date}", count=100,
+                    )
+                    for key in keys:
+                        parts = key.split(":")
+                        if len(parts) >= 4:
+                            agent_name = parts[2]
+                            agent_usage = await self._get_usage(redis, key)
+                            agent_reports[agent_name] = {
+                                "total_tokens": agent_usage.total_tokens,
+                                "cost": round(agent_usage.cost, 4),
+                                "call_count": agent_usage.call_count,
+                            }
+                    if cursor == 0:
+                        break
+            except Exception as e:
+                logger.warning("扫描 Agent 用量失败: %s", e)
+
+        return {
+            "date": date,
+            "global": {
+                "total_tokens": global_usage.total_tokens,
+                "cost": round(global_usage.cost, 4),
+            },
+            "agents": agent_reports,
         }
 
     async def _get_usage(self, redis: Any, key: str) -> UsageRecord:
