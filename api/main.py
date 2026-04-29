@@ -13,7 +13,7 @@ from agent.core.mcp_integration import close_all_connections
 from api.middleware.auth import AuthMiddleware
 from api.middleware.rate_limit import DistributedRateLimitMiddleware
 from api.middleware.tracing import TracingMiddleware
-from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes, jwks_routes, approval_routes
+from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes, jwks_routes, approval_routes, debug_routes, scheduler_routes
 from api.errors import AppException, app_exception_handler, generic_exception_handler
 from observability.logging_config import setup_logging
 from observability.tracing import setup_tracing
@@ -174,6 +174,15 @@ async def lifespan(app: FastAPI):
     global _audit_flush_task
     _audit_flush_task = asyncio.create_task(_audit_flush_loop())
 
+    # 启动定时任务扫描器
+    try:
+        from agent.core.scheduler import get_scheduler_worker
+        scheduler = get_scheduler_worker()
+        await scheduler.start()
+        logger.info("定时任务扫描器已启动")
+    except Exception as e:
+        logger.warning("定时任务扫描器启动失败（非致命）: %s", e)
+
     yield
 
     # 停止审计日志刷新任务
@@ -183,6 +192,14 @@ async def lifespan(app: FastAPI):
             await _audit_flush_task
         except asyncio.CancelledError:
             pass
+
+    # 停止定时任务扫描器
+    try:
+        from agent.core.scheduler import get_scheduler_worker
+        scheduler = get_scheduler_worker()
+        await scheduler.stop()
+    except Exception:
+        pass
 
     # 关闭前最后一次刷新审计日志
     try:
@@ -266,6 +283,8 @@ def create_app() -> FastAPI:
     app.include_router(knowledge_proxy_routes.router, prefix=api_prefix)
     app.include_router(jwks_routes.router)
     app.include_router(approval_routes.router, prefix=api_prefix)
+    app.include_router(debug_routes.router, prefix=api_prefix)
+    app.include_router(scheduler_routes.router, prefix=api_prefix)
 
     # Prometheus 指标端点
     from observability.metrics import metrics_endpoint

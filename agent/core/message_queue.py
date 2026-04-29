@@ -543,3 +543,299 @@ def get_api_rate_limiter() -> RateLimiter:
         max_rps = getattr(settings, "rate_limit_rpm", 60)
         _api_rate_limiter = RateLimiter(max_requests=max_rps, window_seconds=60.0)
     return _api_rate_limiter
+
+
+# ==================== 定时任务 ====================
+
+
+class ScheduledTask(BaseModel):
+    """定时任务定义
+
+    支持两种触发类型：
+      - cron: 按 Cron 表达式定时执行
+      - interval: 按固定间隔执行
+
+    存储结构：
+      - ZSET scheduler:tasks -> score=next_run_at, member=task_id
+      - HASH scheduler:task:{task_id} -> ScheduledTask JSON
+    """
+
+    task_id: str = Field(default_factory=lambda: f"sched-{uuid.uuid4().hex[:10]}")
+    name: str = Field(..., description="任务名称")
+    trigger_type: str = Field(..., description="触发类型: cron / interval")
+    trigger_value: str = Field(..., description="Cron 表达式 或 间隔秒数")
+    agent_name: str = Field(default="", description="执行的 Agent")
+    task_prompt: str = Field(default="", description="任务描述")
+    channel: str = Field(default="web", description="推送渠道 (web / wecom / dingtalk)")
+    target_user: str = Field(default="", description="推送目标用户")
+    tenant_id: str = Field(default="", description="租户ID")
+    enabled: bool = Field(default=True)
+    last_run_at: float = Field(default=0)
+    next_run_at: float = Field(default=0)
+    created_at: float = Field(default_factory=time.time)
+
+
+class ScheduledTaskManager:
+    """定时任务管理器
+
+    基于 Redis ZSET 实现定时任务调度：
+      - ZSET scheduler:tasks 按 next_run_at 排序
+      - HASH scheduler:task:{task_id} 存储任务详情
+    """
+
+    SCHEDULER_ZSET_KEY = "scheduler:tasks"
+    TASK_KEY_PREFIX = "scheduler:task:"
+
+    def __init__(self) -> None:
+        self._redis = None
+
+    async def _get_redis(self):
+        """获取 Redis 连接"""
+        if self._redis is None:
+            try:
+                import redis.asyncio as aioredis
+                settings = get_settings()
+                self._redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+            except Exception as e:
+                logger.warning("ScheduledTaskManager Redis 连接失败: %s", e)
+        return self._redis
+
+    async def schedule_task(self, task: ScheduledTask) -> str:
+        """注册定时任务
+
+        Args:
+            task: 定时任务定义
+
+        Returns:
+            task_id
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return ""
+
+        # 计算首次执行时间
+        if task.next_run_at == 0:
+            task.next_run_at = self._calculate_next_run(task)
+
+        # 存储任务详情
+        task_key = f"{self.TASK_KEY_PREFIX}{task.task_id}"
+        await redis.set(task_key, task.model_dump_json(), ex=86400 * 30)
+
+        # 添加到 ZSET（按 next_run_at 排序）
+        await redis.zadd(self.SCHEDULER_ZSET_KEY, {task.task_id: task.next_run_at})
+
+        logger.info(
+            "定时任务已注册: id=%s name=%s type=%s next_run=%d",
+            task.task_id, task.name, task.trigger_type, task.next_run_at,
+        )
+        return task.task_id
+
+    async def cancel_scheduled_task(self, task_id: str) -> bool:
+        """取消定时任务
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            是否成功取消
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return False
+
+        # 从 ZSET 移除
+        removed = await redis.zrem(self.SCHEDULER_ZSET_KEY, task_id)
+        # 删除任务详情
+        task_key = f"{self.TASK_KEY_PREFIX}{task_id}"
+        await redis.delete(task_key)
+
+        if removed:
+            logger.info("定时任务已取消: id=%s", task_id)
+        return removed > 0
+
+    async def update_scheduled_task(self, task_id: str, **updates) -> bool:
+        """更新定时任务
+
+        Args:
+            task_id: 任务ID
+            **updates: 需要更新的字段
+
+        Returns:
+            是否成功更新
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return False
+
+        task_key = f"{self.TASK_KEY_PREFIX}{task_id}"
+        data = await redis.get(task_key)
+        if data is None:
+            return False
+
+        task = ScheduledTask.model_validate_json(data)
+        for key, value in updates.items():
+            if hasattr(task, key):
+                setattr(task, key, value)
+
+        # 如果更新了触发配置，重新计算下次执行时间
+        if "trigger_type" in updates or "trigger_value" in updates:
+            task.next_run_at = self._calculate_next_run(task)
+
+        await redis.set(task_key, task.model_dump_json(), ex=86400 * 30)
+
+        # 更新 ZSET 中的 score
+        if task.enabled:
+            await redis.zadd(self.SCHEDULER_ZSET_KEY, {task_id: task.next_run_at})
+        else:
+            await redis.zrem(self.SCHEDULER_ZSET_KEY, task_id)
+
+        logger.info("定时任务已更新: id=%s fields=%s", task_id, list(updates.keys()))
+        return True
+
+    async def list_scheduled_tasks(self, tenant_id: str = "") -> list[ScheduledTask]:
+        """列出定时任务
+
+        Args:
+            tenant_id: 按租户过滤（可选）
+
+        Returns:
+            定时任务列表
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return []
+
+        task_ids = await redis.zrange(self.SCHEDULER_ZSET_KEY, 0, -1)
+        tasks: list[ScheduledTask] = []
+
+        for task_id in task_ids:
+            task_key = f"{self.TASK_KEY_PREFIX}{task_id}"
+            data = await redis.get(task_key)
+            if data:
+                try:
+                    task = ScheduledTask.model_validate_json(data)
+                    if tenant_id and task.tenant_id != tenant_id:
+                        continue
+                    tasks.append(task)
+                except Exception:
+                    continue
+
+        return tasks
+
+    async def get_scheduled_task(self, task_id: str) -> ScheduledTask | None:
+        """获取定时任务详情
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            ScheduledTask 或 None
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return None
+
+        task_key = f"{self.TASK_KEY_PREFIX}{task_id}"
+        data = await redis.get(task_key)
+        if data is None:
+            return None
+
+        try:
+            return ScheduledTask.model_validate_json(data)
+        except Exception:
+            return None
+
+    async def poll_due_tasks(self) -> list[ScheduledTask]:
+        """扫描到期任务
+
+        从 ZSET 中获取 score <= now 的任务。
+
+        Returns:
+            到期的定时任务列表
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return []
+
+        now = time.time()
+        due_ids = await redis.zrangebyscore(self.SCHEDULER_ZSET_KEY, "-inf", now)
+
+        due_tasks: list[ScheduledTask] = []
+        for task_id in due_ids:
+            task = await self.get_scheduled_task(task_id)
+            if task and task.enabled:
+                due_tasks.append(task)
+
+        return due_tasks
+
+    async def mark_task_executed(self, task_id: str) -> None:
+        """标记任务已执行，更新下次执行时间
+
+        Args:
+            task_id: 任务ID
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return
+
+        task_key = f"{self.TASK_KEY_PREFIX}{task_id}"
+        data = await redis.get(task_key)
+        if data is None:
+            return
+
+        task = ScheduledTask.model_validate_json(data)
+        task.last_run_at = time.time()
+        task.next_run_at = self._calculate_next_run(task)
+
+        await redis.set(task_key, task.model_dump_json(), ex=86400 * 30)
+        await redis.zadd(self.SCHEDULER_ZSET_KEY, {task_id: task.next_run_at})
+
+    def _calculate_next_run(self, task: ScheduledTask) -> float:
+        """计算下次执行时间
+
+        Args:
+            task: 定时任务
+
+        Returns:
+            下次执行时间戳
+        """
+        now = time.time()
+
+        if task.trigger_type == "interval":
+            try:
+                interval_seconds = int(task.trigger_value)
+                return now + interval_seconds
+            except (ValueError, TypeError):
+                return now + 3600  # 默认1小时
+
+        if task.trigger_type == "cron":
+            # 简化实现：解析 cron 表达式中的分钟和小时
+            # 格式: "MM HH" 或 "MM HH * * *"
+            try:
+                parts = task.trigger_value.strip().split()
+                if len(parts) >= 2:
+                    minute = int(parts[0])
+                    hour = int(parts[1])
+                    from datetime import datetime, timedelta
+                    dt = datetime.now().replace(second=0, microsecond=0)
+                    target = dt.replace(minute=minute % 60, hour=hour % 24)
+                    if target <= dt:
+                        target += timedelta(days=1)
+                    return target.timestamp()
+            except (ValueError, TypeError):
+                pass
+            return now + 86400  # 默认24小时
+
+        return now + 3600
+
+
+# 全局定时任务管理器
+_scheduled_task_manager: ScheduledTaskManager | None = None
+
+
+def get_scheduled_task_manager() -> ScheduledTaskManager:
+    """获取全局定时任务管理器"""
+    global _scheduled_task_manager
+    if _scheduled_task_manager is None:
+        _scheduled_task_manager = ScheduledTaskManager()
+    return _scheduled_task_manager

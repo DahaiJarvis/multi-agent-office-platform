@@ -21,7 +21,7 @@ from agent.teams.team_factory import create_team
 from agent.teams.execution_controller import get_execution_controller
 from agent.core.session_manager import SessionState, get_session_manager
 from observability.metrics import record_agent_call
-from observability.tracing import langfuse_tracer
+from observability.tracing import langfuse_tracer, span_cache
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,32 @@ async def route_and_execute(
             intent.target_agent,
             intent.collaboration_mode.value,
         )
+
+    # 记录意图分类 Span
+    try:
+        intent_duration = (time.time() - start_time) * 1000
+        langfuse_tracer.trace_intent_classification(
+            trace_id=session_id,
+            user_message=user_message,
+            intent=intent.intent,
+            confidence=intent.confidence,
+            target_agent=intent.target_agent,
+            duration_ms=intent_duration,
+        )
+        await span_cache.store_span(
+            session_id=session_id,
+            span_type="intent_classification",
+            input_data={"user_message": user_message},
+            output_data={
+                "intent": intent.intent,
+                "confidence": intent.confidence,
+                "target_agent": intent.target_agent,
+                "mode": intent.collaboration_mode.value,
+            },
+            duration_ms=intent_duration,
+        )
+    except Exception:
+        pass
 
     # 2. 置信度校验
     if intent.confidence < CONFIDENCE_THRESHOLD:
@@ -180,6 +206,22 @@ async def route_and_execute(
             },
         )
 
+        # 记录 Agent 调用 Span 和统计
+        try:
+            await span_cache.store_span(
+                session_id=session_id,
+                span_type="agent_call",
+                input_data={"user_message": user_message, "intent": intent.intent},
+                output_data={"message": output[:500], "agent": intent.target_agent},
+                duration_ms=duration * 1000,
+                metadata={"retries": exec_meta.retries, "compacted": exec_meta.compacted},
+            )
+            await span_cache.increment_agent_stats(
+                intent.target_agent, duration * 1000, success=True,
+            )
+        except Exception:
+            pass
+
         return {
             "status": "success",
             "message": output,
@@ -192,6 +234,14 @@ async def route_and_execute(
         duration = time.time() - start_time
         record_agent_call(intent.target_agent, "error", duration)
         logger.error("任务执行失败: agent=%s error=%s", intent.target_agent, e)
+
+        # 记录 Agent 调用失败统计
+        try:
+            await span_cache.increment_agent_stats(
+                intent.target_agent, duration * 1000, success=False,
+            )
+        except Exception:
+            pass
 
         # 记录 Agent 调用失败审计日志
         try:
@@ -324,6 +374,32 @@ async def route_and_execute_stream(
             intent.collaboration_mode.value,
         )
 
+    # 记录意图分类 Span
+    try:
+        intent_duration = (time.time() - start_time) * 1000
+        langfuse_tracer.trace_intent_classification(
+            trace_id=session_id,
+            user_message=user_message,
+            intent=intent.intent,
+            confidence=intent.confidence,
+            target_agent=intent.target_agent,
+            duration_ms=intent_duration,
+        )
+        await span_cache.store_span(
+            session_id=session_id,
+            span_type="intent_classification",
+            input_data={"user_message": user_message},
+            output_data={
+                "intent": intent.intent,
+                "confidence": intent.confidence,
+                "target_agent": intent.target_agent,
+                "mode": intent.collaboration_mode.value,
+            },
+            duration_ms=intent_duration,
+        )
+    except Exception:
+        pass
+
     yield {
         "type": "intent",
         "intent": intent.intent,
@@ -432,6 +508,21 @@ async def route_and_execute_stream(
             },
         )
 
+        # 记录 Agent 调用 Span 和统计
+        try:
+            await span_cache.store_span(
+                session_id=session_id,
+                span_type="agent_call",
+                input_data={"user_message": user_message, "intent": intent.intent},
+                output_data={"message": full_response[:500], "agent": intent.target_agent},
+                duration_ms=duration * 1000,
+            )
+            await span_cache.increment_agent_stats(
+                intent.target_agent, duration * 1000, success=True,
+            )
+        except Exception:
+            pass
+
         yield {
             "type": "complete",
             "agent_name": current_agent,
@@ -444,6 +535,14 @@ async def route_and_execute_stream(
         duration = time.time() - start_time
         record_agent_call(intent.target_agent, "error", duration)
         logger.error("流式-任务执行失败: agent=%s error=%s", intent.target_agent, e)
+
+        # 记录 Agent 调用失败统计
+        try:
+            await span_cache.increment_agent_stats(
+                intent.target_agent, duration * 1000, success=False,
+            )
+        except Exception:
+            pass
 
         yield {
             "type": "error",

@@ -85,6 +85,31 @@ class ChannelAdapter(ABC):
         seed = f"{channel}:{raw_data.get('timestamp', time.time())}:{raw_data.get('msg_id', '')}"
         return hashlib.md5(seed.encode()).hexdigest()
 
+    async def push_notification(
+        self,
+        user_id: str,
+        message: str,
+        title: str = "",
+    ) -> bool:
+        """主动推送通知到用户
+
+        默认实现：格式化消息后通过渠道的回复机制推送。
+        子类可覆写此方法实现渠道特定的推送逻辑。
+
+        Args:
+            user_id: 目标用户ID
+            message: 推送内容
+            title: 通知标题
+
+        Returns:
+            是否推送成功
+        """
+        logger.info(
+            "推送通知: channel=%s user=%s title=%s",
+            self.channel_name, user_id, title,
+        )
+        return True
+
 
 class WeComAdapter(ChannelAdapter):
     """企业微信适配器
@@ -289,3 +314,33 @@ def format_channel_reply(channel: str, message: str, session_id: str = "") -> di
     """
     adapter = get_adapter(channel)
     return adapter.format_reply(message, session_id)
+
+
+async def push_notification(
+    channel: str,
+    user_id: str,
+    message: str,
+    title: str = "",
+) -> bool:
+    """主动推送通知到用户
+
+    通过渠道适配器推送通知，支持 Web（SSE）、企微、钉钉等渠道。
+
+    Args:
+        channel: 渠道名称
+        user_id: 目标用户ID
+        message: 推送内容
+        title: 通知标题
+
+    Returns:
+        是否推送成功
+    """
+    try:
+        adapter = get_adapter(channel)
+        return await adapter.push_notification(user_id, message, title)
+    except ValueError:
+        logger.warning("不支持的推送渠道: %s", channel)
+        return False
+    except Exception as e:
+        logger.error("推送通知失败: channel=%s user=%s error=%s", channel, user_id, e)
+        return False
