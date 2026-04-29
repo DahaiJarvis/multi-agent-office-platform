@@ -55,16 +55,19 @@ class TokenPayload(BaseModel):
     - sub: OIDC 标准字段，全局唯一用户标识，与 user_id 值相同
     - iss: Token 签发者标识，用于跨系统验证 Token 来源
     - aud: Token 受众列表，包含所有授权访问的子系统标识
+    - tenant_id: 租户ID，用于多租户数据隔离
 
     兼容策略：
     - sub 和 user_id 值相同，现有代码读取 user_id 不受影响
     - iss 和 aud 为新增字段，旧 Token 无这两个字段时验证跳过
+    - tenant_id 为新增字段，旧 Token 无此字段时默认为空字符串
     """
 
     sub: str = ""
     user_id: str
     roles: list[str] = Field(default_factory=lambda: ["employee"])
     departments: list[str] = Field(default_factory=list)
+    tenant_id: str = ""
     iss: str = ""
     aud: list[str] = Field(default_factory=list)
     exp: float = 0
@@ -113,16 +116,22 @@ def _build_oidc_claims(user_id: str, settings) -> dict[str, Any]:
     }
 
 
-def create_token_pair(user_id: str, roles: list[str] | None = None, departments: list[str] | None = None) -> TokenPair:
+def create_token_pair(
+    user_id: str,
+    roles: list[str] | None = None,
+    departments: list[str] | None = None,
+    tenant_id: str = "",
+) -> TokenPair:
     """签发 Token 对
 
-    签发的 Token 包含 OIDC 标准字段（sub/iss/aud），
+    签发的 Token 包含 OIDC 标准字段（sub/iss/aud）和租户字段（tenant_id），
     可被所有子系统通过 JWKS 端点直接验证，无需映射。
 
     Args:
         user_id: 用户ID，同时作为 OIDC sub 字段
         roles: 用户角色列表
         departments: 用户部门列表
+        tenant_id: 租户ID（可选，多租户隔离）
 
     Returns:
         TokenPair 包含访问令牌和刷新令牌
@@ -132,6 +141,14 @@ def create_token_pair(user_id: str, roles: list[str] | None = None, departments:
     roles = roles or ["employee"]
     departments = departments or []
 
+    # 如果未传入 tenant_id，尝试从上下文获取
+    if not tenant_id:
+        try:
+            from security.tenant import get_current_tenant_id
+            tenant_id = get_current_tenant_id() or ""
+        except Exception:
+            pass
+
     oidc_claims = _build_oidc_claims(user_id, settings)
 
     # 访问令牌（短期）
@@ -140,6 +157,7 @@ def create_token_pair(user_id: str, roles: list[str] | None = None, departments:
         sub=oidc_claims["sub"],
         roles=roles,
         departments=departments,
+        tenant_id=tenant_id,
         iss=oidc_claims["iss"],
         aud=oidc_claims["aud"],
         iat=now,
@@ -166,6 +184,7 @@ def create_token_pair(user_id: str, roles: list[str] | None = None, departments:
         sub=oidc_claims["sub"],
         roles=roles,
         departments=departments,
+        tenant_id=tenant_id,
         iss=oidc_claims["iss"],
         aud=oidc_claims["aud"],
         iat=now,

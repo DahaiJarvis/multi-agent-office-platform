@@ -68,6 +68,7 @@ class LongTermMemory:
                 CREATE TABLE IF NOT EXISTS sessions (
                     session_id VARCHAR(36) PRIMARY KEY,
                     user_id VARCHAR(64) NOT NULL,
+                    tenant_id VARCHAR(64) DEFAULT '',
                     channel VARCHAR(32) DEFAULT 'web',
                     context_summary TEXT,
                     metadata JSONB DEFAULT '{}',
@@ -97,6 +98,10 @@ class LongTermMemory:
             """))
 
             await conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS idx_sessions_tenant_id ON sessions(tenant_id)
+            """))
+
+            await conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS idx_sessions_archived_at ON sessions(archived_at)
             """))
 
@@ -108,10 +113,12 @@ class LongTermMemory:
         messages: list[dict[str, Any]],
         context_summary: str | None = None,
         metadata: dict[str, Any] | None = None,
+        tenant_id: str = "",
     ) -> bool:
         """归档会话到 L3
 
         将 L2 中即将过期的会话数据持久化到 PostgreSQL。
+        多租户模式下，tenant_id 用于数据隔离。
 
         Args:
             session_id: 会话ID
@@ -120,10 +127,19 @@ class LongTermMemory:
             messages: 消息历史
             context_summary: 上下文摘要
             metadata: 附加元数据
+            tenant_id: 租户ID（可选，多租户隔离）
 
         Returns:
             是否归档成功
         """
+        # 如果未传入 tenant_id，尝试从上下文获取
+        if not tenant_id:
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+
         pool = await self._get_pool()
         if pool is None:
             return False
@@ -132,11 +148,11 @@ class LongTermMemory:
             async with pool() as session:
                 from sqlalchemy import text
 
-                # 插入或更新会话
+                # 插入或更新会话（含 tenant_id）
                 await session.execute(
                     text("""
-                        INSERT INTO sessions (session_id, user_id, channel, context_summary, metadata, archived_at)
-                        VALUES (:sid, :uid, :ch, :cs, :meta, NOW())
+                        INSERT INTO sessions (session_id, user_id, tenant_id, channel, context_summary, metadata, archived_at)
+                        VALUES (:sid, :uid, :tid, :ch, :cs, :meta, NOW())
                         ON CONFLICT (session_id) DO UPDATE SET
                             context_summary = :cs,
                             metadata = :meta,
@@ -146,6 +162,7 @@ class LongTermMemory:
                     {
                         "sid": session_id,
                         "uid": user_id,
+                        "tid": tenant_id,
                         "ch": channel,
                         "cs": context_summary,
                         "meta": json.dumps(metadata or {}, ensure_ascii=False),
@@ -186,25 +203,41 @@ class LongTermMemory:
     async def load_session(self, session_id: str) -> dict[str, Any] | None:
         """从 L3 加载已归档的会话
 
+        多租户模式下，自动从上下文获取 tenant_id 进行过滤。
+
         Args:
             session_id: 会话ID
 
         Returns:
-            会话数据字典，包含 session_id, user_id, messages, context_summary 等
+            会话数据字典，包含 session_id, user_id, tenant_id, messages, context_summary 等
         """
         pool = await self._get_pool()
         if pool is None:
             return None
 
+        # 获取当前租户ID
+        tenant_id = ""
+        try:
+            from security.tenant import get_current_tenant_id
+            tenant_id = get_current_tenant_id() or ""
+        except Exception:
+            pass
+
         try:
             async with pool() as session:
                 from sqlalchemy import text
 
-                # 查询会话
-                result = await session.execute(
-                    text("SELECT session_id, user_id, channel, context_summary, metadata FROM sessions WHERE session_id = :sid"),
-                    {"sid": session_id},
-                )
+                # 查询会话（含租户过滤）
+                if tenant_id:
+                    result = await session.execute(
+                        text("SELECT session_id, user_id, tenant_id, channel, context_summary, metadata FROM sessions WHERE session_id = :sid AND tenant_id = :tid"),
+                        {"sid": session_id, "tid": tenant_id},
+                    )
+                else:
+                    result = await session.execute(
+                        text("SELECT session_id, user_id, tenant_id, channel, context_summary, metadata FROM sessions WHERE session_id = :sid"),
+                        {"sid": session_id},
+                    )
                 row = result.mappings().first()
                 if row is None:
                     return None
@@ -226,6 +259,7 @@ class LongTermMemory:
                 return {
                     "session_id": row["session_id"],
                     "user_id": row["user_id"],
+                    "tenant_id": row.get("tenant_id", ""),
                     "channel": row["channel"],
                     "context_summary": row["context_summary"],
                     "metadata": row["metadata"] if isinstance(row["metadata"], dict) else {},
@@ -241,17 +275,29 @@ class LongTermMemory:
         user_id: str,
         limit: int = 20,
         offset: int = 0,
+        tenant_id: str = "",
     ) -> list[dict[str, Any]]:
         """查询用户的归档会话列表
+
+        多租户模式下，通过 tenant_id 过滤确保租户隔离。
 
         Args:
             user_id: 用户ID
             limit: 返回数量上限
             offset: 偏移量
+            tenant_id: 租户ID（可选，多租户过滤）
 
         Returns:
             会话摘要列表
         """
+        # 如果未传入 tenant_id，尝试从上下文获取
+        if not tenant_id:
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+
         pool = await self._get_pool()
         if pool is None:
             return []
@@ -260,19 +306,35 @@ class LongTermMemory:
             async with pool() as session:
                 from sqlalchemy import text
 
-                result = await session.execute(
-                    text("""
-                        SELECT s.session_id, s.user_id, s.channel, s.context_summary,
-                               s.archived_at, COUNT(m.id) as message_count
-                        FROM sessions s
-                        LEFT JOIN messages m ON s.session_id = m.session_id
-                        WHERE s.user_id = :uid
-                        GROUP BY s.session_id
-                        ORDER BY s.archived_at DESC
-                        LIMIT :limit OFFSET :offset
-                    """),
-                    {"uid": user_id, "limit": limit, "offset": offset},
-                )
+                # 构建查询条件（含租户过滤）
+                if tenant_id:
+                    result = await session.execute(
+                        text("""
+                            SELECT s.session_id, s.user_id, s.tenant_id, s.channel, s.context_summary,
+                                   s.archived_at, COUNT(m.id) as message_count
+                            FROM sessions s
+                            LEFT JOIN messages m ON s.session_id = m.session_id
+                            WHERE s.user_id = :uid AND s.tenant_id = :tid
+                            GROUP BY s.session_id
+                            ORDER BY s.archived_at DESC
+                            LIMIT :limit OFFSET :offset
+                        """),
+                        {"uid": user_id, "tid": tenant_id, "limit": limit, "offset": offset},
+                    )
+                else:
+                    result = await session.execute(
+                        text("""
+                            SELECT s.session_id, s.user_id, s.tenant_id, s.channel, s.context_summary,
+                                   s.archived_at, COUNT(m.id) as message_count
+                            FROM sessions s
+                            LEFT JOIN messages m ON s.session_id = m.session_id
+                            WHERE s.user_id = :uid
+                            GROUP BY s.session_id
+                            ORDER BY s.archived_at DESC
+                            LIMIT :limit OFFSET :offset
+                        """),
+                        {"uid": user_id, "limit": limit, "offset": offset},
+                    )
 
                 sessions = []
                 for row in result.mappings().all():

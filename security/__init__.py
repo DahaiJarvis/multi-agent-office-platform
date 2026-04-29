@@ -52,6 +52,11 @@ from security.audit import (
     record_auth_audit,
     record_guardrail_audit,
 )
+from security.hallucination_detection import (
+    HallucinationDetector,
+    HallucinationCheckResult,
+    Citation,
+)
 
 __all__ = [
     # 权限
@@ -88,4 +93,8 @@ __all__ = [
     "record_tool_call_audit",
     "record_auth_audit",
     "record_guardrail_audit",
+    # 幻觉检测
+    "HallucinationDetector",
+    "HallucinationCheckResult",
+    "Citation",
 ]

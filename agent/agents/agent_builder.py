@@ -793,3 +793,117 @@ def compare_versions(agent_id: str, version_a: int, version_b: int) -> dict[str,
         "diffs": diffs,
         "is_identical": len(diffs) == 0,
     }
+
+
+# ==================== 技能组合创建 Agent ====================
+
+
+async def create_agent_from_skills(
+    agent_name: str,
+    skill_ids: list[str],
+    base_prompt: str = "",
+    model_tier: ModelTier = ModelTier.PLUS,
+    temperature: float = 0.7,
+) -> Any:
+    """根据技能列表动态创建 Agent
+
+    将多个技能组合为一个 Agent，自动合并提示词和工具。
+    这是 Skills 轻量化的核心方法，避免为每个技能创建独立 Agent。
+
+    实现逻辑：
+    1. 从 BUILTIN_SKILLS 获取每个技能的配置
+    2. 合并技能的 prompt_extension 为系统提示词
+    3. 合并技能的 required_tools 为工具列表
+    4. 创建 AssistantAgent 实例
+
+    Args:
+        agent_name: Agent 名称
+        skill_ids: 技能ID列表
+        base_prompt: 基础提示词（可选，会与技能提示词合并）
+        model_tier: 模型级别
+        temperature: 推理温度
+
+    Returns:
+        AssistantAgent 实例
+
+    Raises:
+        ValueError: 技能ID不存在
+    """
+    from autogen_agentchat.agents import AssistantAgent
+    from agent.core.model_client import get_model_client
+    from agent.core.mcp_integration import load_mcp_tools
+    from agent.agents.domain import BUILTIN_SKILLS
+
+    # 收集技能配置
+    skills = []
+    missing_skills = []
+    for sid in skill_ids:
+        skill = BUILTIN_SKILLS.get(sid)
+        if skill:
+            skills.append(skill)
+        else:
+            missing_skills.append(sid)
+
+    if missing_skills:
+        raise ValueError(f"技能不存在: {', '.join(missing_skills)}")
+
+    if not skills:
+        raise ValueError("至少需要指定一个技能")
+
+    # 按优先级排序
+    skills.sort(key=lambda s: s.priority, reverse=True)
+
+    # 合并系统提示词
+    prompt_parts: list[str] = []
+    if base_prompt:
+        prompt_parts.append(base_prompt)
+    else:
+        prompt_parts.append(f"你是 {agent_name}，一个多功能智能助手。")
+
+    prompt_parts.append("\n你具备以下技能：")
+    for skill in skills:
+        prompt_parts.append(f"- {skill.name}：{skill.description}")
+        if skill.prompt_extension:
+            prompt_parts.append(f"  {skill.prompt_extension}")
+
+    prompt_parts.append("\n请根据用户需求，选择合适的技能来处理。完成当前任务后，请输出: TASK_COMPLETE")
+
+    system_prompt = "\n".join(prompt_parts)
+
+    # 合并工具列表（去重）
+    all_mcp_servers: list[str] = []
+    for skill in skills:
+        for tool_name in skill.required_tools:
+            resource_prefix = tool_name.split(":")[0] if ":" in tool_name else tool_name
+            if resource_prefix not in all_mcp_servers:
+                all_mcp_servers.append(resource_prefix)
+
+    # 加载工具
+    tools = await load_mcp_tools(all_mcp_servers)
+
+    # 创建 Agent
+    agent = AssistantAgent(
+        name=agent_name,
+        model_client=get_model_client(model_tier.value),
+        tools=tools,
+        system_message=system_prompt,
+    )
+
+    # 注册到运行时
+    from agent.agents.domain import AGENT_PROMPTS, AGENT_CREATORS, AGENT_SKILL_BINDINGS
+
+    AGENT_PROMPTS[agent_name] = system_prompt
+    AGENT_SKILL_BINDINGS[agent_name] = skill_ids
+
+    async def _create() -> Any:
+        return AssistantAgent(
+            name=agent_name,
+            model_client=get_model_client(model_tier.value),
+            tools=await load_mcp_tools(all_mcp_servers),
+            system_message=system_prompt,
+        )
+
+    AGENT_CREATORS[agent_name] = _create
+
+    logger.info("技能组合 Agent 已创建: name=%s skills=%s", agent_name, skill_ids)
+    return agent

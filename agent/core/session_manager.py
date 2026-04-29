@@ -31,6 +31,7 @@ class SessionState(BaseModel):
 
     session_id: str
     user_id: str
+    tenant_id: str = ""
     channel: str = "web"
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
@@ -59,12 +60,13 @@ class SessionManager:
             )
         return self._redis
 
-    async def create_session(self, user_id: str, channel: str = "web") -> SessionState:
+    async def create_session(self, user_id: str, channel: str = "web", tenant_id: str = "") -> SessionState:
         """创建新会话
 
         Args:
             user_id: 用户ID
             channel: 接入渠道
+            tenant_id: 租户ID（可选，多租户隔离）
 
         Returns:
             新创建的 SessionState
@@ -72,9 +74,18 @@ class SessionManager:
         import uuid
         import time
 
+        # 如果未传入 tenant_id，尝试从上下文获取
+        if not tenant_id:
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+
         session = SessionState(
             session_id=str(uuid.uuid4()),
             user_id=user_id,
+            tenant_id=tenant_id,
             channel=channel,
         )
 
@@ -95,7 +106,9 @@ class SessionManager:
         """获取会话状态
 
         查询顺序：L2 (Redis) -> L3 (PostgreSQL)
-        如果 L2 未命中，尝试从 L3 恢复到 L2。
+        如果 L2 未命中，尝试从 L3 恢复。
+
+        多租户模式下，先尝试带租户前缀的键，再尝试不带前缀的键（兼容旧数据）。
 
         Args:
             session_id: 会话ID
@@ -103,13 +116,23 @@ class SessionManager:
         Returns:
             SessionState 或 None
         """
-        # 先查 L2
+        # 先查 L2（尝试多种键格式）
         redis = await self._get_redis()
-        key = self._session_key(session_id)
-        data = await redis.get(key)
 
-        if data is not None:
-            return SessionState.model_validate_json(data)
+        # 尝试从当前租户上下文获取 tenant_id
+        tenant_id = ""
+        try:
+            from security.tenant import get_current_tenant_id
+            tenant_id = get_current_tenant_id() or ""
+        except Exception:
+            pass
+
+        # 优先尝试带租户前缀的键
+        for tid in ([tenant_id, ""] if tenant_id else [""]):
+            key = self._session_key(session_id, tid)
+            data = await redis.get(key)
+            if data is not None:
+                return SessionState.model_validate_json(data)
 
         # L2 未命中，尝试从 L3 恢复
         return await self._restore_from_l3(session_id)
@@ -162,11 +185,11 @@ class SessionManager:
 
         session.updated_at = datetime.now()
         redis = await self._get_redis()
-        key = self._session_key(session.session_id)
+        key = self._session_key(session.session_id, session.tenant_id)
         await redis.setex(key, self.SESSION_TTL, session.model_dump_json())
 
-        # 更新用户会话索引的时间戳
-        index_key = self._user_sessions_key(session.user_id)
+        # 添加到用户会话索引（Redis Sorted Set，score 为时间戳）
+        index_key = self._user_sessions_key(session.user_id, session.tenant_id)
         await redis.zadd(index_key, {session.session_id: time.time()})
 
     async def append_message(
@@ -196,21 +219,31 @@ class SessionManager:
         session.message_history.append(message)
         await self.update_session(session)
 
-    async def delete_session(self, session_id: str) -> None:
-        """删除会话"""
-        # 先获取会话信息以清理索引
+    async def delete_session(self, session_id: str) -> bool:
+        """删除会话
+
+        从 L2 (Redis) 和 L3 (PostgreSQL) 中删除会话数据。
+        多租户模式下，先获取会话的 tenant_id 再删除。
+
+        Args:
+            session_id: 会话ID
+
+        Returns:
+            是否删除成功
+        """
         session = await self.get_session(session_id)
+        if session is None:
+            return False
 
         redis = await self._get_redis()
-        key = self._session_key(session_id)
+        key = self._session_key(session_id, session.tenant_id)
         await redis.delete(key)
 
         # 从用户会话索引中移除
-        if session:
-            index_key = self._user_sessions_key(session.user_id)
-            await redis.zrem(index_key, session_id)
+        index_key = self._user_sessions_key(session.user_id, session.tenant_id)
+        await redis.zrem(index_key, session_id)
 
-        logger.info("删除会话: %s", session_id)
+        return True
 
     async def archive_session(self, session_id: str) -> bool:
         """归档会话到 L3
@@ -297,24 +330,34 @@ class SessionManager:
         return sorted_sessions[:limit]
 
     async def _list_sessions_from_redis(
-        self, user_id: str, limit: int = 20, offset: int = 0
+        self, user_id: str, limit: int = 20, offset: int = 0, tenant_id: str = ""
     ) -> list[dict[str, Any]]:
         """从 Redis 索引查询用户的活跃会话列表
 
         通过 Redis Sorted Set 索引查找用户的会话ID列表，
         再逐个获取会话详情。
+        多租户模式下，通过 tenant_id 过滤确保租户隔离。
 
         Args:
             user_id: 用户ID
             limit: 返回数量上限
             offset: 偏移量
+            tenant_id: 租户ID（可选，用于多租户过滤）
 
         Returns:
             会话摘要列表
         """
+        # 如果未传入 tenant_id，尝试从上下文获取
+        if not tenant_id:
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+
         try:
             redis = await self._get_redis()
-            index_key = self._user_sessions_key(user_id)
+            index_key = self._user_sessions_key(user_id, tenant_id)
 
             # 按时间倒序获取会话ID（zrevrange: score 从大到小）
             session_ids = await redis.zrevrange(index_key, offset, offset + limit - 1)
@@ -350,13 +393,38 @@ class SessionManager:
             self._redis = None
 
     @staticmethod
-    def _session_key(session_id: str) -> str:
-        """生成 Redis 存储键"""
+    def _session_key(session_id: str, tenant_id: str = "") -> str:
+        """生成 Redis 存储键
+
+        多租户模式下，键包含 tenant_id 前缀实现隔离。
+        单租户模式下（tenant_id 为空），使用原始键格式。
+
+        Args:
+            session_id: 会话ID
+            tenant_id: 租户ID
+
+        Returns:
+            Redis 存储键
+        """
+        if tenant_id:
+            return f"session:{tenant_id}:{session_id}"
         return f"session:{session_id}"
 
     @staticmethod
-    def _user_sessions_key(user_id: str) -> str:
-        """生成用户会话索引的 Redis 键"""
+    def _user_sessions_key(user_id: str, tenant_id: str = "") -> str:
+        """生成用户会话索引的 Redis 键
+
+        多租户模式下，键包含 tenant_id 前缀实现隔离。
+
+        Args:
+            user_id: 用户ID
+            tenant_id: 租户ID
+
+        Returns:
+            Redis 索引键
+        """
+        if tenant_id:
+            return f"user_sessions:{tenant_id}:{user_id}"
         return f"user_sessions:{user_id}"
 
 

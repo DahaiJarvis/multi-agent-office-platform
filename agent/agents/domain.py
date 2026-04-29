@@ -7,6 +7,8 @@
 import logging
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from autogen_agentchat.agents import AssistantAgent
 
 from agent.core.model_client import get_domain_agent_client
@@ -263,3 +265,165 @@ async def create_domain_agent(agent_name: str) -> AssistantAgent:
     if creator is None:
         raise ValueError(f"不支持的 Agent: {agent_name}，可选: {list(AGENT_CREATORS.keys())}")
     return await creator()
+
+
+# ==================== 技能配置（Skills 轻量化） ====================
+
+class SkillConfig(BaseModel):
+    """技能配置
+
+    技能是对 Agent 能力的轻量级描述，用于动态组合 Agent 的能力。
+    与 Agent 是多对多关系：一个 Agent 可拥有多个技能，一个技能可被多个 Agent 使用。
+
+    Attributes:
+        skill_id: 技能唯一标识
+        name: 技能名称
+        description: 技能描述
+        category: 技能分类（communication/data/workflow/knowledge/management）
+        required_tools: 该技能依赖的 MCP 工具列表
+        prompt_extension: 附加到系统提示词的技能描述片段
+        priority: 优先级（1-10，数值越大越优先）
+    """
+
+    skill_id: str = Field(default="")
+    name: str = Field(min_length=1, max_length=64, description="技能名称")
+    description: str = Field(default="", max_length=512, description="技能描述")
+    category: str = Field(default="custom", description="技能分类")
+    required_tools: list[str] = Field(default_factory=list, description="依赖的 MCP 工具列表")
+    prompt_extension: str = Field(default="", max_length=2048, description="附加提示词片段")
+    priority: int = Field(default=5, ge=1, le=10, description="优先级")
+
+
+# 内置技能注册表
+BUILTIN_SKILLS: dict[str, SkillConfig] = {
+    "email_send": SkillConfig(
+        skill_id="email_send",
+        name="邮件发送",
+        description="撰写和发送邮件，支持收件人选择、附件添加",
+        category="communication",
+        required_tools=["email:send", "email:search"],
+        prompt_extension="你可以撰写和发送邮件。发送前需确认收件人、主题和正文。",
+        priority=7,
+    ),
+    "email_search": SkillConfig(
+        skill_id="email_search",
+        name="邮件查询",
+        description="搜索和查看邮件，支持关键词和日期筛选",
+        category="communication",
+        required_tools=["email:search", "email:read"],
+        prompt_extension="你可以搜索和查看邮件。搜索时支持关键词和日期范围筛选。",
+        priority=5,
+    ),
+    "approval_process": SkillConfig(
+        skill_id="approval_process",
+        name="审批处理",
+        description="查询审批列表、执行审批操作（同意/拒绝/转审）",
+        category="workflow",
+        required_tools=["approval:list", "approval:approve", "approval:reject"],
+        prompt_extension="你可以处理审批任务。执行审批操作前必须向用户确认。",
+        priority=8,
+    ),
+    "calendar_manage": SkillConfig(
+        skill_id="calendar_manage",
+        name="日程管理",
+        description="创建、查询、修改和删除日程",
+        category="management",
+        required_tools=["calendar:create", "calendar:query", "calendar:update", "calendar:delete"],
+        prompt_extension="你可以管理日程安排。创建日程时需确认时间、参与者和主题。",
+        priority=6,
+    ),
+    "crm_query": SkillConfig(
+        skill_id="crm_query",
+        name="客户查询",
+        description="查询客户信息、跟进记录和销售数据",
+        category="data",
+        required_tools=["crm:query_customer", "crm:query_followup"],
+        prompt_extension="你可以查询客户信息和跟进记录。注意保护客户隐私数据。",
+        priority=5,
+    ),
+    "knowledge_search": SkillConfig(
+        skill_id="knowledge_search",
+        name="知识检索",
+        description="从知识库中检索文档和信息",
+        category="knowledge",
+        required_tools=["knowledge:search", "knowledge:summarize"],
+        prompt_extension="你可以从知识库中检索信息。检索结果需标注来源。",
+        priority=6,
+    ),
+    "finance_query": SkillConfig(
+        skill_id="finance_query",
+        name="财务查询",
+        description="查询报销单据、预算和财务数据",
+        category="data",
+        required_tools=["finance:query_expense", "finance:query_budget"],
+        prompt_extension="你可以查询财务数据。敏感财务信息需脱敏展示。",
+        priority=7,
+    ),
+    "hr_query": SkillConfig(
+        skill_id="hr_query",
+        name="人事查询",
+        description="查询员工信息、考勤和假期数据",
+        category="data",
+        required_tools=["hr:query_employee", "hr:query_attendance"],
+        prompt_extension="你可以查询人事信息。员工个人隐私数据需脱敏处理。",
+        priority=5,
+    ),
+}
+
+# Agent 与技能的绑定关系（一个 Agent 可拥有多个技能）
+AGENT_SKILL_BINDINGS: dict[str, list[str]] = {
+    "EmailAgent": ["email_send", "email_search"],
+    "ApprovalAgent": ["approval_process"],
+    "CalendarAgent": ["calendar_manage"],
+    "CRMAgent": ["crm_query"],
+    "KnowledgeAgent": ["knowledge_search"],
+    "FinanceAgent": ["finance_query"],
+    "HRAgent": ["hr_query"],
+    "OfficeAssistant": ["email_search", "calendar_manage", "knowledge_search"],
+}
+
+
+def get_agent_skills(agent_name: str) -> list[SkillConfig]:
+    """获取 Agent 绑定的技能列表
+
+    Args:
+        agent_name: Agent 名称
+
+    Returns:
+        技能配置列表，按优先级降序排列
+    """
+    skill_ids = AGENT_SKILL_BINDINGS.get(agent_name, [])
+    skills = []
+    for sid in skill_ids:
+        skill = BUILTIN_SKILLS.get(sid)
+        if skill:
+            skills.append(skill)
+    skills.sort(key=lambda s: s.priority, reverse=True)
+    return skills
+
+
+def register_skill(skill: SkillConfig) -> None:
+    """注册新技能到内置技能表
+
+    Args:
+        skill: 技能配置
+    """
+    if not skill.skill_id:
+        import uuid
+        skill.skill_id = str(uuid.uuid4())
+    BUILTIN_SKILLS[skill.skill_id] = skill
+    logger.info("注册技能: %s (%s)", skill.name, skill.skill_id)
+
+
+def bind_skill_to_agent(agent_name: str, skill_id: str) -> None:
+    """为 Agent 绑定技能
+
+    Args:
+        agent_name: Agent 名称
+        skill_id: 技能ID
+    """
+    if agent_name not in AGENT_SKILL_BINDINGS:
+        AGENT_SKILL_BINDINGS[agent_name] = []
+    if skill_id not in AGENT_SKILL_BINDINGS[agent_name]:
+        AGENT_SKILL_BINDINGS[agent_name].append(skill_id)
+        logger.info("绑定技能 %s 到 Agent %s", skill_id, agent_name)

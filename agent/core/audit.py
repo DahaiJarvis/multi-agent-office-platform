@@ -41,6 +41,7 @@ class AuditEvent(BaseModel):
     event_type: AuditEventType = Field(..., description="事件类型")
     action: str = Field(..., description="操作动作")
     user_id: str = Field(default="", description="操作用户")
+    tenant_id: str = Field(default="", description="租户ID")
     session_id: str = Field(default="", description="会话ID")
     agent_name: str = Field(default="", description="Agent名称")
     resource: str = Field(default="", description="操作资源")
@@ -87,6 +88,7 @@ class AuditLogger:
         event_type: AuditEventType,
         action: str,
         user_id: str = "",
+        tenant_id: str = "",
         session_id: str = "",
         agent_name: str = "",
         resource: str = "",
@@ -97,11 +99,13 @@ class AuditLogger:
         """记录审计事件
 
         将审计事件写入 Redis 缓冲队列，由后台任务消费持久化。
+        多租户模式下，自动从上下文填充 tenant_id。
 
         Args:
             event_type: 事件类型
             action: 操作动作
             user_id: 操作用户
+            tenant_id: 租户ID
             session_id: 会话ID
             agent_name: Agent名称
             resource: 操作资源
@@ -112,10 +116,19 @@ class AuditLogger:
         Returns:
             是否写入成功
         """
+        # 自动从上下文填充 tenant_id
+        if not tenant_id:
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+
         event = AuditEvent(
             event_type=event_type,
             action=action,
             user_id=user_id,
+            tenant_id=tenant_id,
             session_id=session_id,
             agent_name=agent_name,
             resource=resource,

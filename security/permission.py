@@ -39,8 +39,10 @@ SENSITIVE_ACTIONS: dict[str, dict[str, Any]] = {
     "email:send_all": {"require_role": [Role.ADMIN], "require_confirm": True},
     "crm:export": {"require_role": [Role.MANAGER, Role.ADMIN], "require_confirm": False},
     "data:delete": {"require_role": [Role.ADMIN], "require_confirm": True},
+    "data:export": {"require_role": [Role.MANAGER, Role.ADMIN], "require_confirm": True},
     "approval:reject": {"require_role": [Role.MANAGER, Role.ADMIN], "require_confirm": True},
     "finance:submit": {"require_role": [Role.FINANCE, Role.ADMIN], "require_confirm": True},
+    "system:config_update": {"require_role": [Role.ADMIN], "require_confirm": True},
 }
 
 

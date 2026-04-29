@@ -505,3 +505,159 @@ def rate_template(template_id: str, rating: float) -> PromptTemplate | None:
     template.rating = round(total_score / template.rating_count, 1)
 
     return template
+
+
+# ==================== 技能模板管理 ====================
+
+
+class SkillPromptTemplate(BaseModel):
+    """技能模板
+
+    将技能组合封装为可复用的模板，用户可一键创建具备特定技能组合的 Agent。
+    与 PromptTemplate 的区别：SkillPromptTemplate 关注 Agent 能力组合，
+    PromptTemplate 关注单次对话的提示词格式。
+    """
+
+    template_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = Field(min_length=1, max_length=100, description="模板名称")
+    description: str = Field(default="", max_length=500, description="模板描述")
+    skill_ids: list[str] = Field(default_factory=list, description="包含的技能ID列表")
+    base_prompt: str = Field(default="", max_length=4000, description="基础提示词")
+    category: str = Field(default="custom", description="模板分类")
+    is_official: bool = Field(default=False, description="是否官方模板")
+    usage_count: int = Field(default=0, description="使用次数")
+    tags: list[str] = Field(default_factory=list)
+    created_at: float = Field(default_factory=time.time)
+
+
+_skill_templates_store: dict[str, SkillPromptTemplate] = {}
+
+
+def _init_default_skill_templates() -> None:
+    """初始化官方技能模板"""
+    if _skill_templates_store:
+        return
+
+    defaults = [
+        SkillPromptTemplate(
+            template_id="spt-office-allround",
+            name="全能办公助手",
+            description="集成邮件、日程、知识检索等常用办公技能",
+            skill_ids=["email_send", "email_search", "calendar_manage", "knowledge_search"],
+            base_prompt="你是全能办公助手，帮助用户高效处理日常办公事务。",
+            category="office",
+            is_official=True,
+            tags=["办公", "全能", "日常"],
+        ),
+        SkillPromptTemplate(
+            template_id="spt-manager-assistant",
+            name="管理者助手",
+            description="集成审批、日程、邮件等管理者常用技能",
+            skill_ids=["approval_process", "calendar_manage", "email_send", "email_search"],
+            base_prompt="你是管理者助手，帮助管理者高效处理审批、日程和邮件事务。",
+            category="management",
+            is_official=True,
+            tags=["管理", "审批", "日程"],
+        ),
+        SkillPromptTemplate(
+            template_id="spt-data-analyst",
+            name="数据分析师",
+            description="集成财务、客户、人事等数据查询技能",
+            skill_ids=["finance_query", "crm_query", "hr_query", "knowledge_search"],
+            base_prompt="你是数据分析师，帮助用户查询和分析企业数据。",
+            category="analytics",
+            is_official=True,
+            tags=["数据", "分析", "报表"],
+        ),
+    ]
+
+    for tpl in defaults:
+        _skill_templates_store[tpl.template_id] = tpl
+
+
+_init_default_skill_templates()
+
+
+def create_skill_template(template: SkillPromptTemplate) -> SkillPromptTemplate:
+    """创建技能模板
+
+    Args:
+        template: 技能模板配置
+
+    Returns:
+        创建后的技能模板
+    """
+    template.is_official = False
+    template.created_at = time.time()
+    _skill_templates_store[template.template_id] = template
+    logger.info("技能模板已创建: id=%s name=%s", template.template_id, template.name)
+    return template
+
+
+def list_skill_templates(
+    category: str = "",
+    keyword: str = "",
+    limit: int = 20,
+) -> list[SkillPromptTemplate]:
+    """列出技能模板
+
+    Args:
+        category: 按分类过滤
+        keyword: 按关键词搜索
+        limit: 返回数量上限
+
+    Returns:
+        技能模板列表
+    """
+    templates = list(_skill_templates_store.values())
+
+    if category:
+        templates = [t for t in templates if t.category == category]
+    if keyword:
+        kw_lower = keyword.lower()
+        templates = [
+            t for t in templates
+            if kw_lower in t.name.lower() or kw_lower in t.description.lower()
+        ]
+
+    templates.sort(key=lambda t: (not t.is_official, -t.usage_count))
+    return templates[:limit]
+
+
+def get_skill_template(template_id: str) -> SkillPromptTemplate | None:
+    """获取技能模板"""
+    return _skill_templates_store.get(template_id)
+
+
+async def create_agent_from_skill_template(
+    template_id: str,
+    agent_name: str,
+) -> Any:
+    """从技能模板创建 Agent
+
+    根据模板中的技能ID列表，调用 create_agent_from_skills 创建 Agent。
+
+    Args:
+        template_id: 技能模板ID
+        agent_name: Agent 名称
+
+    Returns:
+        AssistantAgent 实例
+
+    Raises:
+        ValueError: 模板不存在
+    """
+    from agent.agents.agent_builder import create_agent_from_skills, ModelTier
+
+    template = _skill_templates_store.get(template_id)
+    if not template:
+        raise ValueError(f"技能模板不存在: {template_id}")
+
+    template.usage_count += 1
+
+    return await create_agent_from_skills(
+        agent_name=agent_name,
+        skill_ids=template.skill_ids,
+        base_prompt=template.base_prompt,
+        model_tier=ModelTier.PLUS,
+    )

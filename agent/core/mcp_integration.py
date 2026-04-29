@@ -320,3 +320,96 @@ def disable_mcp_server(name: str) -> None:
         MCP_SERVER_REGISTRY[name].enabled = False
         _tool_cache.pop(name, None)
         logger.info("已禁用 MCP 服务: %s", name)
+
+
+async def check_tool_health(server_name: str) -> bool:
+    """检查 MCP 服务健康状态
+
+    通过尝试连接 MCP 服务的 SSE 端点判断服务是否可用。
+
+    Args:
+        server_name: MCP 服务名称，如 "oa"
+
+    Returns:
+        服务是否健康
+    """
+    config = MCP_SERVER_REGISTRY.get(server_name)
+    if not config:
+        return False
+
+    if not config.enabled:
+        return False
+
+    try:
+        import httpx
+
+        if config.transport == "sse" and config.url:
+            health_url = config.url.replace("/sse", "/health")
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(health_url)
+                return response.status_code == 200
+
+        return True
+    except Exception as e:
+        logger.warning("MCP 服务 %s 健康检查失败: %s", server_name, e)
+        return False
+
+
+async def call_tool_with_timeout(
+    tool_func,
+    tool_input: dict[str, Any],
+    timeout: int | None = None,
+    max_retries: int | None = None,
+) -> Any:
+    """带超时和重试的工具调用
+
+    在 FunctionTool 的执行函数中包裹超时控制和重试逻辑。
+
+    Args:
+        tool_func: 工具执行函数
+        tool_input: 工具输入参数
+        timeout: 超时秒数（None 则使用配置默认值）
+        max_retries: 最大重试次数（None 则使用配置默认值）
+
+    Returns:
+        工具执行结果
+
+    Raises:
+        TimeoutError: 工具调用超时
+        Exception: 重试耗尽后抛出最后一次异常
+    """
+    import asyncio
+
+    settings = get_settings()
+    timeout = timeout or settings.tool_execution_timeout
+    max_retries = max_retries or settings.tool_max_retries
+    backoff = settings.tool_retry_backoff
+
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            result = await asyncio.wait_for(
+                tool_func(**tool_input),
+                timeout=timeout,
+            )
+            return result
+        except asyncio.TimeoutError:
+            last_error = TimeoutError(f"工具调用超时 ({timeout}s)")
+            logger.warning(
+                "工具调用超时: attempt=%d/%d timeout=%ds",
+                attempt + 1, max_retries + 1, timeout,
+            )
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "工具调用失败: attempt=%d/%d error=%s",
+                attempt + 1, max_retries + 1, str(e),
+            )
+
+        # 重试退避
+        if attempt < max_retries:
+            wait_time = backoff * (2 ** attempt)
+            await asyncio.sleep(wait_time)
+
+    raise last_error or Exception("工具调用失败")

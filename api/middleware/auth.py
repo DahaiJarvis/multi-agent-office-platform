@@ -50,6 +50,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         request.state.request_id = request_id
 
+        try:
+            response = await self._authenticate(request, call_next)
+        finally:
+            # 请求结束后清除租户上下文，防止上下文泄漏
+            try:
+                from security.tenant import clear_tenant_context
+                clear_tenant_context()
+            except Exception:
+                pass
+
+        return response
+
+    async def _authenticate(self, request: Request, call_next) -> Response:
+
         # 跳过免认证路径（支持任意 API 版本前缀）
         path = request.url.path
         if self._should_skip_auth(path):
@@ -68,11 +82,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 request.state.user_roles = payload.roles
                 request.state.user_departments = payload.departments
                 request.state.auth_method = "jwt"
+
+                # 从 JWT Token 中提取 tenant_id 并注入租户上下文
+                tenant_id = getattr(payload, "tenant_id", None)
+                if tenant_id:
+                    try:
+                        from security.tenant import set_tenant_context, get_tenant_manager
+                        manager = get_tenant_manager()
+                        tenant = manager.get_tenant(tenant_id)
+                        if tenant and tenant.status.value == "active":
+                            set_tenant_context(tenant)
+                    except Exception as e:
+                        logger.debug("租户上下文注入失败（非致命）: %s", e)
+
                 return await call_next(request)
 
             # Token 验证失败
             record_auth_audit(
-                trace_id=request_id,
+                trace_id=request.state.request_id,
                 user_id="",
                 channel=request.headers.get("X-Channel", "unknown"),
                 status="failed",
@@ -96,7 +123,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 user_exists = await store.user_exists(user_id)
                 if not user_exists:
                     record_auth_audit(
-                        trace_id=request_id,
+                        trace_id=request.state.request_id,
                         user_id=user_id,
                         channel=request.headers.get("X-Channel", "unknown"),
                         status="failed",
@@ -118,7 +145,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # 无 Token 且非开发模式
         record_auth_audit(
-            trace_id=request_id,
+            trace_id=request.state.request_id,
             user_id="",
             channel=request.headers.get("X-Channel", "unknown"),
             status="failed",

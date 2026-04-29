@@ -25,6 +25,7 @@ class AuditEvent(BaseModel):
     trace_id: str = ""
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     user_id: str = ""
+    tenant_id: str = ""
     user_role: str = ""
     channel: str = ""
     event_type: str = ""  # request / agent_call / tool_call / guardrail / auth
@@ -139,9 +140,19 @@ def record_audit(event: AuditEvent) -> None:
     1. 专用审计日志（Python logging，独立文件）
     2. 集中化审计系统（Redis 缓冲 -> PostgreSQL 持久化）
 
+    多租户模式下，自动从上下文填充 tenant_id。
+
     Args:
         event: 审计事件
     """
+    # 自动从上下文填充 tenant_id
+    if not event.tenant_id:
+        try:
+            from security.tenant import get_current_tenant_id
+            event.tenant_id = get_current_tenant_id() or ""
+        except Exception:
+            pass
+
     event.risk_level = _determine_risk_level(event)
     event_json = event.model_dump_json()
     _audit_logger.info(event_json)
