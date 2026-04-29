@@ -20,6 +20,7 @@ from agent.agents.supervisor import (
 from agent.teams.team_factory import create_team
 from agent.teams.execution_controller import get_execution_controller
 from agent.core.session_manager import SessionState, get_session_manager
+from agent.core.event_bus import publish_event, EventType
 from observability.metrics import record_agent_call
 from observability.tracing import langfuse_tracer, span_cache
 
@@ -114,6 +115,21 @@ async def route_and_execute(
     except Exception:
         pass
 
+    # 发布意图分类事件
+    try:
+        await publish_event(
+            EventType.INTENT_CLASSIFIED,
+            session_id,
+            {
+                "intent": intent.intent,
+                "confidence": intent.confidence,
+                "target_agent": intent.target_agent,
+                "mode": intent.collaboration_mode.value,
+            },
+        )
+    except Exception:
+        pass
+
     # 2. 置信度校验
     if intent.confidence < CONFIDENCE_THRESHOLD:
         return {
@@ -137,6 +153,20 @@ async def route_and_execute(
     # 4. 构建带上下文的任务描述
     task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
 
+    # 发布 Agent 启动事件
+    try:
+        await publish_event(
+            EventType.AGENT_START,
+            session_id,
+            {
+                "agent_name": intent.target_agent,
+                "intent": intent.intent,
+                "mode": intent.collaboration_mode.value,
+            },
+        )
+    except Exception:
+        pass
+
     # 5. 执行任务（集成 ExecutionController：超时控制、重试、上下文压缩）
     try:
         controller = get_execution_controller()
@@ -147,6 +177,14 @@ async def route_and_execute(
         if exec_meta.status == "timeout":
             duration = time.time() - start_time
             record_agent_call(intent.target_agent, "error", duration)
+            try:
+                await publish_event(EventType.ERROR, session_id, {
+                    "agent_name": intent.target_agent,
+                    "error": "timeout",
+                    "duration_ms": round(duration * 1000),
+                })
+            except Exception:
+                pass
             return {
                 "status": "error",
                 "message": f"任务执行超时（超过 {controller._config.max_runtime}s），请简化请求或稍后重试。",
@@ -158,6 +196,14 @@ async def route_and_execute(
             duration = time.time() - start_time
             record_agent_call(intent.target_agent, "error", duration)
             logger.error("任务执行失败: agent=%s error=%s", intent.target_agent, exec_meta.message)
+            try:
+                await publish_event(EventType.ERROR, session_id, {
+                    "agent_name": intent.target_agent,
+                    "error": exec_meta.message,
+                    "duration_ms": round(duration * 1000),
+                })
+            except Exception:
+                pass
             return {
                 "status": "error",
                 "message": f"任务执行失败: {exec_meta.message}",
@@ -219,6 +265,18 @@ async def route_and_execute(
             await span_cache.increment_agent_stats(
                 intent.target_agent, duration * 1000, success=True,
             )
+        except Exception:
+            pass
+
+        # 发布 Agent 完成事件
+        try:
+            await publish_event(EventType.AGENT_END, session_id, {
+                "agent_name": intent.target_agent,
+                "status": "success",
+                "duration_ms": round(duration * 1000),
+                "retries": exec_meta.retries,
+                "compacted": exec_meta.compacted,
+            })
         except Exception:
             pass
 
@@ -427,6 +485,17 @@ async def route_and_execute_stream(
         "mode": intent.collaboration_mode.value,
     }
 
+    # 发布意图分类事件
+    try:
+        await publish_event(EventType.INTENT_CLASSIFIED, session_id, {
+            "intent": intent.intent,
+            "confidence": intent.confidence,
+            "target_agent": intent.target_agent,
+            "mode": intent.collaboration_mode.value,
+        })
+    except Exception:
+        pass
+
     # 2. 置信度校验
     if intent.confidence < CONFIDENCE_THRESHOLD:
         yield {
@@ -448,6 +517,16 @@ async def route_and_execute_stream(
 
     # 4. 构建带上下文的任务描述
     task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
+
+    # 发布 Agent 启动事件
+    try:
+        await publish_event(EventType.AGENT_START, session_id, {
+            "agent_name": intent.target_agent,
+            "intent": intent.intent,
+            "mode": intent.collaboration_mode.value,
+        })
+    except Exception:
+        pass
 
     # 5. 流式执行任务（集成 ExecutionController：超时控制、重试、上下文压缩）
     full_response = ""
@@ -539,6 +618,16 @@ async def route_and_execute_stream(
             await span_cache.increment_agent_stats(
                 intent.target_agent, duration * 1000, success=True,
             )
+        except Exception:
+            pass
+
+        # 发布 Agent 完成事件
+        try:
+            await publish_event(EventType.AGENT_END, session_id, {
+                "agent_name": intent.target_agent,
+                "status": "success",
+                "duration_ms": round(duration * 1000),
+            })
         except Exception:
             pass
 

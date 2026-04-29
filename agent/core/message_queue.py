@@ -839,3 +839,15 @@ def get_scheduled_task_manager() -> ScheduledTaskManager:
     if _scheduled_task_manager is None:
         _scheduled_task_manager = ScheduledTaskManager()
     return _scheduled_task_manager
+
+
+async def register_long_task_handler() -> None:
+    """注册长任务处理器到消息队列
+
+    将 long_task 类型的消息路由到长任务执行器。
+    需要在应用启动时调用。
+    """
+    from agent.core.long_task import execute_long_task_step
+
+    await register_handler(QueueName.TASK, "long_task", execute_long_task_step)
+    logger.info("长任务处理器已注册到消息队列")

@@ -3,6 +3,7 @@
 提供同步和流式两种对话接口:
   - POST /agent/chat: 同步对话，等待完整响应后返回
   - POST /agent/chat/stream: 流式对话，SSE 逐 Token 推送响应
+  - GET /agent/events/{session_id}: SSE 事件流，实时推送事件总线事件
 """
 
 import json
@@ -120,45 +121,91 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
             final_intent = ""
             final_mode = ""
 
-            async for event in route_and_execute_stream(
+            # 创建事件总线订阅，并行监听事件总线事件
+            try:
+                from agent.core.event_bus import subscribe_events, EventType
+
+                _event_types = [
+                    EventType.TOOL_CALL,
+                    EventType.TOOL_RESULT,
+                    EventType.GUARDRAIL_BLOCK,
+                    EventType.APPROVAL_PENDING,
+                    EventType.CONTEXT_COMPACTION,
+                    EventType.DEGRADATION,
+                ]
+
+                async def _listen_event_bus() -> None:
+                    async for event in subscribe_events(session.session_id, _event_types):
+                        if event.data.get("heartbeat"):
+                            continue
+                        yield _format_sse("bus_event", json.dumps({
+                            "event_type": event.event_type.value,
+                            "data": event.data,
+                            "timestamp": event.timestamp,
+                        }, ensure_ascii=False))
+
+                event_bus_gen = _listen_event_bus()
+            except Exception:
+                event_bus_gen = None
+
+            # 使用 asyncio 合并流式对话和事件总线事件
+            stream_gen = route_and_execute_stream(
                 user_message=request.message,
                 session_id=session.session_id,
                 user_id=request.user_id,
                 session=session,
                 knowledge_base_id=request.knowledge_base_id,
-            ):
-                event_type = event.get("type")
+            )
 
-                if event_type == "intent":
-                    yield _format_sse("intent", json.dumps({
-                        "intent": event["intent"],
-                        "confidence": event["confidence"],
-                        "agent": event["agent"],
-                        "mode": event["mode"],
-                    }, ensure_ascii=False))
+            # 创建两个异步任务
+            async def _consume_stream() -> None:
+                nonlocal full_message, final_agent, final_intent, final_mode
+                async for event in stream_gen:
+                    event_type = event.get("type")
 
-                elif event_type == "clarification":
-                    yield _format_sse("chunk", event["message"])
-                    yield _format_sse("status", "clarification_needed")
-                    full_message = event["message"]
+                    if event_type == "intent":
+                        yield _format_sse("intent", json.dumps({
+                            "intent": event["intent"],
+                            "confidence": event["confidence"],
+                            "agent": event["agent"],
+                            "mode": event["mode"],
+                        }, ensure_ascii=False))
 
-                elif event_type == "chunk":
-                    yield _format_sse("chunk", event["content"])
-                    final_agent = event.get("agent_name", final_agent)
+                    elif event_type == "clarification":
+                        yield _format_sse("chunk", event["message"])
+                        yield _format_sse("status", "clarification_needed")
+                        full_message = event["message"]
 
-                elif event_type == "complete":
-                    final_agent = event.get("agent_name", final_agent)
-                    final_intent = event.get("intent", "")
-                    final_mode = event.get("mode", "")
-                    full_message = event.get("full_message", full_message)
-                    yield _format_sse("agent_name", final_agent)
-                    yield _format_sse("intent", final_intent)
-                    yield _format_sse("collaboration_mode", final_mode)
-                    yield _format_sse("status", "completed")
+                    elif event_type == "chunk":
+                        yield _format_sse("chunk", event["content"])
+                        final_agent = event.get("agent_name", final_agent)
 
-                elif event_type == "error":
-                    yield _format_sse("error", event["message"])
-                    yield _format_sse("status", "error")
+                    elif event_type == "complete":
+                        final_agent = event.get("agent_name", final_agent)
+                        final_intent = event.get("intent", "")
+                        final_mode = event.get("mode", "")
+                        full_message = event.get("full_message", full_message)
+                        yield _format_sse("agent_name", final_agent)
+                        yield _format_sse("intent", final_intent)
+                        yield _format_sse("collaboration_mode", final_mode)
+                        yield _format_sse("status", "completed")
+
+                    elif event_type == "error":
+                        yield _format_sse("error", event["message"])
+                        yield _format_sse("status", "error")
+
+            # 优先处理流式对话，同时尝试获取事件总线事件
+            async for sse_data in _consume_stream():
+                yield sse_data
+
+                # 在每个 chunk 之后检查事件总线是否有事件
+                if event_bus_gen is not None:
+                    try:
+                        async for bus_sse in event_bus_gen:
+                            yield bus_sse
+                            break
+                    except (StopAsyncIteration, RuntimeError):
+                        pass
 
             if full_message:
                 await session_mgr.append_message(
@@ -206,6 +253,64 @@ def _format_sse(event: str, data: str) -> str:
     """
     payload = json.dumps({"event": event, "data": data}, ensure_ascii=False)
     return f"data: {payload}\n\n"
+
+
+# ==================== 事件流 ====================
+
+
+@router.get("/events/{session_id}")
+async def event_stream(session_id: str) -> StreamingResponse:
+    """SSE 事件流端点
+
+    实时推送事件总线中该会话的所有事件，
+    包括工具调用、护栏拦截、审批挂起、上下文压缩等。
+
+    前端可通过 EventSource API 订阅此端点，
+    实时展示 Agent 执行过程中的关键事件。
+    """
+
+    async def _generate():
+        try:
+            from agent.core.event_bus import subscribe_events, EventType
+
+            event_types = [
+                EventType.AGENT_START,
+                EventType.AGENT_END,
+                EventType.TOOL_CALL,
+                EventType.TOOL_RESULT,
+                EventType.GUARDRAIL_BLOCK,
+                EventType.APPROVAL_PENDING,
+                EventType.CONTEXT_COMPACTION,
+                EventType.DEGRADATION,
+                EventType.INTENT_CLASSIFIED,
+                EventType.RETRY,
+                EventType.ERROR,
+            ]
+
+            async for event in subscribe_events(session_id, event_types):
+                if event.data.get("heartbeat"):
+                    yield _format_sse("heartbeat", "")
+                    continue
+
+                yield _format_sse(event.event_type.value, json.dumps({
+                    "session_id": event.session_id,
+                    "data": event.data,
+                    "timestamp": event.timestamp,
+                }, ensure_ascii=False))
+
+        except Exception as e:
+            logger.error("事件流异常: %s", e)
+            yield _format_sse("error", str(e))
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ==================== 对话反馈 ====================

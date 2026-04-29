@@ -183,6 +183,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("定时任务扫描器启动失败（非致命）: %s", e)
 
+    # 注册长任务处理器到消息队列
+    try:
+        from agent.core.message_queue import register_long_task_handler
+        await register_long_task_handler()
+        logger.info("长任务处理器已注册")
+    except Exception as e:
+        logger.warning("长任务处理器注册失败（非致命）: %s", e)
+
+    # 启动事件总线 Redis 监听器
+    try:
+        from agent.core.event_bus import get_event_bus
+        bus = get_event_bus()
+        await bus.start_redis_listener()
+        logger.info("事件总线 Redis 监听器已启动")
+    except Exception as e:
+        logger.warning("事件总线 Redis 监听器启动失败（非致命）: %s", e)
+
     yield
 
     # 停止审计日志刷新任务
@@ -198,6 +215,14 @@ async def lifespan(app: FastAPI):
         from agent.core.scheduler import get_scheduler_worker
         scheduler = get_scheduler_worker()
         await scheduler.stop()
+    except Exception:
+        pass
+
+    # 停止事件总线 Redis 监听器
+    try:
+        from agent.core.event_bus import get_event_bus
+        bus = get_event_bus()
+        await bus.stop_redis_listener()
     except Exception:
         pass
 
