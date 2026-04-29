@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from security.permission import check_permission
+from security.permission import check_permission, SENSITIVE_ACTIONS
 from security.desensitize import desensitize_content, has_pii, detect_pii
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,7 @@ def check_tool_call_guardrails(
             checks=checks,
         )
 
-    # 3. 敏感操作确认
+    # 3. 敏感操作确认（自动创建审批单）
     if perm_result.sensitive:
         checks.append({
             "check": "sensitive_action",
@@ -210,10 +210,19 @@ def check_tool_call_guardrails(
         })
 
         if perm_result.require_confirm:
+            # 自动创建审批单
+            approval_id = _create_approval_for_sensitive_action(
+                tool_name=tool_name,
+                tool_input=tool_input,
+            )
+            approval_msg = f"操作 {tool_name} 为敏感操作，需要审批"
+            if approval_id:
+                approval_msg += f"，审批单号: {approval_id}"
+
             return GuardrailResult(
                 passed=True,
                 action=GuardrailAction.CONFIRM,
-                reason=f"操作 {tool_name} 为敏感操作，需要用户确认",
+                reason=approval_msg,
                 checks=checks,
             )
 
@@ -585,3 +594,85 @@ def _check_hallucination_sync(
                 "note": f"检测失败跳过: {e}",
             },
         }
+
+
+def _create_approval_for_sensitive_action(
+    tool_name: str,
+    tool_input: dict[str, Any] | None = None,
+) -> str | None:
+    """为敏感操作自动创建审批单
+
+    在 Guardrails 检测到敏感操作需要确认时调用。
+    审批单创建失败不阻断主流程，仅记录警告。
+
+    Args:
+        tool_name: 敏感操作工具名称
+        tool_input: 工具输入参数
+
+    Returns:
+        审批单ID，创建失败时返回 None
+    """
+    try:
+        import asyncio
+        from agent.core.approval_flow import get_approval_flow_manager
+
+        # 获取当前上下文信息
+        session_id = ""
+        user_id = ""
+        try:
+            from agent.core.session_manager import get_session_manager
+
+            async def _get_context() -> tuple[str, str]:
+                await get_session_manager()
+                return "", ""
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                pass
+            else:
+                session_id, user_id = asyncio.run(_get_context())
+        except Exception:
+            pass
+
+        # 从 SENSITIVE_ACTIONS 获取审批链配置
+        approval_chain: list[dict[str, Any]] = []
+        sensitive_config = SENSITIVE_ACTIONS.get(tool_name, {})
+        require_roles = sensitive_config.get("require_role", [])
+        for role in require_roles:
+            approval_chain.append({"role": str(role), "name": ""})
+
+        async def _create() -> str | None:
+            mgr = get_approval_flow_manager()
+            approval = await mgr.create_approval(
+                session_id=session_id,
+                user_id=user_id,
+                agent_name="",
+                tool_name=tool_name,
+                tool_input=tool_input or {},
+                reason=f"敏感操作: {tool_name}",
+                approval_chain=approval_chain if approval_chain else None,
+            )
+            return approval.approval_id
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # 异步上下文：使用线程池执行
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, _create())
+                return future.result(timeout=5)
+        else:
+            return asyncio.run(_create())
+
+    except Exception as e:
+        logger.warning("创建审批单失败（非致命）: tool=%s error=%s", tool_name, e)
+        return None

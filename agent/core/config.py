@@ -174,6 +174,12 @@ class Settings(BaseSettings):
     tool_retry_backoff: float = Field(default=1.0, description="工具调用重试退避基数(秒)")
     tool_daily_quota: int = Field(default=1000, description="单工具每日调用配额")
 
+    # 执行控制
+    execution_max_runtime: int = Field(default=600, description="任务执行最大运行时间(秒)")
+    execution_llm_timeout: int = Field(default=30, description="单轮LLM调用超时(秒)")
+    execution_max_retries: int = Field(default=2, description="任务执行最大重试次数")
+    execution_compaction_threshold: int = Field(default=80000, description="上下文压缩Token阈值")
+
     # MCP Registry
     mcp_registry_url: str = Field(
         default="http://localhost:9099", alias="MCP_REGISTRY_URL"

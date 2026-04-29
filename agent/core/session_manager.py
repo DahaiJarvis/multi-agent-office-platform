@@ -10,8 +10,13 @@
   2. 交互过程中 -> 读写 L2，自动续期
   3. L2 过期前 -> 自动归档到 L3 (PostgreSQL)
   4. 查询历史 -> 优先 L2，未命中则从 L3 恢复
+
+会话锁:
+  - 同一会话的并发请求通过 asyncio.Lock 串行化
+  - 防止同一会话的消息交错导致上下文混乱
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -50,6 +55,7 @@ class SessionManager:
 
     def __init__(self) -> None:
         self._redis: aioredis.Redis | None = None
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     async def _get_redis(self) -> aioredis.Redis:
         """获取 Redis 连接"""
@@ -385,6 +391,35 @@ class SessionManager:
         except Exception as e:
             logger.warning("从 Redis 索引查询会话失败: user_id=%s error=%s", user_id, e)
             return []
+
+    async def acquire_session(self, session_id: str) -> asyncio.Lock:
+        """获取会话锁，防止同一会话并发请求
+
+        同一会话的并发请求通过 asyncio.Lock 串行化，
+        避免消息交错导致上下文混乱。
+
+        Args:
+            session_id: 会话ID
+
+        Returns:
+            该会话对应的 asyncio.Lock
+        """
+        if session_id not in self._session_locks:
+            self._session_locks[session_id] = asyncio.Lock()
+        return self._session_locks[session_id]
+
+    async def release_session(self, session_id: str) -> None:
+        """释放会话锁资源
+
+        清理不再使用的锁对象，防止内存泄漏。
+        对于已释放的锁，如果正在被等待，等待者仍能获取。
+
+        Args:
+            session_id: 会话ID
+        """
+        lock = self._session_locks.pop(session_id, None)
+        if lock and lock.locked():
+            lock.release()
 
     async def close(self) -> None:
         """关闭 Redis 连接"""

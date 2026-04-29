@@ -217,3 +217,59 @@ async def prepare_context_for_agent(
     context = build_agent_context(system_message, history, current_task)
     compressed = await compress_context(context, max_tokens=max_tokens)
     return compressed
+
+
+async def compact_messages(
+    messages: list[dict[str, Any]],
+    max_tokens: int = 40000,
+) -> list[dict[str, Any]]:
+    """压缩消息列表
+
+    供 ExecutionController 调用，当上下文超过 Token 阈值时触发压缩。
+    调用轻量级 LLM 生成历史摘要，用摘要替换早期消息，保留最近 N 轮。
+
+    与 compress_context 的区别：
+    - compress_context: 面向 Agent 上下文构建，包含系统消息
+    - compact_messages: 面向执行控制，仅处理会话历史消息
+
+    Args:
+        messages: 原始消息列表
+        max_tokens: 压缩后目标 Token 数
+
+    Returns:
+        压缩后的消息列表
+    """
+    if not messages:
+        return messages
+
+    if estimate_tokens(messages) <= max_tokens:
+        return messages
+
+    # 保留最近 6 条消息，压缩早期消息
+    recent_count = min(6, len(messages))
+    early_msgs = messages[:-recent_count]
+    recent_msgs = messages[-recent_count:]
+
+    if not early_msgs:
+        return messages
+
+    summary_text = await _generate_summary(early_msgs)
+
+    compressed = [
+        {
+            "role": "system",
+            "content": f"[历史对话摘要] {summary_text}",
+        }
+    ]
+    compressed.extend(recent_msgs)
+
+    original_tokens = estimate_tokens(messages)
+    compressed_tokens = estimate_tokens(compressed)
+    logger.info(
+        "消息列表压缩完成: %d -> %d tokens (压缩率 %.1f%%)",
+        original_tokens,
+        compressed_tokens,
+        (1 - compressed_tokens / original_tokens) * 100 if original_tokens > 0 else 0,
+    )
+
+    return compressed

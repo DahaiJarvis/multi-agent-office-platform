@@ -2,6 +2,7 @@
 
 Supervisor 的路由决策逻辑：意图分类 -> 路由表匹配 -> 团队创建 -> 上下文注入 -> 任务执行
 支持同步执行和流式执行两种模式。
+集成 ExecutionController 实现超时控制、重试逻辑和上下文压缩。
 """
 
 import logging
@@ -17,6 +18,7 @@ from agent.agents.supervisor import (
     CollaborationMode,
 )
 from agent.teams.team_factory import create_team
+from agent.teams.execution_controller import get_execution_controller
 from agent.core.session_manager import SessionState, get_session_manager
 from observability.metrics import record_agent_call
 from observability.tracing import langfuse_tracer
@@ -109,10 +111,35 @@ async def route_and_execute(
     # 4. 构建带上下文的任务描述
     task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
 
-    # 5. 执行任务
+    # 5. 执行任务（集成 ExecutionController：超时控制、重试、上下文压缩）
     try:
-        result = await team.run(task=task)
-        output = result.messages[-1].content if result.messages else "处理完成"
+        controller = get_execution_controller()
+        result, exec_meta = await controller.execute_with_control(
+            team, task, session_id, user_id,
+        )
+
+        if exec_meta.status == "timeout":
+            duration = time.time() - start_time
+            record_agent_call(intent.target_agent, "error", duration)
+            return {
+                "status": "error",
+                "message": f"任务执行超时（超过 {controller._config.max_runtime}s），请简化请求或稍后重试。",
+                "agent_name": intent.target_agent,
+                "intent": intent.intent,
+            }
+
+        if exec_meta.status == "error" and result is None:
+            duration = time.time() - start_time
+            record_agent_call(intent.target_agent, "error", duration)
+            logger.error("任务执行失败: agent=%s error=%s", intent.target_agent, exec_meta.message)
+            return {
+                "status": "error",
+                "message": f"任务执行失败: {exec_meta.message}",
+                "agent_name": intent.target_agent,
+                "intent": intent.intent,
+            }
+
+        output = result.messages[-1].content if result and result.messages else "处理完成"
 
         duration = time.time() - start_time
         record_agent_call(intent.target_agent, "success", duration)
@@ -131,6 +158,8 @@ async def route_and_execute(
                     "mode": intent.collaboration_mode.value,
                     "duration_ms": round(duration * 1000),
                     "status": "success",
+                    "retries": exec_meta.retries,
+                    "compacted": exec_meta.compacted,
                 },
             )
         except Exception:
@@ -146,6 +175,8 @@ async def route_and_execute(
                 "intent": intent.intent,
                 "mode": intent.collaboration_mode.value,
                 "review_required": intent.review_required,
+                "retries": exec_meta.retries,
+                "compacted": exec_meta.compacted,
             },
         )
 
@@ -323,12 +354,52 @@ async def route_and_execute_stream(
     # 4. 构建带上下文的任务描述
     task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
 
-    # 5. 流式执行任务
+    # 5. 流式执行任务（集成 ExecutionController：超时控制、重试、上下文压缩）
     full_response = ""
     current_agent = intent.target_agent
 
     try:
-        async for message in team.run_stream(task=task):
+        controller = get_execution_controller()
+        async for message in controller.execute_stream_with_control(
+            team, task, session_id, user_id,
+        ):
+            # 处理 ExecutionController 的控制事件
+            if isinstance(message, dict):
+                msg_type = message.get("type", "")
+                if msg_type == "timeout":
+                    duration = time.time() - start_time
+                    record_agent_call(intent.target_agent, "error", duration)
+                    yield {
+                        "type": "error",
+                        "message": message.get("message", "任务执行超时"),
+                    }
+                    return
+                elif msg_type == "retry":
+                    logger.info(
+                        "流式执行重试: attempt=%d/%d",
+                        message.get("attempt", 0),
+                        message.get("max_retries", 0),
+                    )
+                    continue
+                elif msg_type == "compacted":
+                    logger.info(
+                        "流式执行上下文压缩: %d -> %d tokens",
+                        message.get("original_tokens", 0),
+                        message.get("compacted_tokens", 0),
+                    )
+                    continue
+                elif msg_type == "error":
+                    duration = time.time() - start_time
+                    record_agent_call(intent.target_agent, "error", duration)
+                    yield {
+                        "type": "error",
+                        "message": message.get("message", "任务执行失败"),
+                    }
+                    return
+                # 其他 dict 类型事件直接传递
+                continue
+
+            # 处理 AutoGen 消息
             if isinstance(message, (TextMessage, ToolCallSummaryMessage, HandoffMessage)):
                 content = message.content if hasattr(message, "content") else str(message)
                 if content and isinstance(content, str):
