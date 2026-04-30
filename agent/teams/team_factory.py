@@ -1,9 +1,15 @@
 """团队工厂 - 根据协作模式创建 Agent 团队
 
-支持三种协作模式：
+支持三种基础协作模式和三种高级编排模式：
+  基础模式：
   - DIRECT: 单 Agent 直连，用于简单查询
   - SELECTOR: SelectorGroupChat，用于跨系统中等复杂任务
   - SWARM: Swarm 协作，用于复杂多步任务，支持 Handoff 消息传递
+
+  高级编排模式：
+  - PARALLEL: 并行执行，多 Agent 同时处理同一任务
+  - DEBATE: 辩论模式，多 Agent 从不同角度讨论达成共识
+  - VOTE: 投票模式，多 Agent 独立给出答案，多数决定
 """
 
 import logging
@@ -36,12 +42,21 @@ MAX_ROUNDS = {
 async def create_team(intent: IntentResult) -> Any:
     """根据意图结果创建对应的 Agent 团队
 
+    对于跨系统和复杂多步任务，自动使用高级编排模式：
+    - cross_system -> PARALLEL（并行执行）
+    - complex_task -> DEBATE（辩论模式）
+
     Args:
         intent: 意图分类结果
 
     Returns:
-        Agent 实例（DIRECT 模式）或 Agent 团队实例（SELECTOR/SWARM 模式）
+        Agent 实例（DIRECT 模式）或 Agent 团队实例（SELECTOR/SWARM/高级编排模式）
     """
+    # 高级编排模式判断
+    if intent.intent in ("cross_system", "complex_task"):
+        from agent.teams.advanced_orchestration import create_advanced_team
+        return await create_advanced_team(intent)
+
     mode = intent.collaboration_mode
     max_rounds = MAX_ROUNDS[mode]
 

@@ -106,10 +106,11 @@ class ExecutionController:
         """带控制的同步执行
 
         流程：
-        1. 超时控制：asyncio.wait_for(team.run(), timeout=max_runtime)
-        2. 错误分类：根据异常类型决定重试策略
-        3. 重试逻辑：LLM 超时/限流 -> 切换模型重试；工具失败 -> 重试 N 次
-        4. 上下文压缩：超 Token 阈值时压缩后重试
+        1. 熔断器检查：如果目标 Agent 的熔断器打开，直接返回错误
+        2. 超时控制：asyncio.wait_for(team.run(), timeout=max_runtime)
+        3. 错误分类：根据异常类型决定重试策略
+        4. 重试逻辑：LLM 超时/限流 -> 切换模型重试；工具失败 -> 重试 N 次
+        5. 上下文压缩：超 Token 阈值时压缩后重试
 
         Args:
             team: AutoGen Team 实例
@@ -124,6 +125,25 @@ class ExecutionController:
         result_meta = ExecutionResult(agent_name="")
         last_error: Exception | None = None
 
+        # 提取 Agent 名称（用于熔断器标识）
+        agent_name = self._extract_agent_name(team)
+
+        # 熔断器检查
+        try:
+            from agent.core.circuit_breaker import get_circuit_breaker, CircuitOpenError
+            if agent_name:
+                cb = get_circuit_breaker(f"agent_{agent_name}")
+                if cb.state.value == "open":
+                    raise CircuitOpenError(f"agent_{agent_name}", cb.config.recovery_timeout)
+        except CircuitOpenError:
+            result_meta.status = "error"
+            result_meta.message = "服务暂时不可用，请稍后重试"
+            result_meta.duration_ms = (time.time() - start_time) * 1000
+            logger.warning("熔断器拦截请求: agent=%s", agent_name)
+            return None, result_meta
+        except Exception:
+            pass
+
         for attempt in range(self._config.max_retries + 1):
             try:
                 result = await asyncio.wait_for(
@@ -135,6 +155,12 @@ class ExecutionController:
                 result_meta.status = "success"
                 result_meta.duration_ms = duration_ms
                 result_meta.retries = attempt
+
+                # 记录熔断器成功
+                await self._record_circuit_success(agent_name)
+
+                # 记录 Token 用量
+                await self._record_token_usage(result, agent_name)
 
                 return result, result_meta
 
@@ -187,6 +213,9 @@ class ExecutionController:
         duration_ms = (time.time() - start_time) * 1000
         result_meta.duration_ms = duration_ms
         result_meta.message = str(last_error) if last_error else "未知错误"
+
+        # 记录熔断器失败
+        await self._record_circuit_failure(agent_name)
 
         return None, result_meta
 
@@ -287,6 +316,67 @@ class ExecutionController:
                     "message": f"任务执行失败: {str(e)}",
                 }
                 return
+
+    def _extract_agent_name(self, team: Any) -> str:
+        """从 Team 实例中提取 Agent 名称
+
+        尝试从 team 的 participants 中获取第一个 Agent 的名称。
+        """
+        try:
+            participants = getattr(team, "participants", None)
+            if participants and len(participants) > 0:
+                return getattr(participants[0], "name", "")
+        except Exception:
+            pass
+        return ""
+
+    async def _record_circuit_success(self, agent_name: str) -> None:
+        """记录熔断器成功"""
+        if not agent_name:
+            return
+        try:
+            from agent.core.circuit_breaker import get_circuit_breaker
+            cb = get_circuit_breaker(f"agent_{agent_name}")
+            await cb.record_success()
+        except Exception:
+            pass
+
+    async def _record_circuit_failure(self, agent_name: str) -> None:
+        """记录熔断器失败"""
+        if not agent_name:
+            return
+        try:
+            from agent.core.circuit_breaker import get_circuit_breaker
+            cb = get_circuit_breaker(f"agent_{agent_name}")
+            await cb.record_failure()
+        except Exception:
+            pass
+
+    async def _record_token_usage(self, result: Any, agent_name: str) -> None:
+        """记录 Token 用量到预算管理器"""
+        try:
+            usage = getattr(result, "usage", None)
+            if usage is None:
+                return
+
+            prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+            completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+            if prompt_tokens == 0 and completion_tokens == 0:
+                return
+
+            from agent.core.token_budget import get_token_budget_manager
+            manager = get_token_budget_manager()
+            await manager.record_usage(
+                user_id="system",
+                session_id="auto",
+                model="unknown",
+                tier="plus",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                agent_name=agent_name,
+            )
+        except Exception:
+            pass
 
     def _classify_error(self, error: Exception) -> str:
         """错误分类

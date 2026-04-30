@@ -212,8 +212,8 @@ AGENT_PROMPTS: dict[str, str] = {
 async def _create_single_agent(agent_name: str) -> AssistantAgent:
     """通用领域 Agent 创建函数
 
-    根据名称从映射表查找提示词和工具，创建 AssistantAgent。
-    所有领域 Agent 共用此函数，避免重复代码。
+    根据名称查找提示词和工具，创建 AssistantAgent。
+    优先从 Prompt Registry 加载外置 Prompt，降级到代码内嵌默认值。
 
     Args:
         agent_name: Agent 名称，须在 AGENT_PROMPTS 中注册
@@ -224,7 +224,8 @@ async def _create_single_agent(agent_name: str) -> AssistantAgent:
     Raises:
         ValueError: 不支持的 Agent 名称
     """
-    prompt = AGENT_PROMPTS.get(agent_name)
+    # 优先从 Prompt Registry 加载外置 Prompt
+    prompt = await _get_agent_prompt(agent_name)
     if prompt is None:
         raise ValueError(f"不支持的 Agent: {agent_name}，可选: {list(AGENT_PROMPTS.keys())}")
     tools = await load_agent_tools(agent_name)
@@ -234,6 +235,32 @@ async def _create_single_agent(agent_name: str) -> AssistantAgent:
         tools=tools,
         system_message=prompt,
     )
+
+
+async def _get_agent_prompt(agent_name: str) -> str | None:
+    """获取 Agent 的 System Prompt
+
+    优先从 Prompt Registry 加载外置版本管理的 Prompt，
+    降级到代码内嵌的 AGENT_PROMPTS 默认值。
+
+    Args:
+        agent_name: Agent 名称
+
+    Returns:
+        System Prompt 字符串，未找到时返回 None
+    """
+    try:
+        from agent.core.prompt_registry import get_prompt_registry
+        registry = get_prompt_registry()
+        prompt = await registry.get_prompt(agent_name)
+        if prompt:
+            logger.debug("Agent %s Prompt 从 Registry 加载", agent_name)
+            return prompt
+    except Exception as e:
+        logger.debug("Prompt Registry 加载失败，降级到默认值: %s", e)
+
+    # 降级到代码内嵌默认值
+    return AGENT_PROMPTS.get(agent_name)
 
 
 # Agent 创建函数映射（统一使用 _create_single_agent）

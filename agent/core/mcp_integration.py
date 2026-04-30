@@ -360,19 +360,28 @@ async def call_tool_with_timeout(
     tool_input: dict[str, Any],
     timeout: int | None = None,
     max_retries: int | None = None,
+    server_name: str = "",
+    tool_name: str = "",
+    session_id: str = "",
+    agent_name: str = "",
 ) -> Any:
-    """带超时和重试的工具调用
+    """带超时、重试、校验和溯源的工具调用
 
-    在 FunctionTool 的执行函数中包裹超时控制和重试逻辑。
+    在 FunctionTool 的执行函数中包裹超时控制、重试逻辑、
+    响应校验和调用溯源。
 
     Args:
         tool_func: 工具执行函数
         tool_input: 工具输入参数
         timeout: 超时秒数（None 则使用配置默认值）
         max_retries: 最大重试次数（None 则使用配置默认值）
+        server_name: MCP 服务名（用于校验和溯源）
+        tool_name: 工具名（用于校验和溯源）
+        agent_name: 调用方 Agent 名称（用于溯源）
+        session_id: 会话ID（用于溯源）
 
     Returns:
-        工具执行结果
+        工具执行结果（已校验和清洗）
 
     Raises:
         TimeoutError: 工具调用超时
@@ -385,6 +394,22 @@ async def call_tool_with_timeout(
     max_retries = max_retries or settings.tool_max_retries
     backoff = settings.tool_retry_backoff
 
+    # 启动溯源
+    trace_id = ""
+    if server_name and tool_name:
+        try:
+            from agent.core.mcp_tracing import get_mcp_tracer
+            tracer = get_mcp_tracer()
+            trace_id = await tracer.start_call(
+                server_name=server_name,
+                tool_name=tool_name,
+                session_id=session_id,
+                agent_name=agent_name,
+                input_params=tool_input,
+            )
+        except Exception:
+            pass
+
     last_error: Exception | None = None
 
     for attempt in range(max_retries + 1):
@@ -393,7 +418,43 @@ async def call_tool_with_timeout(
                 tool_func(**tool_input),
                 timeout=timeout,
             )
+
+            # 响应校验
+            validation_passed = True
+            validation_confidence = 1.0
+            if server_name and tool_name:
+                try:
+                    from agent.core.mcp_validator import validate_mcp_response
+                    validation = await validate_mcp_response(server_name, tool_name, result)
+                    validation_passed = validation.is_valid
+                    validation_confidence = validation.confidence
+                    if validation.is_valid:
+                        result = validation.sanitized_data
+                    else:
+                        logger.warning(
+                            "MCP 响应校验失败: server=%s tool=%s errors=%s",
+                            server_name, tool_name, validation.errors,
+                        )
+                except Exception:
+                    pass
+
+            # 结束溯源 - 成功
+            if trace_id:
+                try:
+                    from agent.core.mcp_tracing import get_mcp_tracer
+                    tracer = get_mcp_tracer()
+                    await tracer.end_call(
+                        trace_id=trace_id,
+                        status="success",
+                        response=result,
+                        validation_passed=validation_passed,
+                        validation_confidence=validation_confidence,
+                    )
+                except Exception:
+                    pass
+
             return result
+
         except asyncio.TimeoutError:
             last_error = TimeoutError(f"工具调用超时 ({timeout}s)")
             logger.warning(
@@ -411,5 +472,18 @@ async def call_tool_with_timeout(
         if attempt < max_retries:
             wait_time = backoff * (2 ** attempt)
             await asyncio.sleep(wait_time)
+
+    # 结束溯源 - 失败
+    if trace_id:
+        try:
+            from agent.core.mcp_tracing import get_mcp_tracer
+            tracer = get_mcp_tracer()
+            await tracer.end_call(
+                trace_id=trace_id,
+                status="error",
+                error=str(last_error),
+            )
+        except Exception:
+            pass
 
     raise last_error or Exception("工具调用失败")

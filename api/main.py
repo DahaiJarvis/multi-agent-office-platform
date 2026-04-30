@@ -14,7 +14,7 @@ from api.middleware.auth import AuthMiddleware
 from api.middleware.csrf import CSRFMiddleware
 from api.middleware.rate_limit import DistributedRateLimitMiddleware
 from api.middleware.tracing import TracingMiddleware
-from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes, jwks_routes, approval_routes, debug_routes, scheduler_routes
+from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes, jwks_routes, approval_routes, debug_routes, scheduler_routes, token_monitor_routes
 from api.errors import AppException, app_exception_handler, generic_exception_handler
 from observability.logging_config import setup_logging
 from observability.tracing import setup_tracing
@@ -312,6 +312,7 @@ def create_app() -> FastAPI:
     app.include_router(approval_routes.router, prefix=api_prefix)
     app.include_router(debug_routes.router, prefix=api_prefix)
     app.include_router(scheduler_routes.router, prefix=api_prefix)
+    app.include_router(token_monitor_routes.router, prefix=api_prefix)
 
     # Prometheus 指标端点
     from observability.metrics import metrics_endpoint

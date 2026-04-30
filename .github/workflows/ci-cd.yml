@@ -108,6 +108,8 @@ jobs:
     needs: lint
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 设置 Python
         uses: actions/setup-python@v5
@@ -116,20 +118,63 @@ jobs:
           cache: pip
 
       - name: 安装安全扫描工具
-        run: pip install bandit safety
+        run: pip install bandit safety detect-secrets
 
-      - name: Bandit 安全扫描
-        run: bandit -r api/ agent/ security/ -f json -o bandit-report.json || true
+      - name: Bandit 安全扫描（高/中严重度）
+        run: |
+          bandit -r api/ agent/ security/ -f json -o bandit-report.json -ll || true
+          bandit -r api/ agent/ security/ -f txt || true
 
-      - name: Safety 依赖检查
-        run: safety check -r requirements.txt || true
+      - name: Safety 依赖漏洞检查
+        run: safety check -r requirements.txt --json || true
+
+      - name: 密钥泄露检测
+        run: |
+          detect-secrets scan --all-files --force-use-all-plugins \
+            --exclude-files '\.git/|node_modules/|__pycache__|\.env\.example' \
+            > secrets-baseline.json || true
+          detect-secrets audit --report secrets-baseline.json || true
+          echo "--- 密钥泄露检测完成 ---"
+
+      - name: Prompt 注入模式扫描
+        run: |
+          python -c "
+          import re, sys, os
+          patterns = [
+              (r'ignore\s+previous\s+instructions?', 'Prompt注入: 忽略前序指令'),
+              (r'system\s*:\s*you\s+are\s+now', 'Prompt注入: 角色劫持'),
+              (r'execute\s+arbitrary\s+code', '代码注入风险'),
+              (r'os\.system\(|subprocess\.', '命令执行风险'),
+              (r'eval\s*\(|exec\s*\(', '动态代码执行风险'),
+          ]
+          issues = []
+          for root, dirs, files in os.walk('agent'):
+              for f in files:
+                  if not f.endswith('.py'):
+                      continue
+                  path = os.path.join(root, f)
+                  try:
+                      content = open(path, 'r').read()
+                      for pat, desc in patterns:
+                          if re.search(pat, content, re.IGNORECASE):
+                              issues.append(f'{path}: {desc}')
+                  except: pass
+          if issues:
+              for i in issues:
+                  print(f'[WARNING] {i}')
+              sys.exit(0)
+          else:
+              print('Prompt注入扫描通过')
+          " || true
 
       - name: 上传安全报告
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: security-report
-          path: bandit-report.json
+          path: |
+            bandit-report.json
+            secrets-baseline.json
 
   build:
     name: 构建
