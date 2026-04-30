@@ -68,17 +68,16 @@ class DistributedRateLimitMiddleware(BaseHTTPMiddleware):
         self._use_redis = True
 
     async def _get_redis(self):
-        """获取 Redis 客户端"""
+        """获取 Redis 客户端（使用统一连接管理器）"""
         if self._redis_client is None:
             try:
-                import redis.asyncio as aioredis
-                self._redis_client = aioredis.from_url(
-                    _settings.redis_url,
-                    decode_responses=True,
-                )
-                # 测试连接
-                await self._redis_client.ping()
-                self._use_redis = True
+                from agent.core.redis_manager import get_redis_client
+                self._redis_client = await get_redis_client()
+                if self._redis_client:
+                    await self._redis_client.ping()
+                    self._use_redis = True
+                else:
+                    self._use_redis = False
             except Exception as e:
                 logger.warning("Redis 连接失败，降级到进程内限流: %s", e)
                 self._use_redis = False

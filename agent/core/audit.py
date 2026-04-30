@@ -68,23 +68,70 @@ class AuditLogger:
     def __init__(self) -> None:
         self._redis: Any = None
         self._use_file_fallback: bool = False
+        self._pg_engine: Any = None
+        self._pg_pool: Any = None
 
     async def _get_redis(self) -> Any:
-        """获取 Redis 客户端"""
+        """获取 Redis 客户端（使用统一连接管理器）"""
         if self._redis is None:
             try:
-                import redis.asyncio as aioredis
-                from agent.core.config import get_settings
-
-                settings = get_settings()
-                self._redis = aioredis.from_url(
-                    settings.redis_url,
-                    decode_responses=True,
-                )
+                from agent.core.redis_manager import get_redis_client
+                self._redis = await get_redis_client()
             except Exception as e:
                 logger.warning("审计日志 Redis 连接失败: %s", e)
                 return None
         return self._redis
+
+    async def _get_pg_pool(self) -> tuple[Any, Any]:
+        """获取 PostgreSQL 连接池（复用引擎实例）
+
+        使用全局缓存的引擎和会话工厂，避免每次操作创建新连接。
+
+        Returns:
+            (engine, session_pool) 元组
+        """
+        if self._pg_engine is None or self._pg_pool is None:
+            from agent.core.config import get_settings
+            from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
+            settings = get_settings()
+            self._pg_engine = create_async_engine(
+                settings.postgres_dsn,
+                pool_size=5,
+                max_overflow=10,
+                pool_pre_ping=True,
+            )
+            self._pg_pool = async_sessionmaker(self._pg_engine, expire_on_commit=False)
+
+            # 确保表存在
+            from sqlalchemy import text
+            async with self._pg_engine.begin() as conn:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        id BIGSERIAL PRIMARY KEY,
+                        event_type VARCHAR(32) NOT NULL,
+                        action VARCHAR(128) NOT NULL,
+                        user_id VARCHAR(64) DEFAULT '',
+                        session_id VARCHAR(36) DEFAULT '',
+                        agent_name VARCHAR(64) DEFAULT '',
+                        resource VARCHAR(256) DEFAULT '',
+                        detail JSONB DEFAULT '{}',
+                        request_id VARCHAR(64) DEFAULT '',
+                        ip_address VARCHAR(45) DEFAULT '',
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                """))
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_audit_logs_event_type ON audit_logs(event_type)
+                """))
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)
+                """))
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)
+                """))
+
+        return self._pg_engine, self._pg_pool
 
     async def log(
         self,
@@ -207,81 +254,55 @@ class AuditLogger:
             return 0
 
     async def _persist_events(self, events_raw: list[str]) -> int:
-        """将审计事件批量写入 PostgreSQL，不可用时降级到本地文件"""
+        """将审计事件批量写入 PostgreSQL，不可用时降级到本地文件
+
+        使用连接池复用数据库连接，采用批量 INSERT 提升写入性能。
+        """
         if self._use_file_fallback:
             return await self._persist_to_file(events_raw)
 
         try:
-            from agent.core.config import get_settings
-            from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-            from sqlalchemy import text
+            engine, pool = await self._get_pg_pool()
 
-            settings = get_settings()
-            engine = create_async_engine(settings.postgres_dsn, pool_size=2, max_overflow=5)
-            pool = async_sessionmaker(engine, expire_on_commit=False)
-
-            # 确保表存在
-            async with engine.begin() as conn:
-                await conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS audit_logs (
-                        id BIGSERIAL PRIMARY KEY,
-                        event_type VARCHAR(32) NOT NULL,
-                        action VARCHAR(128) NOT NULL,
-                        user_id VARCHAR(64) DEFAULT '',
-                        session_id VARCHAR(36) DEFAULT '',
-                        agent_name VARCHAR(64) DEFAULT '',
-                        resource VARCHAR(256) DEFAULT '',
-                        detail JSONB DEFAULT '{}',
-                        request_id VARCHAR(64) DEFAULT '',
-                        ip_address VARCHAR(45) DEFAULT '',
-                        created_at TIMESTAMP DEFAULT NOW()
-                    )
-                """))
-
-                await conn.execute(text("""
-                    CREATE INDEX IF NOT EXISTS idx_audit_logs_event_type ON audit_logs(event_type)
-                """))
-
-                await conn.execute(text("""
-                    CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)
-                """))
-
-                await conn.execute(text("""
-                    CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)
-                """))
-
-            # 批量插入
+            # 批量插入：构建多行 VALUES 语句
+            values_clauses = []
+            params: dict[str, Any] = {}
             count = 0
-            async with pool() as session:
-                for raw in events_raw:
-                    try:
-                        event = json.loads(raw)
-                        await session.execute(
-                            text("""
-                                INSERT INTO audit_logs (event_type, action, user_id, session_id,
-                                    agent_name, resource, detail, request_id, ip_address, created_at)
-                                VALUES (:et, :act, :uid, :sid, :agent, :res, :detail, :rid, :ip, to_timestamp(:ts))
-                            """),
-                            {
-                                "et": event.get("event_type", ""),
-                                "act": event.get("action", ""),
-                                "uid": event.get("user_id", ""),
-                                "sid": event.get("session_id", ""),
-                                "agent": event.get("agent_name", ""),
-                                "res": event.get("resource", ""),
-                                "detail": json.dumps(event.get("detail", {}), ensure_ascii=False),
-                                "rid": event.get("request_id", ""),
-                                "ip": event.get("ip_address", ""),
-                                "ts": event.get("timestamp", time.time()),
-                            },
-                        )
-                        count += 1
-                    except Exception:
-                        continue
 
-                await session.commit()
+            for idx, raw in enumerate(events_raw):
+                try:
+                    event = json.loads(raw)
+                    prefix = f"e{idx}"
+                    values_clauses.append(
+                        f"(:{prefix}_et, :{prefix}_act, :{prefix}_uid, :{prefix}_sid, "
+                        f":{prefix}_agent, :{prefix}_res, :{prefix}_detail, :{prefix}_rid, "
+                        f":{prefix}_ip, to_timestamp(:{prefix}_ts))"
+                    )
+                    params[f"{prefix}_et"] = event.get("event_type", "")
+                    params[f"{prefix}_act"] = event.get("action", "")
+                    params[f"{prefix}_uid"] = event.get("user_id", "")
+                    params[f"{prefix}_sid"] = event.get("session_id", "")
+                    params[f"{prefix}_agent"] = event.get("agent_name", "")
+                    params[f"{prefix}_res"] = event.get("resource", "")
+                    params[f"{prefix}_detail"] = json.dumps(event.get("detail", {}), ensure_ascii=False)
+                    params[f"{prefix}_rid"] = event.get("request_id", "")
+                    params[f"{prefix}_ip"] = event.get("ip_address", "")
+                    params[f"{prefix}_ts"] = event.get("timestamp", time.time())
+                    count += 1
+                except Exception:
+                    continue
 
-            await engine.dispose()
+            if count > 0:
+                from sqlalchemy import text
+                insert_sql = (
+                    "INSERT INTO audit_logs (event_type, action, user_id, session_id, "
+                    "agent_name, resource, detail, request_id, ip_address, created_at) VALUES "
+                    + ", ".join(values_clauses)
+                )
+                async with pool() as session:
+                    await session.execute(text(insert_sql), params)
+                    await session.commit()
+
             return count
 
         except Exception as e:
@@ -345,10 +366,12 @@ class AuditLogger:
     ) -> list[dict[str, Any]]:
         """查询审计日志
 
+        使用连接池复用数据库连接，对 action 参数进行 LIKE 通配符转义防止注入。
+
         Args:
             event_type: 事件类型过滤
             user_id: 用户ID过滤
-            action: 操作动作过滤
+            action: 操作动作过滤（LIKE 匹配，自动转义通配符）
             limit: 返回数量上限
             offset: 偏移量
 
@@ -356,13 +379,8 @@ class AuditLogger:
             审计日志列表
         """
         try:
-            from agent.core.config import get_settings
-            from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+            engine, pool = await self._get_pg_pool()
             from sqlalchemy import text
-
-            settings = get_settings()
-            engine = create_async_engine(settings.postgres_dsn, pool_size=2, max_overflow=5)
-            pool = async_sessionmaker(engine, expire_on_commit=False)
 
             conditions = []
             params: dict[str, Any] = {"limit": limit, "offset": offset}
@@ -374,8 +392,10 @@ class AuditLogger:
                 conditions.append("user_id = :uid")
                 params["uid"] = user_id
             if action:
-                conditions.append("action LIKE :act")
-                params["act"] = f"%{action}%"
+                # 转义 LIKE 通配符，防止 LIKE 注入
+                safe_action = action.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                conditions.append("action LIKE :act ESCAPE '\\\\'")
+                params["act"] = f"%{safe_action}%"
 
             where_clause = ""
             if conditions:
@@ -393,8 +413,6 @@ class AuditLogger:
             async with pool() as session:
                 result = await session.execute(text(query), params)
                 rows = result.mappings().all()
-
-            await engine.dispose()
 
             logs = []
             for row in rows:
@@ -419,10 +437,14 @@ class AuditLogger:
             return []
 
     async def close(self) -> None:
-        """关闭 Redis 连接"""
+        """关闭 Redis 和 PostgreSQL 连接"""
         if self._redis:
             await self._redis.close()
             self._redis = None
+        if self._pg_engine:
+            await self._pg_engine.dispose()
+            self._pg_engine = None
+            self._pg_pool = None
 
 
 # 全局审计日志管理器

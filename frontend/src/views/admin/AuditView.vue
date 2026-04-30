@@ -19,7 +19,18 @@
       </div>
     </div>
 
+    <div class="guide-banner" v-if="!guideDismissed">
+      <div class="guide-banner-content">
+        <span class="guide-icon">?</span>
+        <span>审计日志记录平台所有关键操作，包括认证、Agent 调用、管理操作和数据访问，支持按条件筛选和导出。</span>
+        <button class="guide-link" @click="showGuideDialog = true">查看详细指南</button>
+        <button class="guide-close" @click="guideDismissed = true">&times;</button>
+      </div>
+    </div>
+
     <div class="filter-bar">
+      <div class="filter-hint">通过以下条件筛选日志，缩小查找范围</div>
+      <div class="filter-row">
       <select v-model="filters.event_type" class="filter-select" @change="loadLogs">
         <option value="">全部事件类型</option>
         <option value="auth">认证</option>
@@ -39,6 +50,7 @@
         placeholder="操作"
         @keydown.enter="loadLogs"
       />
+      </div>
     </div>
 
     <div v-if="loading" class="loading-state">
@@ -80,17 +92,47 @@
       <span class="page-info">第 {{ offset / limit + 1 }} 页</span>
       <button class="btn-page" :disabled="logs.length < limit" @click="nextPage">下一页</button>
     </div>
+
+    <el-dialog v-model="showGuideDialog" title="审计日志使用指南" width="640px">
+      <div class="guide-content">
+        <div class="guide-section">
+          <h4>什么是审计日志？</h4>
+          <p>审计日志记录平台所有关键操作的完整轨迹，包括谁在什么时间执行了什么操作。这是安全合规和问题排查的重要工具。</p>
+        </div>
+        <div class="guide-section">
+          <h4>事件类型</h4>
+          <div class="config-list">
+            <div class="config-item"><code>auth</code> - 用户认证相关操作（登录、登出、Token 刷新等）</div>
+            <div class="config-item"><code>agent_call</code> - Agent 调用记录（会话创建、消息发送等）</div>
+            <div class="config-item"><code>admin</code> - 管理操作（配置变更、权限修改等）</div>
+            <div class="config-item"><code>data_access</code> - 数据访问记录（知识库查询、文件下载等）</div>
+          </div>
+        </div>
+        <div class="guide-section">
+          <h4>筛选与搜索</h4>
+          <p>支持按事件类型、用户ID、操作关键词筛选。输入筛选条件后按回车或点击刷新即可查询。点击"刷新缓冲区"可强制写入尚未持久化的日志。</p>
+        </div>
+        <div class="guide-section">
+          <h4>排查建议</h4>
+          <p>当发现异常操作时，可通过用户ID定位该用户的所有操作记录，结合时间线分析操作序列。管理操作类型的事件需重点关注，确保无未授权的配置变更。</p>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="showGuideDialog = false">知道了</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { adminApi } from '../../api/admin'
+import { usePagination } from '../../composables/usePagination'
 
-const loading = ref(false)
 const logs = ref<any[]>([])
-const offset = ref(0)
-const limit = 20
+const guideDismissed = ref(false)
+const showGuideDialog = ref(false)
 
 const filters = reactive({
   event_type: '',
@@ -108,38 +150,38 @@ function truncate(str: string, max: number) {
   return str.length > max ? str.substring(0, max) + '...' : str
 }
 
-async function loadLogs() {
-  loading.value = true
+async function fetchLogs(offset: number, limit: number) {
   try {
-    const params: any = { limit, offset: offset.value }
+    const params: any = { limit, offset }
     if (filters.event_type) params.event_type = filters.event_type
     if (filters.user_id) params.user_id = filters.user_id
     if (filters.action) params.action = filters.action
 
-    const { data } = await adminApi.auditLogs(params)
+    const data = await adminApi.auditLogs(params)
     logs.value = data.logs || data || []
   } catch {
     logs.value = []
-  } finally {
-    loading.value = false
   }
+}
+
+const { loading, offset, pageSize: limit, prevPage, nextPage } = usePagination({
+  pageSize: 20,
+  fetchFn: fetchLogs,
+})
+
+async function loadLogs() {
+  loading.value = true
+  await fetchLogs(offset.value, limit)
+  loading.value = false
 }
 
 async function flushAudit() {
   try {
     await adminApi.auditFlush()
     loadLogs()
-  } catch { /* ignore */ }
-}
-
-function prevPage() {
-  offset.value = Math.max(0, offset.value - limit)
-  loadLogs()
-}
-
-function nextPage() {
-  offset.value += limit
-  loadLogs()
+  } catch {
+    ElMessage.error('刷新审计日志失败')
+  }
 }
 
 onMounted(loadLogs)
@@ -372,4 +414,21 @@ onMounted(loadLogs)
     width: 100%;
   }
 }
+.guide-banner { background: rgba(99,102,241,0.06); border: 1px solid rgba(99,102,241,0.15); border-radius: var(--radius-lg); padding: 12px 16px; margin-bottom: 16px; }
+.guide-banner-content { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--color-text-secondary); line-height: 1.5; }
+.guide-icon { width: 22px; height: 22px; border-radius: 50%; background: var(--color-primary); color: white; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+.guide-link { color: var(--color-primary); font-weight: 500; cursor: pointer; white-space: nowrap; }
+.guide-link:hover { text-decoration: underline; }
+.guide-close { margin-left: auto; color: var(--color-text-tertiary); font-size: 18px; cursor: pointer; padding: 0 4px; line-height: 1; }
+.guide-close:hover { color: var(--color-text); }
+.filter-hint { font-size: 12px; color: var(--color-text-tertiary); margin-bottom: 8px; }
+.filter-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.guide-content { max-height: 60vh; overflow-y: auto; }
+.guide-section { margin-bottom: 20px; }
+.guide-section h4 { font-size: 15px; font-weight: 600; color: var(--color-text); margin: 0 0 8px; }
+.guide-section p { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 8px; }
+.guide-section code { background: rgba(99,102,241,0.08); color: var(--color-primary); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.config-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.config-item { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; }
+.config-item code { background: rgba(99,102,241,0.08); color: var(--color-primary); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
 </style>

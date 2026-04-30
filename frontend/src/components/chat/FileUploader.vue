@@ -38,6 +38,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
 
 /** 允许上传的文件扩展名集合 */
 const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'doc', 'xlsx', 'xls', 'md', 'txt', 'csv'])
@@ -63,12 +64,12 @@ const emit = defineEmits<{
 function validateFile(file: File): boolean {
   const ext = file.name.split('.').pop()?.toLowerCase() || ''
   if (!ALLOWED_EXTENSIONS.has(ext)) {
-    alert(`不支持的文件类型: .${ext}，仅支持 ${Array.from(ALLOWED_EXTENSIONS).join('/')}`)
+    ElMessage.warning(`不支持的文件类型: .${ext}，仅支持 ${Array.from(ALLOWED_EXTENSIONS).join('/')}`)
     return false
   }
   if (file.size > MAX_FILE_SIZE) {
     const sizeMB = (file.size / 1024 / 1024).toFixed(1)
-    alert(`文件 ${file.name} 超过 20MB 限制（当前 ${sizeMB}MB）`)
+    ElMessage.warning(`文件 ${file.name} 超过 20MB 限制（当前 ${sizeMB}MB）`)
     return false
   }
   return true
@@ -85,39 +86,34 @@ function handleFileSelect(event: Event) {
   const newFiles = Array.from(input.files).filter(validateFile)
   const remaining = MAX_FILE_COUNT - files.value.length
   if (remaining <= 0) {
-    alert(`最多同时上传 ${MAX_FILE_COUNT} 个文件`)
+    ElMessage.warning(`最多同时上传 ${MAX_FILE_COUNT} 个文件`)
     return
   }
 
   const toAdd = newFiles.slice(0, remaining)
   if (toAdd.length < newFiles.length) {
-    alert(`已达到最大文件数限制，仅添加了前 ${toAdd.length} 个文件`)
+    ElMessage.warning(`已达到最大文件数限制，仅添加了前 ${toAdd.length} 个文件`)
   }
 
   files.value = [...files.value, ...toAdd]
   emit('upload', files.value)
 
-  // 重置 input 以允许重复选择同一文件
   input.value = ''
 }
 
-/**
- * 处理文件拖拽事件
- * @param event 拖拽事件
- */
 function handleDrop(event: DragEvent) {
   if (!event.dataTransfer?.files) return
 
   const newFiles = Array.from(event.dataTransfer.files).filter(validateFile)
   const remaining = MAX_FILE_COUNT - files.value.length
   if (remaining <= 0) {
-    alert(`最多同时上传 ${MAX_FILE_COUNT} 个文件`)
+    ElMessage.warning(`最多同时上传 ${MAX_FILE_COUNT} 个文件`)
     return
   }
 
   const toAdd = newFiles.slice(0, remaining)
   if (toAdd.length < newFiles.length) {
-    alert(`已达到最大文件数限制，仅添加了前 ${toAdd.length} 个文件`)
+    ElMessage.warning(`已达到最大文件数限制，仅添加了前 ${toAdd.length} 个文件`)
   }
 
   files.value = [...files.value, ...toAdd]

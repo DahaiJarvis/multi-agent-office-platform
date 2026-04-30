@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/session", tags=["Session"])
 
 
-@router.post("/create", response_model=SessionResponse)
+@router.post("/create", response_model=SessionResponse, summary="创建会话")
 async def create_session(request: SessionCreateRequest) -> SessionResponse:
     """创建新会话"""
     session_mgr = await get_session_manager()
@@ -36,7 +36,7 @@ async def create_session(request: SessionCreateRequest) -> SessionResponse:
     )
 
 
-@router.get("/{session_id}", response_model=SessionResponse)
+@router.get("/{session_id}", response_model=SessionResponse, summary="获取会话信息")
 async def get_session(session_id: str) -> SessionResponse:
     """获取会话信息（优先 L2 Redis，未命中则从 L3 PostgreSQL 恢复）"""
     session_mgr = await get_session_manager()
@@ -56,7 +56,7 @@ async def get_session(session_id: str) -> SessionResponse:
     )
 
 
-@router.get("/{session_id}/history")
+@router.get("/{session_id}/history", summary="获取会话消息历史")
 async def get_session_history(session_id: str, limit: int = 50) -> dict:
     """获取会话消息历史"""
     session_mgr = await get_session_manager()
@@ -73,7 +73,7 @@ async def get_session_history(session_id: str, limit: int = 50) -> dict:
     }
 
 
-@router.post("/{session_id}/archive")
+@router.post("/{session_id}/archive", summary="归档会话")
 async def archive_session(session_id: str) -> dict:
     """归档会话到 L3 长期存储
 
@@ -89,7 +89,7 @@ async def archive_session(session_id: str) -> dict:
     return {"message": "会话已归档", "session_id": session_id}
 
 
-@router.get("/user/{user_id}/history")
+@router.get("/user/{user_id}/history", summary="查询用户历史会话")
 async def list_user_sessions(
     user_id: str,
     limit: int = 20,
@@ -109,7 +109,7 @@ async def list_user_sessions(
     }
 
 
-@router.delete("/{session_id}")
+@router.delete("/{session_id}", summary="删除会话")
 async def delete_session(session_id: str) -> dict:
     """删除会话"""
     session_mgr = await get_session_manager()

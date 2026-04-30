@@ -153,8 +153,8 @@ const ssoProviders = ref<SSOProviderItem[]>([])
 onMounted(async () => {
   try {
     const res = await authApi.getSSOProviders()
-    if (res.data?.providers?.length) {
-      ssoProviders.value = res.data.providers.map((p: string) => ({
+    if (res?.providers?.length) {
+      ssoProviders.value = res.providers.map((p: string) => ({
         type: p,
         label: SSO_PROVIDER_LABELS[p] || p,
       }))
@@ -216,8 +216,8 @@ async function handleSSOLogin(providerType: string) {
 
   try {
     const res = await authApi.ssoAuthorize({ provider: providerType })
-    if (res.data?.authorization_url) {
-      window.location.href = res.data.authorization_url
+    if (res?.authorization_url) {
+      window.location.href = res.authorization_url
     }
   } catch (err: any) {
     const message = err.response?.data?.message
@@ -233,8 +233,8 @@ async function handleSSOCallback(provider: string, code: string, state: string) 
 
   try {
     const res = await authApi.ssoCallback({ provider, code, state })
-    if (res.data) {
-      authStore.setAuth(res.data)
+    if (res) {
+      authStore.setAuth(res)
       router.push('/')
     }
   } catch (err: any) {

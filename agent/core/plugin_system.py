@@ -213,8 +213,49 @@ def disable_plugin(plugin_id: str) -> PluginInstance | None:
     return instance
 
 
+_ALLOWED_PLUGIN_PREFIXES: tuple[str, ...] = (
+    "plugins.",
+    "agent.plugins.",
+    "agent.extensions.",
+)
+
+
+def _validate_module_path(module_path: str) -> None:
+    """校验插件模块路径是否在允许的前缀范围内
+
+    仅允许从预定义的插件目录加载模块，防止加载任意系统模块。
+
+    Args:
+        module_path: Python 模块路径
+
+    Raises:
+        ValueError: 模块路径不在白名单前缀范围内
+    """
+    if not module_path:
+        raise ValueError("插件模块路径不能为空")
+
+    if not any(module_path.startswith(prefix) for prefix in _ALLOWED_PLUGIN_PREFIXES):
+        raise ValueError(
+            f"插件模块路径不被允许: {module_path}，"
+            f"仅支持以下前缀: {', '.join(_ALLOWED_PLUGIN_PREFIXES)}"
+        )
+
+
 def _load_plugin_module(manifest: PluginManifest, instance: PluginInstance) -> None:
-    """加载插件模块"""
+    """加载插件模块
+
+    对模块路径进行白名单校验，仅允许从预定义的插件目录加载，
+    防止通过 importlib.import_module 加载任意系统模块。
+
+    Args:
+        manifest: 插件清单
+        instance: 插件实例
+
+    Raises:
+        ValueError: 模块路径校验失败或加载失败
+    """
+    _validate_module_path(manifest.module_path)
+
     try:
         module = importlib.import_module(manifest.module_path)
         entry_class = getattr(module, manifest.entry_class, None)
@@ -384,7 +425,7 @@ def install_from_marketplace(plugin_id: str) -> PluginManifest | None:
 
 
 def _init_official_plugins() -> None:
-    """初始化官方插件清单"""
+    """初始化官方插件清单并注册内置 Handler"""
     if any(p.is_official for p in _registry.values()):
         return
 
@@ -431,6 +472,124 @@ def _init_official_plugins() -> None:
         register_plugin(manifest)
         enable_plugin(manifest.plugin_id)
         publish_to_marketplace(manifest, category="official")
+
+    _register_official_handlers()
+
+
+def _register_official_handlers() -> None:
+    """为官方插件注册内置 Handler 实现"""
+
+    async def _audit_logger_pre_chat(ctx: HookContext) -> dict[str, Any]:
+        logger.info(
+            "审计日志[PRE_CHAT]: session=%s user=%s agent=%s",
+            ctx.session_id, ctx.user_id, ctx.agent_name,
+        )
+        return {"logged": True, "hook_point": "pre_chat", "session_id": ctx.session_id}
+
+    async def _audit_logger_post_chat(ctx: HookContext) -> dict[str, Any]:
+        logger.info(
+            "审计日志[POST_CHAT]: session=%s user=%s agent=%s",
+            ctx.session_id, ctx.user_id, ctx.agent_name,
+        )
+        return {"logged": True, "hook_point": "post_chat", "session_id": ctx.session_id}
+
+    async def _audit_logger_pre_tool(ctx: HookContext) -> dict[str, Any]:
+        tool_name = ctx.data.get("tool_name", "unknown")
+        logger.info(
+            "审计日志[PRE_TOOL]: session=%s tool=%s",
+            ctx.session_id, tool_name,
+        )
+        return {"logged": True, "hook_point": "pre_tool", "tool_name": tool_name}
+
+    async def _audit_logger_post_tool(ctx: HookContext) -> dict[str, Any]:
+        tool_name = ctx.data.get("tool_name", "unknown")
+        logger.info(
+            "审计日志[POST_TOOL]: session=%s tool=%s",
+            ctx.session_id, tool_name,
+        )
+        return {"logged": True, "hook_point": "post_tool", "tool_name": tool_name}
+
+    _SENSITIVE_PATTERNS: list[tuple[str, str]] = [
+        ("password", "***"),
+        ("secret", "***"),
+        ("token", "***"),
+        ("api_key", "***"),
+        ("private_key", "***"),
+        ("credit_card", "***"),
+        ("id_card", "***"),
+        ("phone", "***"),
+    ]
+
+    def _mask_sensitive(text: str) -> str:
+        import re
+        for keyword, mask in _SENSITIVE_PATTERNS:
+            pattern = rf'({keyword}\s*[:=]\s*)\S+'
+            text = re.sub(pattern, rf'\1{mask}', text, flags=re.IGNORECASE)
+        return text
+
+    async def _content_filter_pre_chat(ctx: HookContext) -> dict[str, Any]:
+        message = ctx.data.get("message", "")
+        if message:
+            masked = _mask_sensitive(message)
+            if masked != message:
+                ctx.data["message"] = masked
+                logger.info("内容过滤[PRE_CHAT]: 已脱敏 session=%s", ctx.session_id)
+        return {"filtered": True, "hook_point": "pre_chat"}
+
+    async def _content_filter_post_chat(ctx: HookContext) -> dict[str, Any]:
+        message = ctx.data.get("message", "")
+        if message:
+            masked = _mask_sensitive(message)
+            if masked != message:
+                ctx.data["message"] = masked
+                logger.info("内容过滤[POST_CHAT]: 已脱敏 session=%s", ctx.session_id)
+        return {"filtered": True, "hook_point": "post_chat"}
+
+    _metrics_data: dict[str, list[float]] = {}
+
+    async def _metrics_pre_chat(ctx: HookContext) -> dict[str, Any]:
+        key = f"{ctx.session_id}:{ctx.agent_name}"
+        _metrics_data[key] = [time.time()]
+        return {"metric": "start", "session_id": ctx.session_id}
+
+    async def _metrics_post_chat(ctx: HookContext) -> dict[str, Any]:
+        key = f"{ctx.session_id}:{ctx.agent_name}"
+        start_times = _metrics_data.get(key, [])
+        if start_times:
+            elapsed_ms = (time.time() - start_times[-1]) * 1000
+            logger.info(
+                "指标采集[POST_CHAT]: session=%s agent=%s elapsed=%.1fms",
+                ctx.session_id, ctx.agent_name, elapsed_ms,
+            )
+            _metrics_data.pop(key, None)
+            return {"metric": "complete", "elapsed_ms": round(elapsed_ms, 2), "session_id": ctx.session_id}
+        return {"metric": "complete", "session_id": ctx.session_id}
+
+    async def _metrics_on_error(ctx: HookContext) -> dict[str, Any]:
+        error_msg = ctx.data.get("error", "unknown")
+        logger.warning(
+            "指标采集[ON_ERROR]: session=%s agent=%s error=%s",
+            ctx.session_id, ctx.agent_name, error_msg,
+        )
+        return {"metric": "error", "error": error_msg, "session_id": ctx.session_id}
+
+    _handlers["plugin-logging"] = {
+        HookPoint.PRE_CHAT: _audit_logger_pre_chat,
+        HookPoint.POST_CHAT: _audit_logger_post_chat,
+        HookPoint.PRE_TOOL: _audit_logger_pre_tool,
+        HookPoint.POST_TOOL: _audit_logger_post_tool,
+    }
+
+    _handlers["plugin-content-filter"] = {
+        HookPoint.PRE_CHAT: _content_filter_pre_chat,
+        HookPoint.POST_CHAT: _content_filter_post_chat,
+    }
+
+    _handlers["plugin-metrics"] = {
+        HookPoint.PRE_CHAT: _metrics_pre_chat,
+        HookPoint.POST_CHAT: _metrics_post_chat,
+        HookPoint.ON_ERROR: _metrics_on_error,
+    }
 
 
 _init_official_plugins()

@@ -21,6 +21,12 @@ const routes: RouteRecordRaw[] = [
       { path: 'admin/token', name: 'TokenBudget', component: () => import('../views/admin/TokenBudgetView.vue') },
       { path: 'knowledge', name: 'Knowledge', component: () => import('../views/knowledge/KnowledgeView.vue') },
       { path: 'knowledge/:kbId', name: 'KbDocs', component: () => import('../views/knowledge/KbDocsView.vue') },
+      { path: 'workflow', name: 'Workflow', component: () => import('../views/workflow/WorkflowView.vue') },
+      { path: 'approval', name: 'Approval', component: () => import('../views/approval/ApprovalView.vue') },
+      { path: 'scheduler', name: 'Scheduler', component: () => import('../views/scheduler/SchedulerView.vue') },
+      { path: 'plugins', name: 'Plugins', component: () => import('../views/plugin/PluginView.vue') },
+      { path: 'agent-builder', name: 'AgentBuilder', component: () => import('../views/agent-builder/AgentBuilderView.vue') },
+      { path: 'prompt-templates', name: 'PromptTemplates', component: () => import('../views/prompt-template/PromptTemplateView.vue') },
     ],
   },
 ]

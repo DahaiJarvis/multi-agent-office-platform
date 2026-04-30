@@ -34,13 +34,13 @@ class HealthCheckRequest(BaseModel):
     replication_lag_ms: float = Field(default=0, ge=0)
 
 
-@router.get("", response_model=list[DeployRegion])
+@router.get("", response_model=list[DeployRegion], summary="列出部署区域")
 async def api_list_regions(status: RegionStatus | None = None) -> list[DeployRegion]:
     """列出部署区域"""
     return list_regions(status)
 
 
-@router.get("/{region_id}", response_model=DeployRegion)
+@router.get("/{region_id}", response_model=DeployRegion, summary="获取区域详情")
 async def api_get_region(region_id: str) -> DeployRegion:
     """获取区域详情"""
     region = get_region(region_id)
@@ -50,13 +50,13 @@ async def api_get_region(region_id: str) -> DeployRegion:
     return region
 
 
-@router.post("", response_model=DeployRegion)
+@router.post("", response_model=DeployRegion, summary="注册部署区域")
 async def api_register_region(region: DeployRegion) -> DeployRegion:
     """注册部署区域"""
     return register_region(region)
 
 
-@router.put("/{region_id}/status", response_model=DeployRegion)
+@router.put("/{region_id}/status", response_model=DeployRegion, summary="更新区域状态")
 async def api_update_region_status(region_id: str, status: RegionStatus) -> DeployRegion:
     """更新区域状态"""
     result = update_region_status(region_id, status)
@@ -66,7 +66,7 @@ async def api_update_region_status(region_id: str, status: RegionStatus) -> Depl
     return result
 
 
-@router.put("/{region_id}/health", response_model=DeployRegion)
+@router.put("/{region_id}/health", response_model=DeployRegion, summary="更新区域健康状态")
 async def api_update_health_check(region_id: str, request: HealthCheckRequest) -> DeployRegion:
     """更新健康检查结果"""
     result = update_health_check(region_id, request.success_rate, request.replication_lag_ms)
@@ -76,7 +76,7 @@ async def api_update_health_check(region_id: str, request: HealthCheckRequest) -
     return result
 
 
-@router.post("/route", response_model=RoutingDecision)
+@router.post("/route", response_model=RoutingDecision, summary="请求路由决策")
 async def api_route_request(request: RouteRequestModel) -> RoutingDecision:
     """路由请求到最优区域"""
     return route_request(

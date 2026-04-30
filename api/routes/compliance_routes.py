@@ -95,7 +95,7 @@ class UpdateSecurityPolicyRequest(BaseModel):
     audit_log_all_requests: bool | None = None
 
 
-@router.get("/status", response_model=list[ComplianceStatusResponse])
+@router.get("/status", response_model=list[ComplianceStatusResponse], summary="获取合规状态")
 async def get_compliance_status(request: Request, framework: str = "") -> list[ComplianceStatusResponse]:
     """获取合规状态
 
@@ -121,7 +121,7 @@ async def get_compliance_status(request: Request, framework: str = "") -> list[C
     ]
 
 
-@router.get("/report", response_model=ComplianceReportResponse)
+@router.get("/report", response_model=ComplianceReportResponse, summary="获取合规报告")
 async def generate_compliance_report(request: Request) -> ComplianceReportResponse:
     """生成合规状态报告
 
@@ -135,7 +135,7 @@ async def generate_compliance_report(request: Request) -> ComplianceReportRespon
     return ComplianceReportResponse(**report)
 
 
-@router.get("/retention-policies", response_model=list[RetentionPolicyResponse])
+@router.get("/retention-policies", response_model=list[RetentionPolicyResponse], summary="获取数据保留策略")
 async def get_retention_policies(request: Request) -> list[RetentionPolicyResponse]:
     """获取所有数据保留策略"""
     require_roles(request, ["admin"])
@@ -157,7 +157,7 @@ async def get_retention_policies(request: Request) -> list[RetentionPolicyRespon
     ]
 
 
-@router.post("/retention-check", response_model=RetentionCheckResponse)
+@router.post("/retention-check", response_model=RetentionCheckResponse, summary="检查数据保留")
 async def check_data_retention(
     request: Request,
     category: str,
@@ -175,7 +175,7 @@ async def check_data_retention(
     return RetentionCheckResponse(**result)
 
 
-@router.get("/security-policy", response_model=SecurityPolicyResponse)
+@router.get("/security-policy", response_model=SecurityPolicyResponse, summary="获取安全策略")
 async def get_security_policy(request: Request) -> SecurityPolicyResponse:
     """获取当前安全策略配置"""
     require_roles(request, ["admin"])
@@ -200,7 +200,7 @@ async def get_security_policy(request: Request) -> SecurityPolicyResponse:
     )
 
 
-@router.patch("/security-policy", response_model=SecurityPolicyResponse)
+@router.patch("/security-policy", response_model=SecurityPolicyResponse, summary="更新安全策略")
 async def update_security_policy(
     request: Request,
     body: UpdateSecurityPolicyRequest,
@@ -217,7 +217,7 @@ async def update_security_policy(
             setattr(current, key, value)
 
     auth_payload = getattr(request.state, "auth_payload", None)
-    updated_by = auth_payload.user_id if auth_payload else "system"
+    updated_by = getattr(auth_payload, "user_id", None) or getattr(request.state, "user_id", "system")
 
     manager.update_security_policy(current, updated_by=updated_by)
 

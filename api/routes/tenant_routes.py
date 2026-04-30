@@ -124,7 +124,7 @@ def _tenant_to_response(tenant: Tenant) -> TenantResponse:
     )
 
 
-@router.post("", response_model=TenantResponse, status_code=201)
+@router.post("", response_model=TenantResponse, status_code=201, summary="创建租户")
 async def create_tenant(request: Request, body: CreateTenantRequest) -> TenantResponse:
     """创建租户
 
@@ -149,7 +149,7 @@ async def create_tenant(request: Request, body: CreateTenantRequest) -> TenantRe
     return _tenant_to_response(tenant)
 
 
-@router.get("", response_model=TenantListResponse)
+@router.get("", response_model=TenantListResponse, summary="列出租户")
 async def list_tenants(
     request: Request,
     status: str | None = None,
@@ -172,7 +172,7 @@ async def list_tenants(
     )
 
 
-@router.get("/{tenant_id}", response_model=TenantResponse)
+@router.get("/{tenant_id}", response_model=TenantResponse, summary="获取租户详情")
 async def get_tenant(request: Request, tenant_id: str) -> TenantResponse:
     """获取租户详情"""
     require_roles(request, ["admin"])
@@ -185,7 +185,7 @@ async def get_tenant(request: Request, tenant_id: str) -> TenantResponse:
     return _tenant_to_response(tenant)
 
 
-@router.patch("/{tenant_id}", response_model=TenantResponse)
+@router.patch("/{tenant_id}", response_model=TenantResponse, summary="更新租户")
 async def update_tenant(request: Request, tenant_id: str, body: UpdateTenantRequest) -> TenantResponse:
     """更新租户信息"""
     require_roles(request, ["admin"])
@@ -199,7 +199,7 @@ async def update_tenant(request: Request, tenant_id: str, body: UpdateTenantRequ
     return _tenant_to_response(tenant)
 
 
-@router.post("/{tenant_id}/suspend", response_model=TenantResponse)
+@router.post("/{tenant_id}/suspend", response_model=TenantResponse, summary="暂停租户")
 async def suspend_tenant(request: Request, tenant_id: str) -> TenantResponse:
     """暂停租户"""
     require_roles(request, ["admin"])
@@ -213,7 +213,7 @@ async def suspend_tenant(request: Request, tenant_id: str) -> TenantResponse:
     return _tenant_to_response(tenant)
 
 
-@router.post("/{tenant_id}/activate", response_model=TenantResponse)
+@router.post("/{tenant_id}/activate", response_model=TenantResponse, summary="激活租户")
 async def activate_tenant(request: Request, tenant_id: str) -> TenantResponse:
     """激活租户"""
     require_roles(request, ["admin"])
@@ -227,7 +227,7 @@ async def activate_tenant(request: Request, tenant_id: str) -> TenantResponse:
     return _tenant_to_response(tenant)
 
 
-@router.delete("/{tenant_id}")
+@router.delete("/{tenant_id}", summary="删除租户")
 async def delete_tenant(request: Request, tenant_id: str) -> dict:
     """删除租户（软删除）"""
     require_roles(request, ["admin"])
@@ -240,7 +240,7 @@ async def delete_tenant(request: Request, tenant_id: str) -> dict:
     return {"message": "租户已删除", "tenant_id": tenant_id}
 
 
-@router.get("/{tenant_id}/quota", response_model=QuotaResponse)
+@router.get("/{tenant_id}/quota", response_model=QuotaResponse, summary="查询租户配额")
 async def get_tenant_quota(request: Request, tenant_id: str) -> QuotaResponse:
     """获取租户配额"""
     require_roles(request, ["admin"])
@@ -253,7 +253,7 @@ async def get_tenant_quota(request: Request, tenant_id: str) -> QuotaResponse:
     return QuotaResponse(**tenant.quota.model_dump())
 
 
-@router.post("/{tenant_id}/quota/check", response_model=QuotaCheckResponse)
+@router.post("/{tenant_id}/quota/check", response_model=QuotaCheckResponse, summary="检查租户配额")
 async def check_tenant_quota(
     request: Request,
     tenant_id: str,
@@ -273,7 +273,7 @@ async def check_tenant_quota(
     )
 
 
-@router.post("/{tenant_id}/upgrade", response_model=TenantResponse)
+@router.post("/{tenant_id}/upgrade", response_model=TenantResponse, summary="升级租户套餐")
 async def upgrade_tenant_plan(
     request: Request,
     tenant_id: str,

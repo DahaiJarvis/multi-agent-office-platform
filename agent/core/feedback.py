@@ -59,17 +59,11 @@ class FeedbackService:
         self._redis: Any = None
 
     async def _get_redis(self) -> Any:
-        """获取 Redis 客户端"""
+        """获取 Redis 客户端（使用统一连接管理器）"""
         if self._redis is None:
             try:
-                import redis.asyncio as aioredis
-                from agent.core.config import get_settings
-
-                settings = get_settings()
-                self._redis = aioredis.from_url(
-                    settings.redis_url,
-                    decode_responses=True,
-                )
+                from agent.core.redis_manager import get_redis_client
+                self._redis = await get_redis_client()
             except Exception as e:
                 logger.warning("反馈服务 Redis 连接失败: %s", e)
                 return None
@@ -92,6 +86,17 @@ class FeedbackService:
             feedback_id = f"{request.session_id}:{request.message_index}"
             feedback_key = f"feedback:{feedback_id}"
 
+            # 先读取旧反馈数据（在写入新数据之前）
+            old_feedback_raw = await redis.get(feedback_key)
+            old_type = ""
+            if old_feedback_raw:
+                try:
+                    old_data = json.loads(old_feedback_raw)
+                    old_type = old_data.get("feedback_type", "")
+                except Exception:
+                    pass
+
+            # 存储反馈详情（覆盖同一消息的旧反馈）
             feedback_data = {
                 "session_id": request.session_id,
                 "message_index": request.message_index,
@@ -103,7 +108,6 @@ class FeedbackService:
                 "timestamp": time.time(),
             }
 
-            # 存储反馈详情（覆盖同一消息的旧反馈）
             await redis.setex(
                 feedback_key,
                 86400 * 30,  # 30 天过期
@@ -114,18 +118,12 @@ class FeedbackService:
             today = time.strftime("%Y-%m-%d")
             stats_key = f"feedback_stats:{today}"
 
-            # 先删除旧反馈类型（如果存在）
-            old_feedback = await redis.get(feedback_key)
-            if old_feedback:
-                try:
-                    old_data = json.loads(old_feedback)
-                    old_type = old_data.get("feedback_type", "")
-                    if old_type == "thumbs_up":
-                        await redis.hincrby(stats_key, "thumbs_up", -1)
-                    elif old_type == "thumbs_down":
-                        await redis.hincrby(stats_key, "thumbs_down", -1)
-                except Exception:
-                    pass
+            # 先减少旧反馈类型的计数
+            if old_type:
+                if old_type == "thumbs_up":
+                    await redis.hincrby(stats_key, "thumbs_up", -1)
+                elif old_type == "thumbs_down":
+                    await redis.hincrby(stats_key, "thumbs_down", -1)
 
             # 增加新反馈计数
             if request.feedback_type == FeedbackType.THUMBS_UP:
@@ -133,17 +131,30 @@ class FeedbackService:
             else:
                 await redis.hincrby(stats_key, "thumbs_down", 1)
 
-            await redis.hincrby(stats_key, "total", 1)
+            # 如果是首次反馈（无旧反馈），total 加 1；否则 total 不变
+            if not old_type:
+                await redis.hincrby(stats_key, "total", 1)
             await redis.expire(stats_key, 86400 * 90)
 
             # 按 Agent 维度统计
             if request.agent_name:
                 agent_stats_key = f"feedback_stats:agent:{request.agent_name}:{today}"
+
+                # 减少旧反馈类型的 Agent 计数
+                if old_type:
+                    if old_type == "thumbs_up":
+                        await redis.hincrby(agent_stats_key, "thumbs_up", -1)
+                    elif old_type == "thumbs_down":
+                        await redis.hincrby(agent_stats_key, "thumbs_down", -1)
+
+                # 增加新反馈的 Agent 计数
                 if request.feedback_type == FeedbackType.THUMBS_UP:
                     await redis.hincrby(agent_stats_key, "thumbs_up", 1)
                 else:
                     await redis.hincrby(agent_stats_key, "thumbs_down", 1)
-                await redis.hincrby(agent_stats_key, "total", 1)
+
+                if not old_type:
+                    await redis.hincrby(agent_stats_key, "total", 1)
                 await redis.expire(agent_stats_key, 86400 * 90)
 
             logger.info(

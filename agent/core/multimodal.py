@@ -302,20 +302,43 @@ async def _openai_whisper(
     is_base64: bool,
     settings: Any,
 ) -> ASRResult:
-    """OpenAI Whisper 语音识别"""
+    """OpenAI Whisper 语音识别
+
+    支持 base64 编码音频和 URL 音频两种输入模式。
+    URL 模式下先下载音频数据再提交给 Whisper API。
+    """
     try:
         if is_base64:
             audio_bytes = base64.b64decode(audio_source)
             files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
         else:
-            files = {"file": ("audio.wav", b"", "audio/wav")}
+            # URL 模式：先下载音频数据
+            async with httpx.AsyncClient(timeout=30.0) as download_client:
+                download_resp = await download_client.get(audio_source, follow_redirects=True)
+                if download_resp.status_code != 200:
+                    logger.error("Whisper ASR 下载音频失败: url=%s, status=%d", audio_source[:200], download_resp.status_code)
+                    return ASRResult(text="", language=language, confidence=0.0)
+                audio_bytes = download_resp.content
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+            content_type = download_resp.headers.get("content-type", "audio/wav")
+            ext = "wav"
+            if "mp3" in content_type or "mpeg" in content_type:
+                ext = "mp3"
+            elif "webm" in content_type:
+                ext = "webm"
+            elif "ogg" in content_type:
+                ext = "ogg"
+            elif "m4a" in content_type or "mp4" in content_type:
+                ext = "m4a"
+
+            files = {"file": (f"audio.{ext}", audio_bytes, content_type)}
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{settings.openai_base_url}/audio/transcriptions",
                 headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                 data={"model": "whisper-1", "language": language},
-                files=files if is_base64 else None,
+                files=files,
             )
 
             if response.status_code != 200:

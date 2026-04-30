@@ -7,7 +7,6 @@
 import logging
 import time
 
-import bcrypt
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
@@ -18,6 +17,8 @@ from security.auth import (
     verify_token,
     extract_token_from_header,
     revoke_token_async,
+    hash_password,
+    verify_password,
 )
 from security.audit import record_auth_audit
 from security.user_store import get_user_store
@@ -65,47 +66,6 @@ class LogoutRequest(BaseModel):
     refresh_token: str = Field(default="", description="刷新令牌（可选，提供则撤销）")
 
 
-def _hash_password(password: str) -> str:
-    """使用 bcrypt 对密码进行哈希
-
-    bcrypt 自带盐值，计算成本因子为 12，可有效抵御暴力破解。
-    返回值为 UTF-8 解码的哈希字符串，便于存储和比对。
-
-    Args:
-        password: 明文密码
-
-    Returns:
-        bcrypt 哈希字符串
-    """
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
-
-
-def _verify_password(password: str, password_hash: str) -> bool:
-    """验证密码是否匹配 bcrypt 哈希
-
-    同时兼容旧版 SHA-256 哈希：如果哈希长度为 64（SHA-256 特征），
-    则使用 SHA-256 比对并自动升级为 bcrypt 哈希。
-
-    Args:
-        password: 明文密码
-        password_hash: 存储的哈希值（bcrypt 或旧版 SHA-256）
-
-    Returns:
-        密码是否匹配
-    """
-    if len(password_hash) == 64 and all(c in "0123456789abcdef" for c in password_hash):
-        # 旧版 SHA-256 哈希兼容
-        import hashlib
-        sha256_hash = hashlib.sha256(password.encode()).hexdigest()
-        if sha256_hash == password_hash:
-            # 自动升级：将旧哈希替换为 bcrypt
-            _upgrade_user_password_hash(password)
-            return True
-        return False
-
-    return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
-
-
 def _upgrade_user_password_hash(password: str) -> None:
     """将旧版 SHA-256 哈希升级为 bcrypt
 
@@ -120,7 +80,7 @@ def _upgrade_user_password_hash(password: str) -> None:
     store = get_user_store()
     for user_id, user_record in store._cache.items():
         if user_record.password_hash == sha256_hash:
-            new_hash = _hash_password(password)
+            new_hash = hash_password(password)
             store._cache[user_id].password_hash = new_hash
             import asyncio
             try:
@@ -200,7 +160,7 @@ def _get_user_roles(user_id: str) -> list[str]:
     return ["employee"]
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", response_model=LoginResponse, summary="用户登录")
 async def login(request: LoginRequest) -> LoginResponse:
     """用户登录
 
@@ -230,7 +190,7 @@ async def login(request: LoginRequest) -> LoginResponse:
     store = get_user_store()
     user_record = await store.get_user(request.user_id)
     if user_record:
-        if not _verify_password(request.password, user_record.password_hash):
+        if not verify_password(request.password, user_record.password_hash):
             _record_login_failure(request.user_id)
             record_auth_audit(
                 trace_id="",
@@ -240,6 +200,8 @@ async def login(request: LoginRequest) -> LoginResponse:
                 detail="密码错误",
             )
             raise AppException(ErrorCode.LOGIN_FAILED, message="用户名或密码错误")
+        else:
+            _upgrade_user_password_hash(request.password)
     else:
         # 未在用户存储中的用户，使用前缀推断角色（开发模式兼容）
         from agent.core.config import get_settings
@@ -280,7 +242,7 @@ async def login(request: LoginRequest) -> LoginResponse:
     )
 
 
-@router.post("/logout")
+@router.post("/logout", summary="用户登出")
 async def logout(request: Request, body: LogoutRequest | None = None) -> dict:
     """用户登出
 
@@ -320,7 +282,7 @@ async def logout(request: Request, body: LogoutRequest | None = None) -> dict:
     return {"message": "已登出"}
 
 
-@router.post("/refresh")
+@router.post("/refresh", summary="刷新令牌")
 async def refresh_token(request: RefreshRequest) -> dict:
     """刷新访问令牌"""
     token_pair = refresh_access_token(request.refresh_token)
@@ -367,7 +329,7 @@ class SSOProvidersResponse(BaseModel):
     providers: list[str] = Field(description="已注册的 SSO 提供者类型列表")
 
 
-@router.get("/sso/providers", response_model=SSOProvidersResponse)
+@router.get("/sso/providers", response_model=SSOProvidersResponse, summary="获取SSO提供者列表")
 async def get_sso_providers() -> SSOProvidersResponse:
     """获取已注册的 SSO 提供者列表
 
@@ -378,7 +340,7 @@ async def get_sso_providers() -> SSOProvidersResponse:
     return SSOProvidersResponse(providers=providers)
 
 
-@router.post("/sso/authorize", response_model=SSOAuthorizeResponse)
+@router.post("/sso/authorize", response_model=SSOAuthorizeResponse, summary="发起SSO授权")
 async def sso_authorize(request: SSOAuthorizeRequest) -> SSOAuthorizeResponse:
     """发起 SSO 授权
 
@@ -418,7 +380,7 @@ async def sso_authorize(request: SSOAuthorizeRequest) -> SSOAuthorizeResponse:
     )
 
 
-@router.post("/sso/callback", response_model=LoginResponse)
+@router.post("/sso/callback", response_model=LoginResponse, summary="SSO回调处理")
 async def sso_callback(request: SSOCallbackRequest) -> LoginResponse:
     """处理 SSO 授权回调
 

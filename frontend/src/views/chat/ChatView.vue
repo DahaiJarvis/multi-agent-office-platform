@@ -155,6 +155,8 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import DOMPurify from 'dompurify'
+import { marked } from 'marked'
 import { useAuthStore } from '../../stores/auth'
 import { useChatStore, type Message } from '../../stores/chat'
 import { agentApi } from '../../api/agent'
@@ -180,17 +182,27 @@ const quickActions = [
   { icon: '📧', text: '帮我起草一封项目周报邮件' },
 ]
 
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+})
+
 function renderMarkdown(text: string): string {
   if (!text) return ''
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="lang-$1">$2</code></pre>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/\n/g, '<br>')
+  const html = marked.parse(text) as string
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: [
+      'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'p', 'br', 'hr',
+      'strong', 'em', 'del', 'ins',
+      'ul', 'ol', 'li',
+      'blockquote', 'pre', 'code',
+      'a', 'img',
+      'table', 'thead', 'tbody', 'tr', 'th', 'td',
+      'span', 'div',
+    ],
+    ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'id', 'alt', 'src', 'title'],
+  })
 }
 
 function autoResize() {
@@ -252,7 +264,9 @@ async function handleSend() {
           agentName = intentData.agent || ''
           intent = intentData.intent || ''
           mode = intentData.mode || ''
-        } catch { /* skip */ }
+        } catch {
+          console.warn('意图数据解析失败', data.data)
+        }
       } else if (data.event === 'chunk') {
         chatStore.appendToStreamingMessage(streamingId, data.data)
         scrollToBottom()
@@ -290,7 +304,9 @@ async function submitFeedback(messageId: string, type: 'thumbs_up' | 'thumbs_dow
       intent: msg.intent,
     })
     chatStore.setMessageFeedback(messageId, type)
-  } catch { /* ignore */ }
+  } catch {
+    ElMessage.error('反馈提交失败')
+  }
 }
 
 function startNewChat() {
@@ -300,7 +316,7 @@ function startNewChat() {
 
 async function refreshSessionList() {
   try {
-    const { data } = await sessionApi.listUserSessions(authStore.userId, 50)
+    const data = await sessionApi.listUserSessions(authStore.userId, 50)
     sessionList.value = data.sessions || data || []
   } catch {
     sessionList.value = []
@@ -312,7 +328,7 @@ async function loadSession(sessionId: string) {
   if (chatStore.sessionId === sessionId) return
 
   try {
-    const { data } = await sessionApi.getHistory(sessionId)
+    const data = await sessionApi.getHistory(sessionId)
     const messages = data.messages || []
     chatStore.clearChat()
     chatStore.setSessionId(sessionId)
@@ -336,6 +352,13 @@ async function deleteSession(sessionId: string) {
 }
 
 function getSessionTitle(session: SessionInfo): string {
+  if (session.title) {
+    return session.title
+  }
+  if (session.first_message) {
+    const text = session.first_message.trim()
+    return text.length > 20 ? text.slice(0, 20) + '...' : text
+  }
   return `${session.message_count}条消息的对话`
 }
 
@@ -363,8 +386,7 @@ async function handleFileUpload(files: File[]) {
 
   try {
     const res = await knowledgeApi.parseFiles(files)
-    const parsePayload = res.data?.data || res.data
-    const parsedContent = parsePayload?.results?.map((r: ParseResultItem) => r.content || r.text || '').join('\n\n')
+    const parsedContent = res?.results?.map((r: ParseResultItem) => r.content || r.text || '').join('\n\n')
     if (parsedContent) {
       inputText.value = inputText.value
         ? `${inputText.value}\n\n[文件内容]\n${parsedContent}`

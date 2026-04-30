@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/search", tags=["企业搜索"])
 
 
-@router.post("", response_model=SearchResponse)
+@router.post("", response_model=SearchResponse, summary="执行企业搜索")
 async def api_search(request: SearchRequest) -> SearchResponse:
     """执行企业搜索
 
@@ -24,7 +24,7 @@ async def api_search(request: SearchRequest) -> SearchResponse:
     return await enterprise_search(request)
 
 
-@router.get("/sources")
+@router.get("/sources", summary="列出可搜索数据源")
 async def list_search_sources() -> dict:
     """列出可搜索的数据源"""
     return {

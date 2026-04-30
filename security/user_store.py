@@ -23,7 +23,7 @@ import logging
 import time
 from typing import Any
 
-from api.routes.auth_routes import _hash_password
+from security.auth import hash_password
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +267,7 @@ class UserStore:
         """
         import json
 
-        password_hash = _hash_password(password)
+        password_hash = hash_password(password)
         record = UserRecord(
             user_id=user_id,
             password_hash=password_hash,
@@ -317,7 +317,7 @@ class UserStore:
         Returns:
             是否更新成功
         """
-        new_hash = _hash_password(new_password)
+        new_hash = hash_password(new_password)
 
         pool = await self._get_pool()
         if pool is not None:

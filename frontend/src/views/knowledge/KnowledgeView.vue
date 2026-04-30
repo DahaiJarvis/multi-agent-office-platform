@@ -11,7 +11,18 @@
   <div class="knowledge-page">
     <div class="page-header">
       <h2>知识库管理</h2>
-      <button class="btn-primary" @click="showCreateForm = true">创建知识库</button>
+      <div class="header-actions">
+        <button class="btn-primary" @click="showCreateForm = true">创建知识库</button>
+      </div>
+    </div>
+
+    <div class="guide-banner" v-if="!guideDismissed">
+      <div class="guide-banner-content">
+        <span class="guide-icon">?</span>
+        <span>知识库用于存储和管理文档资料，Agent 可通过检索知识库获取相关信息，提升回答的准确性和专业性。</span>
+        <button class="guide-link" @click="showGuideDialog = true">查看详细指南</button>
+        <button class="guide-close" @click="guideDismissed = true">&times;</button>
+      </div>
     </div>
 
     <div v-if="showCreateForm" class="create-form-overlay" @click.self="showCreateForm = false">
@@ -74,6 +85,63 @@
       <span>{{ page }} / {{ totalPages }}</span>
       <button :disabled="page >= totalPages" @click="loadPage(page + 1)">下一页</button>
     </div>
+
+    <el-dialog v-model="showGuideDialog" title="知识库使用指南" width="640px">
+      <div class="guide-content">
+        <div class="guide-section">
+          <h4>什么是知识库？</h4>
+          <p>知识库是文档资料的存储和管理中心。Agent 在对话时可以检索知识库中的文档内容，从而获取专业领域的信息，提升回答的准确性和专业性。</p>
+        </div>
+        <div class="guide-section">
+          <h4>使用流程</h4>
+          <div class="flow-steps">
+            <div class="flow-step">
+              <div class="step-num">1</div>
+              <div class="step-content">
+                <strong>创建知识库</strong>
+                <p>填写名称、描述，选择访问级别（私有/团队/公开）</p>
+              </div>
+            </div>
+            <div class="flow-step">
+              <div class="step-num">2</div>
+              <div class="step-content">
+                <strong>上传文档</strong>
+                <p>进入知识库详情页，上传 PDF、Word、TXT 等格式的文档</p>
+              </div>
+            </div>
+            <div class="flow-step">
+              <div class="step-num">3</div>
+              <div class="step-content">
+                <strong>文档处理</strong>
+                <p>系统自动对文档进行分块和向量化处理，建立检索索引</p>
+              </div>
+            </div>
+            <div class="flow-step">
+              <div class="step-num">4</div>
+              <div class="step-content">
+                <strong>关联 Agent</strong>
+                <p>在 Agent 配置中绑定知识库，Agent 即可在对话中检索相关内容</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="guide-section">
+          <h4>访问级别</h4>
+          <div class="config-list">
+            <div class="config-item"><code>私有</code> - 仅创建者可访问和管理</div>
+            <div class="config-item"><code>团队</code> - 团队成员可访问</div>
+            <div class="config-item"><code>公开</code> - 所有用户可访问</div>
+          </div>
+        </div>
+        <div class="guide-section">
+          <h4>支持的文档格式</h4>
+          <p>支持 PDF、Word (.docx)、纯文本 (.txt)、Markdown (.md) 等常见文档格式。上传后系统会自动提取文本内容并进行分块处理。</p>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="showGuideDialog = false">知道了</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -88,6 +156,8 @@ const router = useRouter()
 const knowledgeBases = ref<KnowledgeBase[]>([])
 const loading = ref(false)
 const showCreateForm = ref(false)
+const guideDismissed = ref(false)
+const showGuideDialog = ref(false)
 const page = ref(1)
 const total = ref(0)
 const perPage = 20
@@ -104,8 +174,8 @@ async function loadKnowledgeBases() {
   loading.value = true
   try {
     const res = await knowledgeApi.listKnowledgeBases(page.value, perPage)
-    const payload = res.data?.data || res.data
-    knowledgeBases.value = payload?.knowledge_bases || payload?.items || []
+    const payload = res.data
+    knowledgeBases.value = payload?.knowledge_bases || []
     total.value = payload?.total || knowledgeBases.value.length
   } catch (err) {
     ElMessage.error('加载知识库列表失败')
@@ -404,4 +474,27 @@ onMounted(() => {
   opacity: 0.4;
   cursor: not-allowed;
 }
+.header-actions { display: flex; gap: 10px; }
+.btn-outline { padding: 8px 18px; border-radius: var(--radius-md); border: 1px solid var(--color-primary); color: var(--color-primary); font-weight: 600; font-size: 13px; transition: all var(--transition-fast); }
+.btn-outline:hover { background: rgba(99,102,241,0.06); }
+.guide-banner { background: rgba(99,102,241,0.06); border: 1px solid rgba(99,102,241,0.15); border-radius: var(--radius-lg); padding: 12px 16px; margin-bottom: 16px; }
+.guide-banner-content { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--color-text-secondary); line-height: 1.5; }
+.guide-icon { width: 22px; height: 22px; border-radius: 50%; background: var(--color-primary); color: white; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+.guide-link { color: var(--color-primary); font-weight: 500; cursor: pointer; white-space: nowrap; }
+.guide-link:hover { text-decoration: underline; }
+.guide-close { margin-left: auto; color: var(--color-text-tertiary); font-size: 18px; cursor: pointer; padding: 0 4px; line-height: 1; }
+.guide-close:hover { color: var(--color-text); }
+.guide-content { max-height: 60vh; overflow-y: auto; }
+.guide-section { margin-bottom: 20px; }
+.guide-section h4 { font-size: 15px; font-weight: 600; color: var(--color-text); margin: 0 0 8px; }
+.guide-section p { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 8px; }
+.guide-section code { background: rgba(99,102,241,0.08); color: var(--color-primary); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.flow-steps { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
+.flow-step { display: flex; gap: 12px; align-items: flex-start; }
+.step-num { width: 28px; height: 28px; border-radius: 50%; background: var(--color-primary); color: white; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex-shrink: 0; }
+.step-content strong { font-size: 13px; color: var(--color-text); display: block; margin-bottom: 2px; }
+.step-content p { font-size: 12px; color: var(--color-text-tertiary); margin: 0; }
+.config-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.config-item { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; }
+.config-item code { background: rgba(99,102,241,0.08); color: var(--color-primary); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
 </style>

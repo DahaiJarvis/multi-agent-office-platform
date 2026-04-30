@@ -122,6 +122,35 @@ _METRIC_KEYWORDS: list[str] = [
     "金额", "费用", "成本", "订单数", "用户数",
 ]
 
+_SAFE_METRIC_FIELDS: dict[str, str] = {
+    "金额": "amount",
+    "收入": "revenue",
+    "支出": "expense",
+    "销售额": "sales_amount",
+    "利润": "profit",
+    "数量": "quantity",
+    "人数": "user_count",
+    "次数": "call_count",
+    "费用": "cost",
+    "成本": "cost",
+    "订单数": "order_count",
+    "用户数": "user_count",
+}
+
+_SAFE_DIMENSION_FIELDS: dict[str, str] = {
+    "类别": "category",
+    "分类": "category",
+    "部门": "department",
+    "地区": "region",
+    "产品": "product",
+    "类型": "type",
+    "状态": "status",
+}
+
+_SAFE_AGG_FUNCTIONS: set[str] = {"SUM", "AVG", "COUNT", "MAX", "MIN"}
+
+_SAFE_TABLE_NAMES: set[str] = {"data_table", "orders", "users", "products", "transactions"}
+
 _TIME_KEYWORDS: dict[str, str] = {
     "今天": "CURRENT_DATE",
     "昨天": "CURRENT_DATE - INTERVAL '1 day'",
@@ -158,35 +187,58 @@ def extract_time_range(query: str) -> str:
 
 
 def extract_metric(query: str) -> str:
-    """提取度量字段"""
+    """提取度量字段，返回白名单中的安全字段名"""
     for kw in _METRIC_KEYWORDS:
         if kw in query:
-            return kw
+            return _SAFE_METRIC_FIELDS.get(kw, "COUNT(*)")
     return "COUNT(*)"
+
+
+def _sanitize_field(value: str, allowed_values: dict[str, str] | set[str], default: str) -> str:
+    """校验字段值是否在白名单中
+
+    Args:
+        value: 待校验的值
+        allowed_values: 白名单字典或集合
+        default: 校验失败时的默认值
+
+    Returns:
+        白名单中的安全值
+    """
+    if isinstance(allowed_values, dict):
+        return allowed_values.get(value, default)
+    if value in allowed_values:
+        return value
+    return default
 
 
 def nl_to_sql(query: str, table: str = "data_table") -> str:
     """将自然语言查询转换为 SQL
 
+    使用白名单校验所有动态字段名，防止 SQL 注入。
+
     Args:
         query: 自然语言查询
-        table: 目标表名
+        table: 目标表名（必须在白名单中）
 
     Returns:
         SQL 查询语句
     """
+    safe_table = _sanitize_field(table, _SAFE_TABLE_NAMES, "data_table")
     intent = detect_query_intent(query)
     time_condition = extract_time_range(query)
     metric = extract_metric(query)
+
+    safe_dimension = "category"
 
     template = _SQL_TEMPLATES.get(intent.value, _SQL_TEMPLATES["detail"])
 
     sql = template.format(
         time_field="created_at",
         metric_field=metric,
-        dimension_field="category",
+        dimension_field=safe_dimension,
         agg_function="SUM",
-        table=table,
+        table=safe_table,
         conditions=time_condition,
         limit=50,
     )
@@ -289,6 +341,8 @@ def generate_insights(data: DataResult) -> list[str]:
 async def analyze_data(request: NLQueryRequest) -> AnalysisReport:
     """执行数据分析
 
+    生成 SQL 并通过数据库连接执行查询，返回实际数据结果。
+
     Args:
         request: 自然语言查询请求
 
@@ -300,15 +354,7 @@ async def analyze_data(request: NLQueryRequest) -> AnalysisReport:
     intent = detect_query_intent(request.query)
     sql = nl_to_sql(request.query)
 
-    data = DataResult(
-        columns=[
-            DataField(name="category", display_name="类别", data_type="string"),
-            DataField(name="value", display_name="数值", data_type="float"),
-        ],
-        rows=[],
-        total_rows=0,
-        execution_time_ms=0,
-    )
+    data = await _execute_sql_query(sql)
 
     visualization = None
     if request.include_visualization:
@@ -332,3 +378,77 @@ async def analyze_data(request: NLQueryRequest) -> AnalysisReport:
         visualization=visualization,
         insights=insights,
     )
+
+
+async def _execute_sql_query(sql: str) -> DataResult:
+    """执行 SQL 查询并返回结构化结果
+
+    通过 SQLAlchemy 异步引擎执行 SQL，将结果转换为 DataResult。
+    查询失败时返回空结果而非抛出异常，保证分析流程不中断。
+
+    Args:
+        sql: SQL 查询语句
+
+    Returns:
+        DataResult 数据查询结果
+    """
+    try:
+        from agent.core.config import get_settings
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy import text
+
+        settings = get_settings()
+        engine = create_async_engine(settings.postgres_dsn, pool_size=2, max_overflow=5)
+
+        async with engine.connect() as conn:
+            result = await conn.execute(text(sql))
+            columns = result.keys()
+            rows = [dict(zip(columns, row)) for row in result.fetchall()]
+
+        await engine.dispose()
+
+        data_fields = []
+        for col_name in columns:
+            sample_value = rows[0].get(col_name) if rows else None
+            data_type = _infer_data_type(sample_value)
+            data_fields.append(DataField(
+                name=col_name,
+                display_name=col_name,
+                data_type=data_type,
+            ))
+
+        return DataResult(
+            columns=data_fields,
+            rows=rows,
+            total_rows=len(rows),
+            execution_time_ms=0,
+        )
+
+    except Exception as e:
+        logger.error("SQL 查询执行失败: sql=%s, error=%s", sql[:200], e)
+        return DataResult(
+            columns=[],
+            rows=[],
+            total_rows=0,
+            execution_time_ms=0,
+        )
+
+
+def _infer_data_type(value: Any) -> str:
+    """根据样本值推断数据类型
+
+    Args:
+        value: 样本值
+
+    Returns:
+        数据类型字符串
+    """
+    if value is None:
+        return "string"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "float"
+    return "string"

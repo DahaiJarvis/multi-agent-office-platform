@@ -35,6 +35,64 @@
               <span v-if="!sidebarCollapsed" class="nav-label">知识库</span>
             </transition>
           </router-link>
+
+          <router-link to="/workflow" class="nav-item" :class="{ active: $route.name === 'Workflow' }">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M4 4a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm8 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V4zM4 12a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm8 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" opacity="0.6" />
+              <path d="M7 5h0v0zM15 5h0v0zM7 13h0v0zM15 13h0v0z" />
+            </svg>
+            <transition name="fade">
+              <span v-if="!sidebarCollapsed" class="nav-label">工作流</span>
+            </transition>
+          </router-link>
+
+          <router-link to="/approval" class="nav-item" :class="{ active: $route.name === 'Approval' }">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M10 2a8 8 0 100 16 8 8 0 000-16zm3.707 5.293a1 1 0 00-1.414-1.414L9 9.586 7.707 8.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" />
+            </svg>
+            <transition name="fade">
+              <span v-if="!sidebarCollapsed" class="nav-label">审批管理</span>
+            </transition>
+          </router-link>
+
+          <router-link to="/scheduler" class="nav-item" :class="{ active: $route.name === 'Scheduler' }">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M10 2a8 8 0 100 16 8 8 0 000-16zm1 4a1 1 0 10-2 0v4a1 1 0 00.553.894l3 1.5a1 1 0 10.894-1.788L11 9.38V6z" />
+            </svg>
+            <transition name="fade">
+              <span v-if="!sidebarCollapsed" class="nav-label">定时任务</span>
+            </transition>
+          </router-link>
+        </div>
+
+        <div class="nav-section">
+          <span v-if="!sidebarCollapsed" class="nav-section-title">工具</span>
+          <router-link to="/plugins" class="nav-item" :class="{ active: $route.name === 'Plugins' }">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M11.983 1.907a.75.75 0 00-1.292-.657l-8.5 9.5A.75.75 0 003 12.25h5.354L7.017 18.093a.75.75 0 001.292.657l8.5-9.5A.75.75 0 0016.5 7.75h-5.354l1.837-5.843z" />
+            </svg>
+            <transition name="fade">
+              <span v-if="!sidebarCollapsed" class="nav-label">插件管理</span>
+            </transition>
+          </router-link>
+
+          <router-link to="/agent-builder" class="nav-item" :class="{ active: $route.name === 'AgentBuilder' }">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M10 2a1 1 0 011 1v1.322A7.007 7.007 0 0116.678 10H18a1 1 0 110 2h-1.322A7.007 7.007 0 0111 16.678V18a1 1 0 11-2 0v-1.322A7.007 7.007 0 014.322 12H3a1 1 0 110-2h1.322A7.007 7.007 0 019 4.322V3a1 1 0 011-1zm0 5a3 3 0 100 6 3 3 0 000-6z" />
+            </svg>
+            <transition name="fade">
+              <span v-if="!sidebarCollapsed" class="nav-label">Agent构建</span>
+            </transition>
+          </router-link>
+
+          <router-link to="/prompt-templates" class="nav-item" :class="{ active: $route.name === 'PromptTemplates' }">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm4 3a1 1 0 000 2h4a1 1 0 100-2H8zm0 4a1 1 0 100 2h4a1 1 0 100-2H8z" />
+            </svg>
+            <transition name="fade">
+              <span v-if="!sidebarCollapsed" class="nav-label">Prompt模板</span>
+            </transition>
+          </router-link>
         </div>
 
         <div v-if="authStore.isAdmin" class="nav-section">
@@ -153,6 +211,12 @@ const pageTitles: Record<string, string> = {
   Chat: '智能对话',
   Knowledge: '知识库管理',
   KbDocs: '知识库文档',
+  Workflow: '工作流管理',
+  Approval: '审批管理',
+  Scheduler: '定时任务',
+  Plugins: '插件管理',
+  AgentBuilder: 'Agent构建器',
+  PromptTemplates: 'Prompt模板库',
   Dashboard: '运营仪表盘',
   Health: '健康检查',
   Canary: '灰度发布',

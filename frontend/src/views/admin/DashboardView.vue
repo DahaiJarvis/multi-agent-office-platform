@@ -2,13 +2,24 @@
   <div class="dashboard-page">
     <div class="page-header">
       <h2>运营仪表盘</h2>
-      <button class="btn-refresh" @click="loadData">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-          <path fill-rule="evenodd" d="M8 3a5 5 0 110 10A5 5 0 018 3zm0 1.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7z" opacity="0.4" />
-          <path d="M8 1a7 7 0 016.95 6.25h-1.5A5.5 5.5 0 008 2.5a5.5 5.5 0 00-5.45 4.75h-1.5A7 7 0 018 1z" />
-        </svg>
-        刷新
-      </button>
+      <div class="header-actions">
+        <button class="btn-refresh" @click="loadData">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path fill-rule="evenodd" d="M8 3a5 5 0 110 10A5 5 0 018 3zm0 1.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7z" opacity="0.4" />
+            <path d="M8 1a7 7 0 016.95 6.25h-1.5A5.5 5.5 0 008 2.5a5.5 5.5 0 00-5.45 4.75h-1.5A7 7 0 018 1z" />
+          </svg>
+          刷新
+        </button>
+      </div>
+    </div>
+
+    <div class="guide-banner" v-if="!guideDismissed">
+      <div class="guide-banner-content">
+        <span class="guide-icon">?</span>
+        <span>运营仪表盘展示平台整体运行状态，包括会话统计、Token 消耗、Agent 调用分布和服务健康情况。</span>
+        <button class="guide-link" @click="showGuideDialog = true">查看详细指南</button>
+        <button class="guide-close" @click="guideDismissed = true">&times;</button>
+      </div>
     </div>
 
     <div class="stats-grid">
@@ -64,6 +75,7 @@
     <div class="dashboard-grid">
       <div class="dashboard-card">
         <h3>Agent 调用分布</h3>
+        <div class="inline-hint">各 Agent 被调用的次数统计，帮助了解使用热点</div>
         <div v-if="agentData.length === 0" class="empty-hint">暂无数据</div>
         <div v-else class="agent-bars">
           <div v-for="agent in agentData" :key="agent.name" class="agent-bar-row">
@@ -78,6 +90,7 @@
 
       <div class="dashboard-card">
         <h3>MCP 服务状态</h3>
+        <div class="inline-hint">MCP 工具服务的实时健康状态和响应延迟</div>
         <div v-if="mcpLoading" class="empty-hint"><div class="spinner-sm" /></div>
         <div v-else-if="mcpServices.length === 0" class="empty-hint">暂无数据</div>
         <div v-else class="service-list">
@@ -91,6 +104,7 @@
 
       <div class="dashboard-card">
         <h3>故障转移状态</h3>
+        <div class="inline-hint">多可用区部署的故障切换状态，异常时自动切换到备用 AZ</div>
         <div v-if="failoverLoading" class="empty-hint"><div class="spinner-sm" /></div>
         <div v-else class="failover-info">
           <div class="failover-row">
@@ -112,6 +126,7 @@
 
       <div class="dashboard-card">
         <h3>反馈统计</h3>
+        <div class="inline-hint">用户对 Agent 回答的点赞/点踩统计，反映回答质量</div>
         <div v-if="feedbackLoading" class="empty-hint"><div class="spinner-sm" /></div>
         <div v-else class="feedback-stats">
           <div class="fb-row">
@@ -135,11 +150,46 @@
         </div>
       </div>
     </div>
+
+    <el-dialog v-model="showGuideDialog" title="运营仪表盘使用指南" width="640px">
+      <div class="guide-content">
+        <div class="guide-section">
+          <h4>仪表盘概览</h4>
+          <p>运营仪表盘是平台运行状态的全局视图，帮助管理员实时监控会话量、Token 消耗、服务健康等关键指标，及时发现和定位问题。</p>
+        </div>
+        <div class="guide-section">
+          <h4>指标说明</h4>
+          <div class="config-list">
+            <div class="config-item"><code>总会话数</code> - 平台累计创建的对话会话总数</div>
+            <div class="config-item"><code>活跃会话</code> - 当前正在进行中的会话数量</div>
+            <div class="config-item"><code>Token 消耗</code> - 累计消耗的 Token 数量（K=千, M=百万）</div>
+            <div class="config-item"><code>满意度</code> - 基于用户反馈计算的满意度百分比</div>
+          </div>
+        </div>
+        <div class="guide-section">
+          <h4>功能卡片</h4>
+          <div class="config-list">
+            <div class="config-item"><code>Agent 调用分布</code> - 展示各 Agent 被调用的频率，识别高频和低频 Agent</div>
+            <div class="config-item"><code>MCP 服务状态</code> - 监控工具服务的健康状态和响应延迟，绿点=正常，红点=异常</div>
+            <div class="config-item"><code>故障转移状态</code> - 多可用区部署的切换状态，异常时自动切换到备用可用区</div>
+            <div class="config-item"><code>反馈统计</code> - 用户的点赞/点踩汇总，评估 Agent 回答质量</div>
+          </div>
+        </div>
+        <div class="guide-section">
+          <h4>使用建议</h4>
+          <p>定期查看仪表盘，关注 Token 消耗趋势和满意度变化。当 MCP 服务出现红点或故障转移状态异常时，需及时排查原因。</p>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="showGuideDialog = false">知道了</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { adminApi } from '../../api/admin'
 import { agentApi } from '../../api/agent'
 
@@ -151,6 +201,8 @@ const failover = reactive<any>({})
 const failoverLoading = ref(false)
 const feedbackStats = reactive<any>({})
 const feedbackLoading = ref(false)
+const guideDismissed = ref(false)
+const showGuideDialog = ref(false)
 
 function formatTokens(n: number): string {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
@@ -160,7 +212,7 @@ function formatTokens(n: number): string {
 
 async function loadData() {
   try {
-    const { data } = await adminApi.metricsSummary()
+    const data = await adminApi.metricsSummary()
     Object.assign(metrics, data)
     if (data.agent_distribution) {
       const maxCount = Math.max(...data.agent_distribution.map((a: any) => a.count), 1)
@@ -169,27 +221,35 @@ async function loadData() {
         percentage: (a.count / maxCount) * 100,
       }))
     }
-  } catch { /* ignore */ }
+  } catch {
+    ElMessage.error('加载 Agent 统计失败')
+  }
 
   mcpLoading.value = true
   try {
-    const { data } = await adminApi.mcpStatus()
+    const data = await adminApi.mcpStatus()
     mcpServices.value = data.services || data || []
-  } catch { /* ignore */ }
+  } catch {
+    ElMessage.error('加载 MCP 服务状态失败')
+  }
   finally { mcpLoading.value = false }
 
   failoverLoading.value = true
   try {
-    const { data } = await adminApi.failoverStatus()
+    const data = await adminApi.failoverStatus()
     Object.assign(failover, data)
-  } catch { /* ignore */ }
+  } catch {
+    ElMessage.error('加载故障转移状态失败')
+  }
   finally { failoverLoading.value = false }
 
   feedbackLoading.value = true
   try {
-    const { data } = await agentApi.getFeedbackStats()
+    const data = await agentApi.getFeedbackStats()
     Object.assign(feedbackStats, data)
-  } catch { /* ignore */ }
+  } catch {
+    ElMessage.error('加载反馈统计失败')
+  }
   finally { feedbackLoading.value = false }
 }
 
@@ -484,4 +544,23 @@ onMounted(loadData)
     grid-template-columns: 1fr;
   }
 }
+.header-actions { display: flex; gap: 10px; }
+.btn-outline { padding: 7px 14px; border-radius: var(--radius-md); border: 1px solid var(--color-primary); color: var(--color-primary); font-weight: 600; font-size: 13px; transition: all var(--transition-fast); }
+.btn-outline:hover { background: rgba(99,102,241,0.06); }
+.guide-banner { background: rgba(99,102,241,0.06); border: 1px solid rgba(99,102,241,0.15); border-radius: var(--radius-lg); padding: 12px 16px; margin-bottom: 16px; }
+.guide-banner-content { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--color-text-secondary); line-height: 1.5; }
+.guide-icon { width: 22px; height: 22px; border-radius: 50%; background: var(--color-primary); color: white; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+.guide-link { color: var(--color-primary); font-weight: 500; cursor: pointer; white-space: nowrap; }
+.guide-link:hover { text-decoration: underline; }
+.guide-close { margin-left: auto; color: var(--color-text-tertiary); font-size: 18px; cursor: pointer; padding: 0 4px; line-height: 1; }
+.guide-close:hover { color: var(--color-text); }
+.inline-hint { font-size: 12px; color: var(--color-text-tertiary); margin-bottom: 12px; line-height: 1.5; }
+.guide-content { max-height: 60vh; overflow-y: auto; }
+.guide-section { margin-bottom: 20px; }
+.guide-section h4 { font-size: 15px; font-weight: 600; color: var(--color-text); margin: 0 0 8px; }
+.guide-section p { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 8px; }
+.guide-section code { background: rgba(99,102,241,0.08); color: var(--color-primary); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.config-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.config-item { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; }
+.config-item code { background: rgba(99,102,241,0.08); color: var(--color-primary); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
 </style>

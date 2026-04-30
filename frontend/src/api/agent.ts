@@ -25,6 +25,14 @@ export interface FeedbackParams {
   intent?: string
 }
 
+export interface FeedbackStats {
+  total_feedback: number
+  thumbs_up: number
+  thumbs_down: number
+  satisfaction_rate: number
+  by_agent?: Record<string, { thumbs_up: number; thumbs_down: number }>
+}
+
 export const agentApi = {
   chat(params: ChatParams) {
     return http.post<ChatResult>('/agent/chat', params)
@@ -120,10 +128,10 @@ export const agentApi = {
   },
 
   getFeedbackStats(date?: string) {
-    return http.get('/agent/feedback/stats', { params: { date } })
+    return http.get<FeedbackStats>('/agent/feedback/stats', { params: { date } })
   },
 
   getAgentFeedbackStats(agentName: string, date?: string) {
-    return http.get(`/agent/feedback/stats/${agentName}`, { params: { date } })
+    return http.get<FeedbackStats>(`/agent/feedback/stats/${agentName}`, { params: { date } })
   },
 }

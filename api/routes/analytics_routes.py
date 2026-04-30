@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analytics", tags=["数据分析"])
 
 
-@router.post("/query", response_model=AnalysisReport)
+@router.post("/query", response_model=AnalysisReport, summary="执行数据分析查询")
 async def api_nl_query(request: NLQueryRequest) -> AnalysisReport:
     """自然语言数据查询
 
@@ -25,14 +25,14 @@ async def api_nl_query(request: NLQueryRequest) -> AnalysisReport:
     return await analyze_data(request)
 
 
-@router.post("/intent")
+@router.post("/intent", summary="识别查询意图")
 async def api_detect_intent(query: str) -> dict:
     """检测查询意图"""
     intent = detect_query_intent(query)
     return {"query": query, "intent": intent.value}
 
 
-@router.get("/chart-types")
+@router.get("/chart-types", summary="获取支持的图表类型")
 async def list_chart_types() -> dict:
     """列出支持的图表类型"""
     return {

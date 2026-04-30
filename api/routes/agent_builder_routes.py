@@ -143,13 +143,13 @@ def _to_response(config: CustomAgentConfig) -> AgentResponse:
     )
 
 
-@router.post("/agents", response_model=AgentResponse)
+@router.post("/agents", response_model=AgentResponse, summary="创建Agent")
 async def api_create_agent(request: Request, body: CreateAgentRequest) -> AgentResponse:
     """创建自定义 Agent"""
     require_roles(request, ["admin", "hr_specialist"])
 
     auth_payload = getattr(request.state, "auth_payload", None)
-    created_by = auth_payload.user_id if auth_payload else "unknown"
+    created_by = getattr(auth_payload, "user_id", None) or getattr(request.state, "user_id", "unknown")
 
     config = CustomAgentConfig(
         name=body.name,
@@ -170,7 +170,7 @@ async def api_create_agent(request: Request, body: CreateAgentRequest) -> AgentR
     return _to_response(result)
 
 
-@router.get("/agents", response_model=list[AgentResponse])
+@router.get("/agents", response_model=list[AgentResponse], summary="列出Agent")
 async def api_list_agents(
     request: Request,
     created_by: str = "",
@@ -184,7 +184,7 @@ async def api_list_agents(
     return [_to_response(a) for a in agents]
 
 
-@router.get("/agents/{agent_id}", response_model=AgentResponse)
+@router.get("/agents/{agent_id}", response_model=AgentResponse, summary="获取Agent详情")
 async def api_get_agent(request: Request, agent_id: str) -> AgentResponse:
     """获取自定义 Agent 详情"""
     require_roles(request, ["admin", "hr_specialist"])
@@ -195,13 +195,13 @@ async def api_get_agent(request: Request, agent_id: str) -> AgentResponse:
     return _to_response(agent)
 
 
-@router.patch("/agents/{agent_id}", response_model=AgentResponse)
+@router.patch("/agents/{agent_id}", response_model=AgentResponse, summary="更新Agent")
 async def api_update_agent(request: Request, agent_id: str, body: UpdateAgentRequest) -> AgentResponse:
     """更新自定义 Agent 配置"""
     require_roles(request, ["admin", "hr_specialist"])
 
     auth_payload = getattr(request.state, "auth_payload", None)
-    updated_by = auth_payload.user_id if auth_payload else "unknown"
+    updated_by = getattr(auth_payload, "user_id", None) or getattr(request.state, "user_id", "unknown")
 
     updates = body.model_dump(exclude_none=True)
     result = update_custom_agent(agent_id, updates, updated_by)
@@ -210,13 +210,13 @@ async def api_update_agent(request: Request, agent_id: str, body: UpdateAgentReq
     return _to_response(result)
 
 
-@router.post("/agents/{agent_id}/publish", response_model=AgentResponse)
+@router.post("/agents/{agent_id}/publish", response_model=AgentResponse, summary="发布Agent")
 async def api_publish_agent(request: Request, agent_id: str) -> AgentResponse:
     """发布自定义 Agent"""
     require_roles(request, ["admin"])
 
     auth_payload = getattr(request.state, "auth_payload", None)
-    published_by = auth_payload.user_id if auth_payload else "unknown"
+    published_by = getattr(auth_payload, "user_id", None) or getattr(request.state, "user_id", "unknown")
 
     result = publish_custom_agent(agent_id, published_by)
     if not result:
@@ -224,7 +224,7 @@ async def api_publish_agent(request: Request, agent_id: str) -> AgentResponse:
     return _to_response(result)
 
 
-@router.post("/agents/{agent_id}/disable", response_model=AgentResponse)
+@router.post("/agents/{agent_id}/disable", response_model=AgentResponse, summary="禁用Agent")
 async def api_disable_agent(request: Request, agent_id: str) -> AgentResponse:
     """禁用自定义 Agent"""
     require_roles(request, ["admin"])
@@ -235,7 +235,7 @@ async def api_disable_agent(request: Request, agent_id: str) -> AgentResponse:
     return _to_response(result)
 
 
-@router.delete("/agents/{agent_id}")
+@router.delete("/agents/{agent_id}", summary="删除Agent")
 async def api_delete_agent(request: Request, agent_id: str) -> dict:
     """删除自定义 Agent"""
     require_roles(request, ["admin"])
@@ -246,7 +246,7 @@ async def api_delete_agent(request: Request, agent_id: str) -> dict:
     return {"message": "Agent 已删除"}
 
 
-@router.get("/agents/{agent_id}/versions", response_model=list[VersionResponse])
+@router.get("/agents/{agent_id}/versions", response_model=list[VersionResponse], summary="获取Agent版本列表")
 async def api_list_versions(request: Request, agent_id: str) -> list[VersionResponse]:
     """获取 Agent 版本历史"""
     require_roles(request, ["admin", "hr_specialist"])
@@ -264,13 +264,13 @@ async def api_list_versions(request: Request, agent_id: str) -> list[VersionResp
     ]
 
 
-@router.post("/agents/{agent_id}/rollback", response_model=AgentResponse)
+@router.post("/agents/{agent_id}/rollback", response_model=AgentResponse, summary="回滚Agent版本")
 async def api_rollback_agent(request: Request, agent_id: str, version: int) -> AgentResponse:
     """回滚 Agent 到指定版本"""
     require_roles(request, ["admin"])
 
     auth_payload = getattr(request.state, "auth_payload", None)
-    rolled_back_by = auth_payload.user_id if auth_payload else "unknown"
+    rolled_back_by = getattr(auth_payload, "user_id", None) or getattr(request.state, "user_id", "unknown")
 
     result = rollback_agent_version(agent_id, version, rolled_back_by)
     if not result:
@@ -278,7 +278,7 @@ async def api_rollback_agent(request: Request, agent_id: str, version: int) -> A
     return _to_response(result)
 
 
-@router.get("/templates", response_model=list[TemplateResponse])
+@router.get("/templates", response_model=list[TemplateResponse], summary="列出Agent模板")
 async def api_list_templates(request: Request, category: str = "") -> list[TemplateResponse]:
     """列出 Agent 模板"""
     templates = list_templates(category=category)
@@ -296,13 +296,13 @@ async def api_list_templates(request: Request, category: str = "") -> list[Templ
     ]
 
 
-@router.post("/templates/{template_id}/instantiate", response_model=AgentResponse)
+@router.post("/templates/{template_id}/instantiate", response_model=AgentResponse, summary="从模板创建Agent")
 async def api_create_from_template(request: Request, template_id: str, body: CreateFromTemplateRequest) -> AgentResponse:
     """从模板创建自定义 Agent"""
     require_roles(request, ["admin", "hr_specialist"])
 
     auth_payload = getattr(request.state, "auth_payload", None)
-    created_by = auth_payload.user_id if auth_payload else "unknown"
+    created_by = getattr(auth_payload, "user_id", None) or getattr(request.state, "user_id", "unknown")
 
     result = create_from_template(template_id, body.name, created_by, body.overrides)
     if not result:

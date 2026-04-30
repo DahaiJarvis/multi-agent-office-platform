@@ -8,6 +8,8 @@ export interface SessionInfo {
   updated_at: string
   message_count: number
   active_agents: string[]
+  first_message?: string
+  title?: string
 }
 
 export interface CreateSessionParams {

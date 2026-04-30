@@ -2,13 +2,24 @@
   <div class="health-page">
     <div class="page-header">
       <h2>健康检查</h2>
-      <button class="btn-refresh" @click="loadHealth">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-          <path fill-rule="evenodd" d="M8 3a5 5 0 110 10A5 5 0 018 3zm0 1.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7z" opacity="0.4" />
-          <path d="M8 1a7 7 0 016.95 6.25h-1.5A5.5 5.5 0 008 2.5a5.5 5.5 0 00-5.45 4.75h-1.5A7 7 0 018 1z" />
-        </svg>
-        刷新
-      </button>
+      <div class="header-actions">
+        <button class="btn-refresh" @click="loadHealth">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+            <path fill-rule="evenodd" d="M8 3a5 5 0 110 10A5 5 0 018 3zm0 1.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7z" opacity="0.4" />
+            <path d="M8 1a7 7 0 016.95 6.25h-1.5A5.5 5.5 0 008 2.5a5.5 5.5 0 00-5.45 4.75h-1.5A7 7 0 018 1z" />
+          </svg>
+          刷新
+        </button>
+      </div>
+    </div>
+
+    <div class="guide-banner" v-if="!guideDismissed">
+      <div class="guide-banner-content">
+        <span class="guide-icon">?</span>
+        <span>健康检查页面展示系统各组件的实时运行状态，帮助快速发现和定位服务异常。</span>
+        <button class="guide-link" @click="showGuideDialog = true">查看详细指南</button>
+        <button class="guide-close" @click="guideDismissed = true">&times;</button>
+      </div>
     </div>
 
     <div v-if="loading" class="loading-state">
@@ -37,6 +48,14 @@
         </div>
       </div>
 
+      <div class="status-legend">
+        <span class="legend-item"><span class="legend-dot healthy"></span>正常 - 服务运行良好</span>
+        <span class="legend-item"><span class="legend-dot degraded"></span>降级 - 部分功能受限</span>
+        <span class="legend-item"><span class="legend-dot unhealthy"></span>异常 - 服务不可用</span>
+      </div>
+
+      <div class="section-hint">以下为各子系统组件的健康检查详情，左侧色条标识状态：绿色=正常，红色=异常</div>
+
       <div class="components-grid">
         <div v-for="comp in components" :key="comp.name" class="comp-card" :class="comp.status">
           <div class="comp-header">
@@ -60,6 +79,38 @@
         </div>
       </div>
     </template>
+
+    <el-dialog v-model="showGuideDialog" title="健康检查使用指南" width="640px">
+      <div class="guide-content">
+        <div class="guide-section">
+          <h4>什么是健康检查？</h4>
+          <p>健康检查页面实时监控平台各组件的运行状态，包括数据库、缓存、消息队列、LLM 服务等。当某个组件出现异常时，系统会自动标记并触发告警。</p>
+        </div>
+        <div class="guide-section">
+          <h4>状态等级</h4>
+          <div class="config-list">
+            <div class="config-item"><code>正常</code> - 所有组件运行良好，无异常</div>
+            <div class="config-item"><code>降级</code> - 部分非核心组件异常，核心功能仍可用但可能受限</div>
+            <div class="config-item"><code>异常</code> - 核心组件不可用，需要立即处理</div>
+          </div>
+        </div>
+        <div class="guide-section">
+          <h4>组件指标</h4>
+          <div class="config-list">
+            <div class="config-item"><code>状态</code> - 组件当前的健康状态（正常/异常）</div>
+            <div class="config-item"><code>延迟</code> - 组件的响应延迟，单位毫秒(ms)</div>
+            <div class="config-item"><code>错误</code> - 异常时的错误信息，帮助定位问题</div>
+          </div>
+        </div>
+        <div class="guide-section">
+          <h4>排查建议</h4>
+          <p>当发现组件异常时，可查看错误信息初步定位原因。常见问题包括：数据库连接超时、LLM 服务配额耗尽、缓存服务不可达等。建议结合审计日志进一步排查。</p>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="primary" @click="showGuideDialog = false">知道了</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -70,6 +121,8 @@ import { adminApi } from '../../api/admin'
 const loading = ref(false)
 const healthDetail = ref<any>({})
 const components = ref<any[]>([])
+const guideDismissed = ref(false)
+const showGuideDialog = ref(false)
 
 const overallStatus = computed(() => {
   const level = healthDetail.value.degradation_level
@@ -88,7 +141,7 @@ const statusLabel = computed(() => {
 async function loadHealth() {
   loading.value = true
   try {
-    const { data } = await adminApi.healthDetail()
+    const data = await adminApi.healthDetail()
     healthDetail.value = data
     const comps: any[] = []
     if (data.checks) {
@@ -307,4 +360,29 @@ onMounted(loadHealth)
     grid-template-columns: 1fr;
   }
 }
+.header-actions { display: flex; gap: 10px; }
+.btn-outline { padding: 7px 14px; border-radius: var(--radius-md); border: 1px solid var(--color-primary); color: var(--color-primary); font-weight: 600; font-size: 13px; transition: all var(--transition-fast); }
+.btn-outline:hover { background: rgba(99,102,241,0.06); }
+.guide-banner { background: rgba(99,102,241,0.06); border: 1px solid rgba(99,102,241,0.15); border-radius: var(--radius-lg); padding: 12px 16px; margin-bottom: 16px; }
+.guide-banner-content { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--color-text-secondary); line-height: 1.5; }
+.guide-icon { width: 22px; height: 22px; border-radius: 50%; background: var(--color-primary); color: white; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; }
+.guide-link { color: var(--color-primary); font-weight: 500; cursor: pointer; white-space: nowrap; }
+.guide-link:hover { text-decoration: underline; }
+.guide-close { margin-left: auto; color: var(--color-text-tertiary); font-size: 18px; cursor: pointer; padding: 0 4px; line-height: 1; }
+.guide-close:hover { color: var(--color-text); }
+.status-legend { display: flex; gap: 20px; margin-bottom: 16px; padding: 10px 16px; background: var(--color-bg-elevated); border-radius: var(--radius-md); border: 1px solid var(--color-border-light); }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-text-secondary); }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.legend-dot.healthy { background: var(--color-success); }
+.legend-dot.degraded { background: var(--color-warning); }
+.legend-dot.unhealthy { background: var(--color-danger); }
+.section-hint { font-size: 12px; color: var(--color-text-tertiary); margin-bottom: 12px; }
+.guide-content { max-height: 60vh; overflow-y: auto; }
+.guide-section { margin-bottom: 20px; }
+.guide-section h4 { font-size: 15px; font-weight: 600; color: var(--color-text); margin: 0 0 8px; }
+.guide-section p { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 8px; }
+.guide-section code { background: rgba(99,102,241,0.08); color: var(--color-primary); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.config-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.config-item { font-size: 13px; color: var(--color-text-secondary); line-height: 1.6; }
+.config-item code { background: rgba(99,102,241,0.08); color: var(--color-primary); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
 </style>

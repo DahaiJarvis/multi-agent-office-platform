@@ -86,7 +86,7 @@ def _to_task_response(task: ScheduledTask) -> TaskResponse:
     )
 
 
-@router.post("/tasks", response_model=TaskResponse)
+@router.post("/tasks", response_model=TaskResponse, summary="创建定时任务")
 async def create_task(request: TaskCreateRequest) -> TaskResponse:
     """创建定时任务
 
@@ -108,7 +108,7 @@ async def create_task(request: TaskCreateRequest) -> TaskResponse:
     return _to_task_response(task)
 
 
-@router.get("/tasks", response_model=TaskListResponse)
+@router.get("/tasks", response_model=TaskListResponse, summary="列出定时任务")
 async def list_tasks(tenant_id: str = "") -> TaskListResponse:
     """查询定时任务列表"""
     mgr = get_scheduled_task_manager()
@@ -119,7 +119,7 @@ async def list_tasks(tenant_id: str = "") -> TaskListResponse:
     )
 
 
-@router.get("/tasks/{task_id}", response_model=TaskResponse)
+@router.get("/tasks/{task_id}", response_model=TaskResponse, summary="获取定时任务详情")
 async def get_task(task_id: str) -> TaskResponse:
     """获取定时任务详情"""
     mgr = get_scheduled_task_manager()
@@ -130,7 +130,7 @@ async def get_task(task_id: str) -> TaskResponse:
     return _to_task_response(task)
 
 
-@router.put("/tasks/{task_id}", response_model=TaskResponse)
+@router.put("/tasks/{task_id}", response_model=TaskResponse, summary="更新定时任务")
 async def update_task(task_id: str, request: TaskUpdateRequest) -> TaskResponse:
     """更新定时任务"""
     updates: dict[str, Any] = {}
@@ -153,7 +153,7 @@ async def update_task(task_id: str, request: TaskUpdateRequest) -> TaskResponse:
     return _to_task_response(task)
 
 
-@router.delete("/tasks/{task_id}")
+@router.delete("/tasks/{task_id}", summary="删除定时任务")
 async def delete_task(task_id: str) -> dict[str, Any]:
     """删除定时任务"""
     mgr = get_scheduled_task_manager()
@@ -164,7 +164,7 @@ async def delete_task(task_id: str) -> dict[str, Any]:
     return {"status": "deleted", "task_id": task_id}
 
 
-@router.post("/tasks/{task_id}/toggle", response_model=TaskResponse)
+@router.post("/tasks/{task_id}/toggle", response_model=TaskResponse, summary="切换定时任务启停")
 async def toggle_task(task_id: str) -> TaskResponse:
     """启用/禁用定时任务"""
     mgr = get_scheduled_task_manager()

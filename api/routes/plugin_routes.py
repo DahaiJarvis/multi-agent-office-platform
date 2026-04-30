@@ -56,7 +56,7 @@ class ExecuteHooksRequest(BaseModel):
     data: dict = Field(default_factory=dict)
 
 
-@router.get("", response_model=list[PluginManifest])
+@router.get("", response_model=list[PluginManifest], summary="列出插件")
 async def api_list_plugins(
     status: PluginStatus | None = None,
     hook_point: HookPoint | None = None,
@@ -65,7 +65,7 @@ async def api_list_plugins(
     return list_plugins(status=status, hook_point=hook_point)
 
 
-@router.get("/marketplace")
+@router.get("/marketplace", summary="搜索插件市场")
 async def api_search_marketplace(keyword: str = "", category: str = "") -> list[dict]:
     """搜索插件市场"""
     entries = search_marketplace(keyword, category)
@@ -86,7 +86,7 @@ async def api_search_marketplace(keyword: str = "", category: str = "") -> list[
     ]
 
 
-@router.get("/hooks")
+@router.get("/hooks", summary="列出Hook点")
 async def api_list_hooks() -> dict:
     """列出 Hook 点"""
     return {
@@ -105,7 +105,7 @@ async def api_list_hooks() -> dict:
     }
 
 
-@router.get("/{plugin_id}", response_model=PluginManifest)
+@router.get("/{plugin_id}", response_model=PluginManifest, summary="获取插件详情")
 async def api_get_plugin(plugin_id: str) -> PluginManifest:
     """获取插件详情"""
     manifest = get_plugin(plugin_id)
@@ -115,7 +115,7 @@ async def api_get_plugin(plugin_id: str) -> PluginManifest:
     return manifest
 
 
-@router.get("/{plugin_id}/instance", response_model=PluginInstance)
+@router.get("/{plugin_id}/instance", response_model=PluginInstance, summary="获取插件实例状态")
 async def api_get_plugin_instance(plugin_id: str) -> PluginInstance:
     """获取插件实例状态"""
     instance = get_plugin_instance(plugin_id)
@@ -125,14 +125,14 @@ async def api_get_plugin_instance(plugin_id: str) -> PluginInstance:
     return instance
 
 
-@router.post("", response_model=PluginManifest)
+@router.post("", response_model=PluginManifest, summary="注册插件")
 async def api_register_plugin(request: RegisterPluginRequest) -> PluginManifest:
     """注册插件"""
     manifest = PluginManifest(**request.model_dump())
     return register_plugin(manifest)
 
 
-@router.post("/{plugin_id}/enable", response_model=PluginInstance)
+@router.post("/{plugin_id}/enable", response_model=PluginInstance, summary="启用插件")
 async def api_enable_plugin(plugin_id: str, request: EnablePluginRequest) -> PluginInstance:
     """启用插件"""
     instance = enable_plugin(plugin_id, request.config)
@@ -142,7 +142,7 @@ async def api_enable_plugin(plugin_id: str, request: EnablePluginRequest) -> Plu
     return instance
 
 
-@router.post("/{plugin_id}/disable", response_model=PluginInstance)
+@router.post("/{plugin_id}/disable", response_model=PluginInstance, summary="禁用插件")
 async def api_disable_plugin(plugin_id: str) -> PluginInstance:
     """禁用插件"""
     instance = disable_plugin(plugin_id)
@@ -152,7 +152,7 @@ async def api_disable_plugin(plugin_id: str) -> PluginInstance:
     return instance
 
 
-@router.delete("/{plugin_id}")
+@router.delete("/{plugin_id}", summary="注销插件")
 async def api_unregister_plugin(plugin_id: str) -> dict:
     """注销插件"""
     success = unregister_plugin(plugin_id)
@@ -162,7 +162,7 @@ async def api_unregister_plugin(plugin_id: str) -> dict:
     return {"status": "ok"}
 
 
-@router.post("/{plugin_id}/install", response_model=PluginManifest)
+@router.post("/{plugin_id}/install", response_model=PluginManifest, summary="从市场安装插件")
 async def api_install_plugin(plugin_id: str) -> PluginManifest:
     """从市场安装插件"""
     manifest = install_from_marketplace(plugin_id)
@@ -172,7 +172,7 @@ async def api_install_plugin(plugin_id: str) -> PluginManifest:
     return manifest
 
 
-@router.post("/hooks/execute")
+@router.post("/hooks/execute", summary="执行Hook")
 async def api_execute_hooks(request: ExecuteHooksRequest) -> list[dict]:
     """执行 Hook"""
     context = HookContext(

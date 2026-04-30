@@ -11,6 +11,7 @@ from agent.core.config import get_settings
 from agent.core.session_manager import get_session_manager
 from agent.core.mcp_integration import close_all_connections
 from api.middleware.auth import AuthMiddleware
+from api.middleware.csrf import CSRFMiddleware
 from api.middleware.rate_limit import DistributedRateLimitMiddleware
 from api.middleware.tracing import TracingMiddleware
 from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes, jwks_routes, approval_routes, debug_routes, scheduler_routes
@@ -281,6 +282,7 @@ def create_app() -> FastAPI:
     # 自定义中间件（按执行顺序添加，后添加的先执行）
     app.add_middleware(TracingMiddleware)
     app.add_middleware(DistributedRateLimitMiddleware)
+    app.add_middleware(CSRFMiddleware)
     app.add_middleware(AuthMiddleware)
 
     # 注册全局异常处理器

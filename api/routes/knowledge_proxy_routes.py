@@ -226,7 +226,13 @@ def _build_mapped_token(user_id: str, user_roles: list[str]) -> str:
 
     # 开发模式降级：使用 HS256 对称签名
     if settings.environment == "development":
-        shared_secret = settings.mcp_api_key or "dev-shared-secret-key"
+        shared_secret = settings.mcp_api_key
+        if not shared_secret:
+            logger.error("开发模式缺少 MCP_API_KEY 配置，无法签发映射 Token")
+            raise AppException(
+                ErrorCode.INTERNAL_ERROR,
+                message="开发模式缺少 MCP_API_KEY 配置，请在环境变量中设置",
+            )
         logger.info("开发模式：使用 HS256 对称签名签发映射 Token")
         return jwt.encode(payload, shared_secret, algorithm="HS256")
 
@@ -447,7 +453,7 @@ def _build_sse_error_event(error_message: str, error_code: str = "IDA_SERVICE_ER
     return f"event: error\ndata: {error_data}\n\n"
 
 
-@router.get("/knowledge-bases")
+@router.get("/knowledge-bases", summary="列出知识库")
 async def proxy_list_knowledge_bases(
     request: Request,
     page: int = 1,
@@ -470,7 +476,7 @@ async def proxy_list_knowledge_bases(
     )
 
 
-@router.post("/knowledge-bases")
+@router.post("/knowledge-bases", summary="创建知识库")
 async def proxy_create_knowledge_base(
     request: Request,
     body: CreateKnowledgeBaseRequest,
@@ -494,7 +500,7 @@ async def proxy_create_knowledge_base(
     )
 
 
-@router.get("/knowledge-bases/{kb_id}")
+@router.get("/knowledge-bases/{kb_id}", summary="获取知识库详情")
 async def proxy_get_knowledge_base(kb_id: str, request: Request):
     """代理：获取知识库详情
 
@@ -511,7 +517,7 @@ async def proxy_get_knowledge_base(kb_id: str, request: Request):
     )
 
 
-@router.put("/knowledge-bases/{kb_id}")
+@router.put("/knowledge-bases/{kb_id}", summary="更新知识库")
 async def proxy_update_knowledge_base(
     kb_id: str,
     request: Request,
@@ -537,7 +543,7 @@ async def proxy_update_knowledge_base(
     )
 
 
-@router.delete("/knowledge-bases/{kb_id}")
+@router.delete("/knowledge-bases/{kb_id}", summary="删除知识库")
 async def proxy_delete_knowledge_base(kb_id: str, request: Request):
     """代理：删除知识库
 
@@ -554,7 +560,7 @@ async def proxy_delete_knowledge_base(kb_id: str, request: Request):
     )
 
 
-@router.get("/knowledge-bases/{kb_id}/documents")
+@router.get("/knowledge-bases/{kb_id}/documents", summary="列出知识库文档")
 async def proxy_list_documents(kb_id: str, request: Request, page: int = 1, per_page: int = 20):
     """代理：获取文档列表
 
@@ -574,7 +580,7 @@ async def proxy_list_documents(kb_id: str, request: Request, page: int = 1, per_
     )
 
 
-@router.post("/knowledge-bases/{kb_id}/documents")
+@router.post("/knowledge-bases/{kb_id}/documents", summary="上传知识库文档")
 async def proxy_upload_document(
     kb_id: str,
     request: Request,
@@ -618,7 +624,7 @@ async def proxy_upload_document(
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务异常，请稍后重试")
 
 
-@router.delete("/knowledge-bases/{kb_id}/documents/{doc_id}")
+@router.delete("/knowledge-bases/{kb_id}/documents/{doc_id}", summary="删除知识库文档")
 async def proxy_delete_document(kb_id: str, doc_id: str, request: Request):
     """代理：删除文档
 
@@ -636,7 +642,7 @@ async def proxy_delete_document(kb_id: str, doc_id: str, request: Request):
     )
 
 
-@router.post("/qa/ask")
+@router.post("/qa/ask", summary="知识库问答")
 async def proxy_qa_ask(
     request: Request,
     body: QAAskRequest,
@@ -661,7 +667,7 @@ async def proxy_qa_ask(
     )
 
 
-@router.post("/qa/ask/stream")
+@router.post("/qa/ask/stream", summary="知识库流式问答")
 async def proxy_qa_ask_stream(
     request: Request,
     body: QAAskRequest,
@@ -742,7 +748,7 @@ async def proxy_qa_ask_stream(
     )
 
 
-@router.post("/qa/parse-files")
+@router.post("/qa/parse-files", summary="解析文件")
 async def proxy_parse_files(request: Request):
     """代理：文件解析
 
@@ -783,7 +789,7 @@ async def proxy_parse_files(request: Request):
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务异常，请稍后重试")
 
 
-@router.post("/qa/analyze-image")
+@router.post("/qa/analyze-image", summary="分析图片")
 async def proxy_analyze_image(
     request: Request,
     image: UploadFile = File(...),

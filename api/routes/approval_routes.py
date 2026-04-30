@@ -83,8 +83,8 @@ def _to_approval_response(approval: Any) -> ApprovalResponse:
     )
 
 
-@router.post("/create", response_model=ApprovalResponse)
-async def create_approval(request: ApprovalCreateRequest) -> ApprovalResponse:
+@router.post("/create", response_model=ApprovalResponse, summary="创建审批")
+async def create_approval(body: ApprovalCreateRequest) -> ApprovalResponse:
     """创建审批单
 
     手动创建审批单，或由 Guardrails 自动调用。
@@ -103,7 +103,7 @@ async def create_approval(request: ApprovalCreateRequest) -> ApprovalResponse:
     return _to_approval_response(approval)
 
 
-@router.post("/{approval_id}/approve", response_model=ApprovalResponse)
+@router.post("/{approval_id}/approve", response_model=ApprovalResponse, summary="批准审批")
 async def approve_approval(approval_id: str, request: ApprovalActionRequest) -> ApprovalResponse:
     """审批通过
 
@@ -121,7 +121,7 @@ async def approve_approval(approval_id: str, request: ApprovalActionRequest) -> 
     return _to_approval_response(approval)
 
 
-@router.post("/{approval_id}/reject", response_model=ApprovalResponse)
+@router.post("/{approval_id}/reject", response_model=ApprovalResponse, summary="拒绝审批")
 async def reject_approval(approval_id: str, request: ApprovalActionRequest) -> ApprovalResponse:
     """审批拒绝"""
     mgr = get_approval_flow_manager()
@@ -136,7 +136,7 @@ async def reject_approval(approval_id: str, request: ApprovalActionRequest) -> A
     return _to_approval_response(approval)
 
 
-@router.get("/pending", response_model=ApprovalListResponse)
+@router.get("/pending", response_model=ApprovalListResponse, summary="查询待审批列表")
 async def list_pending_approvals(
     role: str = "",
     user_id: str = "",
@@ -158,7 +158,7 @@ async def list_pending_approvals(
     )
 
 
-@router.get("/{approval_id}", response_model=ApprovalResponse)
+@router.get("/{approval_id}", response_model=ApprovalResponse, summary="获取审批详情")
 async def get_approval(approval_id: str) -> ApprovalResponse:
     """获取审批单详情"""
     mgr = get_approval_flow_manager()
@@ -169,7 +169,7 @@ async def get_approval(approval_id: str) -> ApprovalResponse:
     return _to_approval_response(approval)
 
 
-@router.post("/{approval_id}/cancel", response_model=ApprovalResponse)
+@router.post("/{approval_id}/cancel", response_model=ApprovalResponse, summary="取消审批")
 async def cancel_approval(approval_id: str) -> ApprovalResponse:
     """取消审批单"""
     mgr = get_approval_flow_manager()
@@ -180,7 +180,7 @@ async def cancel_approval(approval_id: str) -> ApprovalResponse:
     return _to_approval_response(approval)
 
 
-@router.post("/check-expired", response_model=ApprovalListResponse)
+@router.post("/check-expired", response_model=ApprovalListResponse, summary="检查过期审批")
 async def check_expired_approvals() -> ApprovalListResponse:
     """检查并标记过期审批
 

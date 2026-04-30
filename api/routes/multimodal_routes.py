@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/multimodal", tags=["多模态"])
 
 
-@router.post("/image/analyze", response_model=ImageAnalysisResult)
+@router.post("/image/analyze", response_model=ImageAnalysisResult, summary="分析图片")
 async def api_analyze_image(
     prompt: str = Form(default="请描述这张图片的内容"),
     image_url: str = Form(default=""),
@@ -44,7 +44,7 @@ async def api_analyze_image(
         return ImageAnalysisResult(description="请提供图像 URL 或上传图像文件", confidence=0.0)
 
 
-@router.post("/audio/transcribe", response_model=ASRResult)
+@router.post("/audio/transcribe", response_model=ASRResult, summary="语音转文字")
 async def api_transcribe_audio(
     language: str = Form(default="zh"),
     audio_url: str = Form(default=""),
@@ -61,7 +61,7 @@ async def api_transcribe_audio(
         return ASRResult(text="", language=language, confidence=0.0)
 
 
-@router.post("/audio/synthesize")
+@router.post("/audio/synthesize", summary="文字转语音")
 async def api_synthesize_speech(
     text: str = Form(...),
     voice: str = Form(default="zhixiaoxia"),

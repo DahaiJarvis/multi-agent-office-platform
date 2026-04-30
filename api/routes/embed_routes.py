@@ -123,7 +123,7 @@ def verify_embed_token(token: str) -> dict[str, Any] | None:
     return token_data
 
 
-@router.post("/token", response_model=EmbedTokenResponse)
+@router.post("/token", response_model=EmbedTokenResponse, summary="生成嵌入Token")
 async def generate_embed_token(request: Request, body: EmbedTokenRequest) -> EmbedTokenResponse:
     """生成嵌入 Token
 
@@ -151,7 +151,7 @@ async def generate_embed_token(request: Request, body: EmbedTokenRequest) -> Emb
     _embed_tokens[token] = {
         **config,
         "expires_at": time.time() + EMBED_TOKEN_TTL,
-        "created_by": getattr(getattr(request.state, "auth_payload", None), "user_id", "unknown"),
+        "created_by": getattr(getattr(request.state, "auth_payload", None), "user_id", None) or getattr(request.state, "user_id", "unknown"),
     }
 
     return EmbedTokenResponse(
@@ -162,7 +162,7 @@ async def generate_embed_token(request: Request, body: EmbedTokenRequest) -> Emb
     )
 
 
-@router.get("/config", response_model=EmbedConfigResponse)
+@router.get("/config", response_model=EmbedConfigResponse, summary="获取嵌入配置")
 async def get_embed_config(token: str) -> EmbedConfigResponse:
     """获取 Widget 配置
 
@@ -186,14 +186,14 @@ async def get_embed_config(token: str) -> EmbedConfigResponse:
     )
 
 
-@router.get("/domains", response_model=list[str])
+@router.get("/domains", response_model=list[str], summary="获取嵌入域名白名单")
 async def list_allowed_domains(request: Request) -> list[str]:
     """列出允许嵌入的域名白名单"""
     require_roles(request, ["admin"])
     return list(_allowed_domains)
 
 
-@router.post("/domains", response_model=list[str])
+@router.post("/domains", response_model=list[str], summary="添加嵌入域名")
 async def add_allowed_domain(request: Request, domain: str) -> list[str]:
     """添加允许嵌入的域名"""
     require_roles(request, ["admin"])
@@ -202,7 +202,7 @@ async def add_allowed_domain(request: Request, domain: str) -> list[str]:
     return list(_allowed_domains)
 
 
-@router.delete("/domains/{domain}", response_model=list[str])
+@router.delete("/domains/{domain}", response_model=list[str], summary="删除嵌入域名")
 async def remove_allowed_domain(request: Request, domain: str) -> list[str]:
     """移除允许嵌入的域名"""
     require_roles(request, ["admin"])

@@ -25,7 +25,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function login(params: LoginParams) {
-    const { data } = await authApi.login(params)
+    const data = await authApi.login(params)
     setAuth(data)
   }
 

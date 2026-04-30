@@ -35,6 +35,8 @@ class CreateWorkflowRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
     tags: list[str] = Field(default_factory=list)
+    nodes: list[WorkflowNode] = Field(default_factory=list)
+    edges: list[WorkflowEdge] = Field(default_factory=list)
 
 
 class AddNodeRequest(BaseModel):
@@ -64,120 +66,126 @@ class ExecuteWorkflowRequest(BaseModel):
     input_data: dict = Field(default_factory=dict)
 
 
-@router.get("", response_model=list[Workflow])
+@router.get("", response_model=list[Workflow], summary="列出工作流")
 async def api_list_workflows(
     status: WorkflowStatus | None = None,
 ) -> list[Workflow]:
     """列出工作流"""
-    return list_workflows(status=status)
+    return await list_workflows(status=status)
 
 
-@router.post("", response_model=Workflow)
+@router.post("", response_model=Workflow, summary="创建工作流")
 async def api_create_workflow(request: CreateWorkflowRequest) -> Workflow:
     """创建工作流"""
-    workflow = Workflow(name=request.name, description=request.description, tags=request.tags)
-    return create_workflow(workflow)
+    workflow = Workflow(
+        name=request.name,
+        description=request.description,
+        tags=request.tags,
+        nodes=request.nodes,
+        edges=request.edges,
+    )
+    return await create_workflow(workflow)
 
 
-@router.get("/{workflow_id}")
+@router.get("/{workflow_id}", summary="获取工作流详情")
 async def api_get_workflow(workflow_id: str) -> dict:
     """获取工作流详情（含可视化数据）"""
-    viz = get_workflow_visualization(workflow_id)
+    viz = await get_workflow_visualization(workflow_id)
     if not viz:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="工作流不存在")
     return viz
 
 
-@router.put("/{workflow_id}", response_model=Workflow)
+@router.put("/{workflow_id}", response_model=Workflow, summary="更新工作流")
 async def api_update_workflow(workflow_id: str, request: CreateWorkflowRequest) -> Workflow:
     """更新工作流"""
-    result = update_workflow(workflow_id, {"name": request.name, "description": request.description, "tags": request.tags})
+    result = await update_workflow(workflow_id, {"name": request.name, "description": request.description, "tags": request.tags, "nodes": [n.model_dump() for n in request.nodes], "edges": [e.model_dump() for e in request.edges]})
     if not result:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="工作流不存在")
     return result
 
 
-@router.delete("/{workflow_id}")
+@router.delete("/{workflow_id}", summary="删除工作流")
 async def api_delete_workflow(workflow_id: str) -> dict:
     """删除工作流"""
-    success = delete_workflow(workflow_id)
+    success = await delete_workflow(workflow_id)
     if not success:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="工作流不存在")
     return {"status": "ok"}
 
 
-@router.post("/{workflow_id}/publish", response_model=Workflow)
+@router.post("/{workflow_id}/publish", response_model=Workflow, summary="发布工作流")
 async def api_publish_workflow(workflow_id: str) -> Workflow:
     """发布工作流"""
-    result = publish_workflow(workflow_id)
+    result = await publish_workflow(workflow_id)
     if not result:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="工作流不存在")
     return result
 
 
-@router.post("/{workflow_id}/nodes", response_model=Workflow)
+@router.post("/{workflow_id}/nodes", response_model=Workflow, summary="添加工作流节点")
 async def api_add_node(workflow_id: str, request: AddNodeRequest) -> Workflow:
     """添加节点"""
     node = WorkflowNode(**request.model_dump())
-    result = add_node(workflow_id, node)
+    result = await add_node(workflow_id, node)
     if not result:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="工作流不存在")
     return result
 
 
-@router.put("/{workflow_id}/nodes/{node_id}", response_model=Workflow)
+@router.put("/{workflow_id}/nodes/{node_id}", response_model=Workflow, summary="更新工作流节点")
 async def api_update_node(workflow_id: str, node_id: str, request: AddNodeRequest) -> Workflow:
     """更新节点"""
-    result = update_node(workflow_id, node_id, request.model_dump(exclude_unset=True))
+    result = await update_node(workflow_id, node_id, request.model_dump(exclude_unset=True))
     if not result:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="工作流或节点不存在")
     return result
 
 
-@router.delete("/{workflow_id}/nodes/{node_id}", response_model=Workflow)
+@router.delete("/{workflow_id}/nodes/{node_id}", response_model=Workflow, summary="移除工作流节点")
 async def api_remove_node(workflow_id: str, node_id: str) -> Workflow:
     """移除节点"""
-    result = remove_node(workflow_id, node_id)
+    result = await remove_node(workflow_id, node_id)
     if not result:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="工作流不存在")
     return result
 
 
-@router.post("/{workflow_id}/edges", response_model=Workflow)
+@router.post("/{workflow_id}/edges", response_model=Workflow, summary="添加工作流连接")
 async def api_add_edge(workflow_id: str, request: AddEdgeRequest) -> Workflow:
     """添加连接"""
     edge = WorkflowEdge(**request.model_dump())
-    result = add_edge(workflow_id, edge)
+    result = await add_edge(workflow_id, edge)
     if not result:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="工作流不存在")
     return result
 
 
-@router.delete("/{workflow_id}/edges/{edge_id}", response_model=Workflow)
+@router.delete("/{workflow_id}/edges/{edge_id}", response_model=Workflow, summary="移除工作流连接")
 async def api_remove_edge(workflow_id: str, edge_id: str) -> Workflow:
     """移除连接"""
-    result = remove_edge(workflow_id, edge_id)
+    result = await remove_edge(workflow_id, edge_id)
     if not result:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="工作流不存在")
     return result
 
 
-@router.post("/{workflow_id}/execute")
+@router.post("/{workflow_id}/execute", summary="执行工作流")
 async def api_execute_workflow(workflow_id: str, request: ExecuteWorkflowRequest):
     """执行工作流"""
     return await execute_workflow(workflow_id, request.input_data)
 
 
-@router.get("/node-types")
+@router.get("/node-types", summary="列出节点类型")
 async def api_list_node_types() -> dict:
     """列出节点类型"""
     return {

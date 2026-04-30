@@ -46,11 +46,11 @@
           </svg>
         </div>
         <div class="doc-info">
-          <span class="doc-name">{{ doc.filename || doc.name }}</span>
-          <span class="doc-meta">{{ formatSize(doc.file_size) }} | {{ formatDate(doc.created_at) }}</span>
+          <span class="doc-name">{{ doc.name }}</span>
+          <span class="doc-meta">{{ formatSize(doc.size) }} | {{ formatDate(doc.created_at) }}</span>
         </div>
-        <div class="doc-status" :class="doc.processing_status || 'completed'">
-          {{ formatStatus(doc.processing_status) }}
+        <div class="doc-status" :class="doc.status || 'completed'">
+          {{ formatStatus(doc.status) }}
         </div>
         <button class="btn-icon" @click="handleDeleteDoc(doc.id)" title="删除">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
@@ -92,7 +92,7 @@ const totalPages = computed(() => Math.ceil(total.value / perPage))
 async function loadKbInfo() {
   try {
     const res = await knowledgeApi.getKnowledgeBase(kbId)
-    kbInfo.value = res.data?.data || res.data || {}
+    kbInfo.value = res || {}
   } catch (err) {
     ElMessage.error('加载知识库信息失败')
   }
@@ -102,8 +102,8 @@ async function loadDocuments() {
   loading.value = true
   try {
     const res = await knowledgeApi.listDocuments(kbId, page.value, perPage)
-    const payload = res.data?.data || res.data
-    documents.value = payload?.documents || payload?.items || []
+    const payload = res.data
+    documents.value = payload?.documents || []
     total.value = payload?.total || documents.value.length
   } catch (err) {
     ElMessage.error('加载文档列表失败')

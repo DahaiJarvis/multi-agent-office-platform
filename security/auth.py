@@ -12,6 +12,7 @@ import logging
 import time
 from typing import Any
 
+import bcrypt
 import jwt
 from pydantic import BaseModel, Field
 
@@ -539,7 +540,11 @@ async def _revoke_user_in_redis_async(user_id: str) -> bool:
 def require_roles(request, roles: list[str]) -> None:
     """校验请求用户是否拥有指定角色
 
-    从 request.state.auth_payload 中提取用户角色信息，
+    从 request.state 中提取用户角色信息，
+    支持两种属性来源：
+    1. request.state.auth_payload（TokenPayload 对象）
+    2. request.state.user_roles（认证中间件直接设置的列表）
+
     如果用户不拥有任一所需角色，抛出 403 异常。
 
     Args:
@@ -552,12 +557,54 @@ def require_roles(request, roles: list[str]) -> None:
     from api.errors import AppException, ErrorCode
 
     auth_payload = getattr(request.state, "auth_payload", None)
-    if auth_payload is None:
-        raise AppException(ErrorCode.UNAUTHORIZED, message="未认证")
+    if auth_payload is not None:
+        user_roles = getattr(auth_payload, "roles", [])
+    else:
+        user_id = getattr(request.state, "user_id", None)
+        if user_id is None:
+            raise AppException(ErrorCode.UNAUTHORIZED, message="未认证")
+        user_roles = getattr(request.state, "user_roles", [])
 
-    user_roles = getattr(auth_payload, "roles", [])
     if not any(role in user_roles for role in roles):
         raise AppException(
             ErrorCode.PERMISSION_DENIED,
             message=f"权限不足，需要以下角色之一: {', '.join(roles)}",
         )
+
+
+# ==================== 密码哈希工具 ====================
+
+def hash_password(password: str) -> str:
+    """使用 bcrypt 对密码进行哈希
+
+    bcrypt 自带盐值，计算成本因子为 12，可有效抵御暴力破解。
+    返回值为 UTF-8 解码的哈希字符串，便于存储和比对。
+
+    Args:
+        password: 明文密码
+
+    Returns:
+        bcrypt 哈希字符串
+    """
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """验证密码是否匹配 bcrypt 哈希
+
+    同时兼容旧版 SHA-256 哈希：如果哈希长度为 64（SHA-256 特征），
+    则使用 SHA-256 比对。调用方负责在匹配后升级哈希。
+
+    Args:
+        password: 明文密码
+        password_hash: 存储的哈希值（bcrypt 或旧版 SHA-256）
+
+    Returns:
+        密码是否匹配
+    """
+    if len(password_hash) == 64 and all(c in "0123456789abcdef" for c in password_hash):
+        import hashlib
+        sha256_hash = hashlib.sha256(password.encode()).hexdigest()
+        return sha256_hash == password_hash
+
+    return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))

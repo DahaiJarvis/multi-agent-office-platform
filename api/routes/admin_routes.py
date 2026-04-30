@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 
-@router.get("/health", response_model=HealthResponse)
+@router.get("/health", response_model=HealthResponse, summary="基础健康检查")
 async def health_check() -> HealthResponse:
     """基础健康检查接口"""
     settings = get_settings()
@@ -48,7 +48,7 @@ async def health_check() -> HealthResponse:
     )
 
 
-@router.get("/health/detail")
+@router.get("/health/detail", summary="深度健康检查")
 async def detailed_health_check() -> dict:
     """深度健康检查
 
@@ -70,7 +70,7 @@ async def detailed_health_check() -> dict:
     }
 
 
-@router.get("/mcp/status")
+@router.get("/mcp/status", summary="MCP服务状态")
 async def mcp_status() -> dict:
     """查看 MCP 服务状态"""
     servers = {}
@@ -85,7 +85,7 @@ async def mcp_status() -> dict:
     return {"servers": servers, "total": len(servers)}
 
 
-@router.get("/failover/status")
+@router.get("/failover/status", summary="故障转移状态")
 async def failover_status() -> dict:
     """查看故障转移状态"""
     from deploy.ha_manager import get_failover_manager
@@ -117,7 +117,7 @@ class FeatureToggleRequest(BaseModel):
     enabled: bool = Field(..., description="是否启用")
 
 
-@router.get("/canary/flags")
+@router.get("/canary/flags", summary="获取灰度标志")
 async def list_feature_flags() -> dict:
     """查看所有功能开关状态"""
     from deploy.canary import get_all_flags
@@ -125,7 +125,7 @@ async def list_feature_flags() -> dict:
     return {"flags": get_all_flags()}
 
 
-@router.post("/canary/rollout")
+@router.post("/canary/rollout", summary="设置灰度比例")
 async def update_rollout(request: RolloutUpdateRequest) -> dict:
     """更新灰度比例"""
     from deploy.canary import update_rollout as _update_rollout
@@ -136,7 +136,7 @@ async def update_rollout(request: RolloutUpdateRequest) -> dict:
     return {"success": True, "feature_name": request.feature_name, "rollout_percentage": request.percentage}
 
 
-@router.post("/canary/whitelist")
+@router.post("/canary/whitelist", summary="设置灰度白名单")
 async def update_whitelist(request: WhitelistRequest) -> dict:
     """更新白名单"""
     from deploy.canary import add_to_whitelist
@@ -147,7 +147,7 @@ async def update_whitelist(request: WhitelistRequest) -> dict:
     return {"success": True, "feature_name": request.feature_name, "added_count": len(request.user_ids)}
 
 
-@router.post("/canary/toggle")
+@router.post("/canary/toggle", summary="切换灰度开关")
 async def toggle_feature(request: FeatureToggleRequest) -> dict:
     """启用/禁用功能开关"""
     from deploy.canary import set_feature_enabled
@@ -160,7 +160,7 @@ async def toggle_feature(request: FeatureToggleRequest) -> dict:
 
 # ==================== 运营指标 ====================
 
-@router.get("/metrics/summary")
+@router.get("/metrics/summary", summary="获取指标摘要")
 async def metrics_summary() -> dict:
     """运营指标汇总
 
@@ -215,9 +215,21 @@ async def metrics_summary() -> dict:
         return {"error": str(e), "timestamp": datetime.now().isoformat()}
 
 
+# ==================== 用户管理 ====================
+
+@router.get("/users", summary="获取用户列表")
+async def list_users(limit: int = 50, offset: int = 0) -> dict:
+    """获取用户列表，用于管理员快速选择用户"""
+    from security.user_store import get_user_store
+
+    store = get_user_store()
+    users = await store.list_users(limit=limit, offset=offset)
+    return {"items": users, "total": len(users)}
+
+
 # ==================== Token 预算管理 ====================
 
-@router.get("/token/usage/{user_id}")
+@router.get("/token/usage/{user_id}", summary="查询用户Token用量")
 async def get_user_token_usage(user_id: str) -> dict:
     """查询用户当日 Token 用量"""
     from agent.core.token_budget import get_token_budget_manager
@@ -226,7 +238,7 @@ async def get_user_token_usage(user_id: str) -> dict:
     return await budget_mgr.get_user_daily_usage(user_id)
 
 
-@router.get("/token/budget/{user_id}")
+@router.get("/token/budget/{user_id}", summary="查询用户Token预算")
 async def check_token_budget(user_id: str, session_id: str = "") -> dict:
     """检查用户 Token 预算"""
     from agent.core.token_budget import get_token_budget_manager
@@ -237,7 +249,7 @@ async def check_token_budget(user_id: str, session_id: str = "") -> dict:
 
 # ==================== 审计日志 ====================
 
-@router.get("/audit/logs")
+@router.get("/audit/logs", summary="查询审计日志")
 async def query_audit_logs(
     event_type: str | None = None,
     user_id: str | None = None,
@@ -258,7 +270,7 @@ async def query_audit_logs(
     )
 
 
-@router.post("/audit/flush")
+@router.post("/audit/flush", summary="手动刷新审计日志缓冲区")
 async def flush_audit_buffer() -> dict:
     """手动刷新审计日志缓冲区，将 Redis 中的日志持久化到 PostgreSQL"""
     from agent.core.audit import get_audit_logger
@@ -270,7 +282,7 @@ async def flush_audit_buffer() -> dict:
 
 # ==================== 成本报表 ====================
 
-@router.get("/cost/report")
+@router.get("/cost/report", summary="获取成本报告")
 async def get_cost_report(date: str = "") -> dict:
     """获取成本报表
 
@@ -285,7 +297,7 @@ async def get_cost_report(date: str = "") -> dict:
     return await budget_mgr.get_cost_report(date)
 
 
-@router.get("/cost/tenant/{tenant_id}")
+@router.get("/cost/tenant/{tenant_id}", summary="查询租户成本")
 async def get_tenant_cost(tenant_id: str) -> dict:
     """获取租户当日成本统计"""
     from agent.core.token_budget import get_token_budget_manager
@@ -294,7 +306,7 @@ async def get_tenant_cost(tenant_id: str) -> dict:
     return await budget_mgr.get_tenant_daily_usage(tenant_id)
 
 
-@router.get("/cost/agent/{agent_name}")
+@router.get("/cost/agent/{agent_name}", summary="查询Agent成本")
 async def get_agent_cost(agent_name: str) -> dict:
     """获取 Agent 当日成本统计"""
     from agent.core.token_budget import get_token_budget_manager
@@ -305,7 +317,7 @@ async def get_agent_cost(agent_name: str) -> dict:
 
 # ==================== SLA 预算管理 ====================
 
-@router.get("/sla/definitions")
+@router.get("/sla/definitions", summary="获取SLA定义")
 async def list_sla_with_budget() -> dict:
     """列出所有 SLA 层级及其预算额度"""
     from agent.core.sla import list_sla_definitions
@@ -332,7 +344,7 @@ async def list_sla_with_budget() -> dict:
     }
 
 
-@router.get("/sla/budget/{tier}")
+@router.get("/sla/budget/{tier}", summary="查询SLA层级预算")
 async def get_sla_budget(tier: str) -> dict:
     """获取指定 SLA 层级的预算额度
 

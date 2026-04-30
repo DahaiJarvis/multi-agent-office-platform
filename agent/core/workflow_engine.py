@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+# 工作流执行最大步数限制，防止死循环
+MAX_EXECUTION_STEPS = 1000
+
 
 class NodeType(str, Enum):
     """节点类型"""
@@ -114,14 +117,82 @@ class WorkflowExecution(BaseModel):
 
 # ==================== 存储 ====================
 
-_workflows_store: dict[str, Workflow] = {}
-_executions_store: dict[str, WorkflowExecution] = {}
+_workflow_redis: Any = None
+_WORKFLOW_KEY_PREFIX = "workflow:"
+_EXECUTION_KEY_PREFIX = "workflow_exec:"
+
+
+async def _get_workflow_redis() -> Any:
+    """获取工作流存储用的 Redis 客户端（使用统一连接管理器）"""
+    global _workflow_redis
+    if _workflow_redis is None:
+        try:
+            from agent.core.redis_manager import get_redis_client
+            _workflow_redis = await get_redis_client()
+        except Exception as e:
+            logger.warning("工作流引擎 Redis 连接失败: %s", e)
+            return None
+    return _workflow_redis
+
+
+async def _store_workflow(workflow: Workflow) -> None:
+    """持久化工作流到 Redis"""
+    redis = await _get_workflow_redis()
+    if redis is None:
+        return
+    key = f"{_WORKFLOW_KEY_PREFIX}{workflow.workflow_id}"
+    await redis.set(key, workflow.model_dump_json(), ex=86400 * 30)
+
+
+async def _load_workflow(workflow_id: str) -> Workflow | None:
+    """从 Redis 加载工作流"""
+    redis = await _get_workflow_redis()
+    if redis is None:
+        return None
+    key = f"{_WORKFLOW_KEY_PREFIX}{workflow_id}"
+    data = await redis.get(key)
+    if data is None:
+        return None
+    return Workflow.model_validate_json(data)
+
+
+async def _remove_workflow(workflow_id: str) -> bool:
+    """从 Redis 删除工作流"""
+    redis = await _get_workflow_redis()
+    if redis is None:
+        return False
+    key = f"{_WORKFLOW_KEY_PREFIX}{workflow_id}"
+    return await redis.delete(key) > 0
+
+
+async def _store_execution(execution: WorkflowExecution) -> None:
+    """持久化执行记录到 Redis"""
+    redis = await _get_workflow_redis()
+    if redis is None:
+        return
+    key = f"{_EXECUTION_KEY_PREFIX}{execution.execution_id}"
+    await redis.set(key, execution.model_dump_json(), ex=86400 * 7)
+
+
+async def _list_all_workflow_ids() -> list[str]:
+    """列出 Redis 中所有工作流 ID"""
+    redis = await _get_workflow_redis()
+    if redis is None:
+        return []
+    keys = []
+    cursor = 0
+    while True:
+        cursor, batch = await redis.scan(cursor, match=f"{_WORKFLOW_KEY_PREFIX}*", count=100)
+        keys.extend(batch)
+        if cursor == 0:
+            break
+    return [k.replace(_WORKFLOW_KEY_PREFIX, "") for k in keys]
 
 
 # ==================== CRUD ====================
 
 
-def create_workflow(workflow: Workflow, created_by: str = "") -> Workflow:
+async def create_workflow(workflow: Workflow, created_by: str = "") -> Workflow:
     """创建工作流"""
     workflow.created_by = created_by
     workflow.status = WorkflowStatus.DRAFT
@@ -130,22 +201,28 @@ def create_workflow(workflow: Workflow, created_by: str = "") -> Workflow:
 
     _validate_workflow(workflow)
 
-    _workflows_store[workflow.workflow_id] = workflow
+    await _store_workflow(workflow)
     logger.info("工作流已创建: id=%s name=%s", workflow.workflow_id, workflow.name)
     return workflow
 
 
-def get_workflow(workflow_id: str) -> Workflow | None:
+async def get_workflow(workflow_id: str) -> Workflow | None:
     """获取工作流"""
-    return _workflows_store.get(workflow_id)
+    return await _load_workflow(workflow_id)
 
 
-def list_workflows(
+async def list_workflows(
     created_by: str = "",
     status: WorkflowStatus | None = None,
 ) -> list[Workflow]:
     """列出工作流"""
-    workflows = list(_workflows_store.values())
+    all_ids = await _list_all_workflow_ids()
+    workflows: list[Workflow] = []
+    for wid in all_ids:
+        wf = await _load_workflow(wid)
+        if wf:
+            workflows.append(wf)
+
     if created_by:
         workflows = [w for w in workflows if w.created_by == created_by]
     if status:
@@ -154,9 +231,9 @@ def list_workflows(
     return workflows
 
 
-def update_workflow(workflow_id: str, updates: dict[str, Any]) -> Workflow | None:
+async def update_workflow(workflow_id: str, updates: dict[str, Any]) -> Workflow | None:
     """更新工作流"""
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         return None
 
@@ -172,39 +249,40 @@ def update_workflow(workflow_id: str, updates: dict[str, Any]) -> Workflow | Non
     if "nodes" in updates or "edges" in updates:
         _validate_workflow(workflow)
 
+    await _store_workflow(workflow)
     return workflow
 
 
-def delete_workflow(workflow_id: str) -> bool:
+async def delete_workflow(workflow_id: str) -> bool:
     """删除工作流"""
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         return False
 
     if workflow.status == WorkflowStatus.PUBLISHED:
         raise ValueError("已发布的工作流不可删除，请先禁用")
 
-    del _workflows_store[workflow_id]
-    return True
+    return await _remove_workflow(workflow_id)
 
 
 # ==================== 节点操作 ====================
 
 
-def add_node(workflow_id: str, node: WorkflowNode) -> Workflow | None:
+async def add_node(workflow_id: str, node: WorkflowNode) -> Workflow | None:
     """添加节点"""
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         return None
 
     workflow.nodes.append(node)
     workflow.updated_at = time.time()
+    await _store_workflow(workflow)
     return workflow
 
 
-def update_node(workflow_id: str, node_id: str, updates: dict[str, Any]) -> Workflow | None:
+async def update_node(workflow_id: str, node_id: str, updates: dict[str, Any]) -> Workflow | None:
     """更新节点"""
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         return None
 
@@ -214,14 +292,15 @@ def update_node(workflow_id: str, node_id: str, updates: dict[str, Any]) -> Work
                 if hasattr(node, key) and key != "node_id":
                     setattr(node, key, value)
             workflow.updated_at = time.time()
+            await _store_workflow(workflow)
             return workflow
 
     return None
 
 
-def remove_node(workflow_id: str, node_id: str) -> Workflow | None:
+async def remove_node(workflow_id: str, node_id: str) -> Workflow | None:
     """移除节点"""
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         return None
 
@@ -231,12 +310,13 @@ def remove_node(workflow_id: str, node_id: str) -> Workflow | None:
         if e.source_node_id != node_id and e.target_node_id != node_id
     ]
     workflow.updated_at = time.time()
+    await _store_workflow(workflow)
     return workflow
 
 
-def add_edge(workflow_id: str, edge: WorkflowEdge) -> Workflow | None:
+async def add_edge(workflow_id: str, edge: WorkflowEdge) -> Workflow | None:
     """添加连接"""
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         return None
 
@@ -246,17 +326,19 @@ def add_edge(workflow_id: str, edge: WorkflowEdge) -> Workflow | None:
 
     workflow.edges.append(edge)
     workflow.updated_at = time.time()
+    await _store_workflow(workflow)
     return workflow
 
 
-def remove_edge(workflow_id: str, edge_id: str) -> Workflow | None:
+async def remove_edge(workflow_id: str, edge_id: str) -> Workflow | None:
     """移除连接"""
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         return None
 
     workflow.edges = [e for e in workflow.edges if e.edge_id != edge_id]
     workflow.updated_at = time.time()
+    await _store_workflow(workflow)
     return workflow
 
 
@@ -267,6 +349,7 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
     """执行工作流
 
     按拓扑排序执行节点，支持条件分支和并行执行。
+    设置最大执行步数限制，防止条件分支环路导致死循环。
 
     Args:
         workflow_id: 工作流ID
@@ -275,7 +358,7 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
     Returns:
         WorkflowExecution
     """
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         raise ValueError(f"工作流不存在: {workflow_id}")
 
@@ -286,7 +369,7 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
         workflow_id=workflow_id,
         status="running",
     )
-    _executions_store[execution.execution_id] = execution
+    await _store_execution(execution)
 
     try:
         start_nodes = [n for n in workflow.nodes if n.type == NodeType.START]
@@ -296,9 +379,14 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
         context: dict[str, Any] = {"input": input_data or {}, "results": {}}
         current_node = start_nodes[0]
         visited: set[str] = set()
+        step_count = 0
 
         while current_node:
-            if current_node.node_id in visited and current_node.type != NodeType.CONDITION:
+            step_count += 1
+            if step_count > MAX_EXECUTION_STEPS:
+                raise ValueError(f"工作流执行步数超过限制({MAX_EXECUTION_STEPS})，可能存在环路")
+
+            if current_node.node_id in visited:
                 break
             visited.add(current_node.node_id)
 
@@ -336,48 +424,299 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
         logger.error("工作流执行失败: %s", e)
 
     execution.completed_at = time.time()
+    await _store_execution(execution)
     return execution
 
 
 async def _execute_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
-    """执行单个节点"""
+    """执行单个节点
+
+    根据节点类型调用对应的执行器，将结果写入上下文。
+    """
     if node.type == NodeType.START:
         return {"status": "started", "input": context.get("input", {})}
 
     elif node.type == NodeType.END:
-        return {"status": "completed"}
+        return {"status": "completed", "output": context.get("results", {})}
 
     elif node.type == NodeType.AGENT:
-        return {"status": "agent_invoked", "agent": node.agent_name, "config": node.config}
+        return await _execute_agent_node(node, context)
 
     elif node.type == NodeType.TOOL:
-        return {"status": "tool_invoked", "tool": node.tool_name, "config": node.config}
+        return await _execute_tool_node(node, context)
 
     elif node.type == NodeType.TRANSFORM:
-        return {"status": "transformed", "expression": node.transform_expr}
+        return _execute_transform_node(node, context)
 
     elif node.type == NodeType.DELAY:
-        return {"status": "delayed", "seconds": node.delay_seconds}
+        return await _execute_delay_node(node)
 
     elif node.type == NodeType.HUMAN_INPUT:
-        return {"status": "waiting_for_input", "prompt": node.config.get("prompt", "")}
+        return _execute_human_input_node(node)
 
     elif node.type == NodeType.PARALLEL:
-        return {"status": "parallel_branches", "branches": node.config.get("branches", [])}
+        return await _execute_parallel_node(node, context)
 
     return {"status": "unknown", "type": node.type.value}
 
 
+async def _execute_agent_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
+    """执行 Agent 节点：调用指定 Agent 处理输入"""
+    try:
+        from agent.core.agent_router import route_to_agent
+
+        agent_name = node.agent_name or node.config.get("agent_name", "")
+        input_text = node.config.get("input_template", "")
+        if input_text:
+            input_text = _render_template(input_text, context)
+
+        result = await route_to_agent(
+            agent_name=agent_name,
+            message=input_text,
+            context=context,
+        )
+
+        return {
+            "status": "agent_completed",
+            "agent": agent_name,
+            "result": result if isinstance(result, dict) else {"response": str(result)},
+        }
+    except Exception as e:
+        logger.error("Agent 节点执行失败: agent=%s, error=%s", node.agent_name, e)
+        return {"status": "agent_failed", "agent": node.agent_name, "error": str(e)}
+
+
+async def _execute_tool_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
+    """执行工具节点：调用指定工具"""
+    try:
+        from agent.core.tool_registry import execute_tool
+
+        tool_name = node.tool_name or node.config.get("tool_name", "")
+        tool_params = node.config.get("params", {})
+        tool_params = _render_template_dict(tool_params, context)
+
+        result = await execute_tool(tool_name=tool_name, params=tool_params)
+
+        return {
+            "status": "tool_completed",
+            "tool": tool_name,
+            "result": result if isinstance(result, dict) else {"output": str(result)},
+        }
+    except Exception as e:
+        logger.error("工具节点执行失败: tool=%s, error=%s", node.tool_name, e)
+        return {"status": "tool_failed", "tool": node.tool_name, "error": str(e)}
+
+
+def _execute_transform_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
+    """执行转换节点：对上下文数据进行映射和转换"""
+    try:
+        mapping = node.config.get("mapping", {})
+        output: dict[str, Any] = {}
+
+        for target_key, source_expr in mapping.items():
+            output[target_key] = _resolve_value(source_expr, context)
+
+        return {"status": "transformed", "output": output}
+    except Exception as e:
+        logger.error("转换节点执行失败: error=%s", e)
+        return {"status": "transform_failed", "error": str(e)}
+
+
+async def _execute_delay_node(node: WorkflowNode) -> dict[str, Any]:
+    """执行延迟节点：等待指定秒数"""
+    import asyncio
+
+    seconds = node.delay_seconds or node.config.get("seconds", 0)
+    if seconds > 0:
+        await asyncio.sleep(seconds)
+    return {"status": "delayed", "seconds": seconds}
+
+
+def _execute_human_input_node(node: WorkflowNode) -> dict[str, Any]:
+    """执行人工输入节点：标记等待人工输入
+
+    实际场景中应通过 WebSocket 推送提示并等待回复，
+    此处返回等待状态，由上层处理中断逻辑。
+    """
+    prompt = node.config.get("prompt", "请输入:")
+    return {"status": "waiting_for_input", "prompt": prompt}
+
+
+async def _execute_parallel_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
+    """执行并行节点：同时执行多个分支"""
+    import asyncio
+
+    branches = node.config.get("branches", [])
+    if not branches:
+        return {"status": "parallel_completed", "results": {}}
+
+    tasks = []
+    branch_names = []
+    for branch in branches:
+        branch_node = WorkflowNode(
+            node_id=branch.get("node_id", str(uuid.uuid4())),
+            name=branch.get("name", ""),
+            type=NodeType(branch.get("type", "agent")),
+            config=branch.get("config", {}),
+            agent_name=branch.get("agent_name"),
+            tool_name=branch.get("tool_name"),
+        )
+        tasks.append(_execute_node(branch_node, context))
+        branch_names.append(branch.get("name", branch_node.node_id))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    branch_results: dict[str, Any] = {}
+    for name, result in zip(branch_names, results):
+        if isinstance(result, Exception):
+            branch_results[name] = {"status": "failed", "error": str(result)}
+        else:
+            branch_results[name] = result
+
+    return {"status": "parallel_completed", "results": branch_results}
+
+
+def _render_template(template: str, context: dict[str, Any]) -> str:
+    """渲染简单模板，替换 {{ variable }} 占位符
+
+    Args:
+        template: 模板字符串
+        context: 上下文变量字典
+
+    Returns:
+        渲染后的字符串
+    """
+    import re
+
+    def replacer(match: re.Match) -> str:
+        var_path = match.group(1).strip()
+        val = _resolve_value(var_path, context)
+        return str(val) if val is not None else match.group(0)
+
+    return re.sub(r"\{\{\s*(.+?)\s*\}\}", replacer, template)
+
+
+def _render_template_dict(params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """渲染字典中的模板值"""
+    rendered = {}
+    for key, value in params.items():
+        if isinstance(value, str):
+            rendered[key] = _render_template(value, context)
+        elif isinstance(value, dict):
+            rendered[key] = _render_template_dict(value, context)
+        else:
+            rendered[key] = value
+    return rendered
+
+
+_SAFE_OPERATORS: dict[str, Any] = {
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+    ">": lambda a, b: a > b,
+    "<": lambda a, b: a < b,
+    ">=": lambda a, b: a >= b,
+    "<=": lambda a, b: a <= b,
+    "and": lambda a, b: a and b,
+    "or": lambda a, b: a or b,
+}
+
+
 def _evaluate_condition(expr: str, context: dict[str, Any]) -> Any:
-    """评估条件表达式"""
+    """安全评估条件表达式
+
+    使用白名单操作符进行简单的条件判断，避免 eval() 带来的代码注入风险。
+    支持格式：
+      - 变量比较: "result.status == 'completed'"
+      - 数值比较: "result.count > 10"
+      - 布尔变量: "result.success"
+      - 逻辑组合: "result.count > 10 and result.status == 'completed'"
+
+    Args:
+        expr: 条件表达式字符串
+        context: 上下文变量字典
+
+    Returns:
+        条件评估结果，解析失败时返回 False
+    """
     if not expr:
         return True
 
+    expr = expr.strip()
+
     try:
-        result = eval(expr, {"__builtins__": {}}, context)
-        return result
+        if " or " in expr:
+            parts = expr.split(" or ", 1)
+            return _evaluate_condition(parts[0].strip(), context) or _evaluate_condition(parts[1].strip(), context)
+
+        if " and " in expr:
+            parts = expr.split(" and ", 1)
+            return _evaluate_condition(parts[0].strip(), context) and _evaluate_condition(parts[1].strip(), context)
+
+        for op_str, op_func in _SAFE_OPERATORS.items():
+            if f" {op_str} " in expr:
+                left_str, right_str = expr.split(f" {op_str} ", 1)
+                left_val = _resolve_value(left_str.strip(), context)
+                right_val = _resolve_value(right_str.strip(), context)
+                return op_func(left_val, right_val)
+
+        val = _resolve_value(expr, context)
+        return bool(val)
+
     except Exception:
         return False
+
+
+def _resolve_value(token: str, context: dict[str, Any]) -> Any:
+    """解析表达式中的值
+
+    支持从上下文中读取变量（点号路径）和字面量（字符串、数字、布尔值）。
+
+    Args:
+        token: 值标记（变量路径或字面量）
+        context: 上下文变量字典
+
+    Returns:
+        解析后的值
+    """
+    token = token.strip()
+
+    if (token.startswith("'") and token.endswith("'")) or (token.startswith('"') and token.endswith('"')):
+        return token[1:-1]
+
+    if token.lower() == "true":
+        return True
+    if token.lower() == "false":
+        return False
+
+    try:
+        if "." in token and not token.replace(".", "", 1).replace("-", "", 1).isdigit():
+            parts = token.split(".")
+            val: Any = context
+            for part in parts:
+                if isinstance(val, dict):
+                    val = val.get(part)
+                else:
+                    return token
+                if val is None:
+                    return token
+            return val
+    except Exception:
+        pass
+
+    try:
+        return int(token)
+    except ValueError:
+        pass
+
+    try:
+        return float(token)
+    except ValueError:
+        pass
+
+    if token in context:
+        return context[token]
+
+    return token
 
 
 def _find_node(workflow: Workflow, node_id: str) -> WorkflowNode | None:
@@ -422,7 +761,7 @@ def _validate_workflow(workflow: Workflow) -> None:
 # ==================== 可视化数据 ====================
 
 
-def get_workflow_visualization(workflow_id: str) -> dict[str, Any] | None:
+async def get_workflow_visualization(workflow_id: str) -> dict[str, Any] | None:
     """获取工作流可视化数据
 
     返回前端流程图组件可直接使用的 JSON 格式。
@@ -433,7 +772,7 @@ def get_workflow_visualization(workflow_id: str) -> dict[str, Any] | None:
     Returns:
         可视化数据
     """
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         return None
 
@@ -483,9 +822,9 @@ def get_workflow_visualization(workflow_id: str) -> dict[str, Any] | None:
     }
 
 
-def publish_workflow(workflow_id: str) -> Workflow | None:
+async def publish_workflow(workflow_id: str) -> Workflow | None:
     """发布工作流"""
-    workflow = _workflows_store.get(workflow_id)
+    workflow = await _load_workflow(workflow_id)
     if not workflow:
         return None
 
@@ -496,4 +835,5 @@ def publish_workflow(workflow_id: str) -> Workflow | None:
 
     workflow.status = WorkflowStatus.PUBLISHED
     workflow.updated_at = time.time()
+    await _store_workflow(workflow)
     return workflow

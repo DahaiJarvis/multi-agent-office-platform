@@ -47,7 +47,7 @@ class AgentStatsResponse(BaseModel):
     success_rate: float = 0
 
 
-@router.get("/trace/{session_id}", response_model=TraceResponse)
+@router.get("/trace/{session_id}", response_model=TraceResponse, summary="查询会话追踪")
 async def get_session_trace(session_id: str) -> TraceResponse:
     """获取会话的完整执行轨迹
 
@@ -76,7 +76,7 @@ async def get_session_trace(session_id: str) -> TraceResponse:
     )
 
 
-@router.get("/session/{session_id}/spans", response_model=TraceResponse)
+@router.get("/session/{session_id}/spans", response_model=TraceResponse, summary="查询会话Span列表")
 async def get_session_spans(
     session_id: str,
     span_type: str = "",
@@ -116,7 +116,7 @@ async def get_session_spans(
     )
 
 
-@router.get("/agent/{agent_name}/stats", response_model=AgentStatsResponse)
+@router.get("/agent/{agent_name}/stats", response_model=AgentStatsResponse, summary="查询Agent统计")
 async def get_agent_stats(agent_name: str) -> AgentStatsResponse:
     """获取 Agent 运行统计
 

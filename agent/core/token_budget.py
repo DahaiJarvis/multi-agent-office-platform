@@ -81,16 +81,11 @@ class TokenBudgetManager:
         self._redis: Any = None
 
     async def _get_redis(self) -> Any:
-        """获取 Redis 客户端"""
+        """获取 Redis 客户端（使用统一连接管理器）"""
         if self._redis is None:
             try:
-                import redis.asyncio as aioredis
-
-                settings = get_settings()
-                self._redis = aioredis.from_url(
-                    settings.redis_url,
-                    decode_responses=True,
-                )
+                from agent.core.redis_manager import get_redis_client
+                self._redis = await get_redis_client()
             except Exception as e:
                 logger.warning("Token 预算管理器 Redis 连接失败: %s", e)
                 return None
@@ -159,6 +154,8 @@ class TokenBudgetManager:
     ) -> None:
         """更新 Redis 中的用量统计
 
+        使用 Pipeline 批量提交所有 Redis 命令，将多次网络往返减少为一次。
+
         多维度统计：
           - 用户维度: token_usage:user:{user_id}:{date}
           - 会话维度: token_usage:session:{session_id}
@@ -172,46 +169,51 @@ class TokenBudgetManager:
 
         try:
             today = time.strftime("%Y-%m-%d")
+            two_days = 86400 * 2
+            one_day = 86400
 
-            # 用户日用量
-            user_key = f"token_usage:user:{user_id}:{today}"
-            await redis.hincrby(user_key, "prompt_tokens", usage.prompt_tokens)
-            await redis.hincrby(user_key, "completion_tokens", usage.completion_tokens)
-            await redis.hincrby(user_key, "total_tokens", usage.total_tokens)
-            await redis.hincrbyfloat(user_key, "cost", usage.cost)
-            await redis.hincrby(user_key, "call_count", 1)
-            await redis.expire(user_key, 86400 * 2)
+            async with redis.pipeline(transaction=False) as pipe:
+                # 用户日用量
+                user_key = f"token_usage:user:{user_id}:{today}"
+                pipe.hincrby(user_key, "prompt_tokens", usage.prompt_tokens)
+                pipe.hincrby(user_key, "completion_tokens", usage.completion_tokens)
+                pipe.hincrby(user_key, "total_tokens", usage.total_tokens)
+                pipe.hincrbyfloat(user_key, "cost", usage.cost)
+                pipe.hincrby(user_key, "call_count", 1)
+                pipe.expire(user_key, two_days)
 
-            # 会话用量
-            session_key = f"token_usage:session:{session_id}"
-            await redis.hincrby(session_key, "prompt_tokens", usage.prompt_tokens)
-            await redis.hincrby(session_key, "completion_tokens", usage.completion_tokens)
-            await redis.hincrby(session_key, "total_tokens", usage.total_tokens)
-            await redis.hincrbyfloat(session_key, "cost", usage.cost)
-            await redis.hincrby(session_key, "call_count", 1)
-            await redis.expire(session_key, 86400)
+                # 会话用量
+                session_key = f"token_usage:session:{session_id}"
+                pipe.hincrby(session_key, "prompt_tokens", usage.prompt_tokens)
+                pipe.hincrby(session_key, "completion_tokens", usage.completion_tokens)
+                pipe.hincrby(session_key, "total_tokens", usage.total_tokens)
+                pipe.hincrbyfloat(session_key, "cost", usage.cost)
+                pipe.hincrby(session_key, "call_count", 1)
+                pipe.expire(session_key, one_day)
 
-            # 全局日用量
-            global_key = f"token_usage:global:{today}"
-            await redis.hincrby(global_key, "total_tokens", usage.total_tokens)
-            await redis.hincrbyfloat(global_key, "cost", usage.cost)
-            await redis.expire(global_key, 86400 * 2)
+                # 全局日用量
+                global_key = f"token_usage:global:{today}"
+                pipe.hincrby(global_key, "total_tokens", usage.total_tokens)
+                pipe.hincrbyfloat(global_key, "cost", usage.cost)
+                pipe.expire(global_key, two_days)
 
-            # 租户日用量
-            if tenant_id:
-                tenant_key = f"token_usage:tenant:{tenant_id}:{today}"
-                await redis.hincrby(tenant_key, "total_tokens", usage.total_tokens)
-                await redis.hincrbyfloat(tenant_key, "cost", usage.cost)
-                await redis.hincrby(tenant_key, "call_count", 1)
-                await redis.expire(tenant_key, 86400 * 2)
+                # 租户日用量
+                if tenant_id:
+                    tenant_key = f"token_usage:tenant:{tenant_id}:{today}"
+                    pipe.hincrby(tenant_key, "total_tokens", usage.total_tokens)
+                    pipe.hincrbyfloat(tenant_key, "cost", usage.cost)
+                    pipe.hincrby(tenant_key, "call_count", 1)
+                    pipe.expire(tenant_key, two_days)
 
-            # Agent 日用量
-            if agent_name:
-                agent_key = f"token_usage:agent:{agent_name}:{today}"
-                await redis.hincrby(agent_key, "total_tokens", usage.total_tokens)
-                await redis.hincrbyfloat(agent_key, "cost", usage.cost)
-                await redis.hincrby(agent_key, "call_count", 1)
-                await redis.expire(agent_key, 86400 * 2)
+                # Agent 日用量
+                if agent_name:
+                    agent_key = f"token_usage:agent:{agent_name}:{today}"
+                    pipe.hincrby(agent_key, "total_tokens", usage.total_tokens)
+                    pipe.hincrbyfloat(agent_key, "cost", usage.cost)
+                    pipe.hincrby(agent_key, "call_count", 1)
+                    pipe.expire(agent_key, two_days)
+
+                await pipe.execute()
 
         except Exception as e:
             logger.warning("更新 Token 用量统计失败: %s", e)
@@ -223,6 +225,8 @@ class TokenBudgetManager:
         tenant_id: str = "",
     ) -> dict[str, Any]:
         """检查预算是否充足
+
+        使用 Pipeline 批量读取多个维度的用量数据，减少网络往返。
 
         多维度预算检查：用户、会话、全局、租户。
 
@@ -237,9 +241,36 @@ class TokenBudgetManager:
         redis = await self._get_redis()
         today = time.strftime("%Y-%m-%d")
 
-        user_usage = await self._get_usage(redis, f"token_usage:user:{user_id}:{today}")
-        session_usage = await self._get_usage(redis, f"token_usage:session:{session_id}")
-        global_usage = await self._get_usage(redis, f"token_usage:global:{today}")
+        user_key = f"token_usage:user:{user_id}:{today}"
+        session_key = f"token_usage:session:{session_id}"
+        global_key = f"token_usage:global:{today}"
+
+        # 使用 Pipeline 批量读取所有维度的用量
+        user_usage = UsageRecord()
+        session_usage = UsageRecord()
+        global_usage = UsageRecord()
+        tenant_usage = UsageRecord()
+
+        if redis:
+            try:
+                keys_to_fetch = [user_key, session_key, global_key]
+                tenant_key = ""
+                if tenant_id:
+                    tenant_key = f"token_usage:tenant:{tenant_id}:{today}"
+                    keys_to_fetch.append(tenant_key)
+
+                async with redis.pipeline(transaction=False) as pipe:
+                    for key in keys_to_fetch:
+                        pipe.hgetall(key)
+                    results = await pipe.execute()
+
+                user_usage = self._parse_usage_record(results[0] if len(results) > 0 else {})
+                session_usage = self._parse_usage_record(results[1] if len(results) > 1 else {})
+                global_usage = self._parse_usage_record(results[2] if len(results) > 2 else {})
+                if tenant_id and len(results) > 3:
+                    tenant_usage = self._parse_usage_record(results[3])
+            except Exception as e:
+                logger.warning("批量读取 Token 用量失败: %s", e)
 
         user_exceeded = user_usage.total_tokens >= self._config.user_daily_budget
         session_exceeded = session_usage.total_tokens >= self._config.session_budget
@@ -249,7 +280,6 @@ class TokenBudgetManager:
         tenant_exceeded = False
         tenant_usage_data: dict[str, Any] = {}
         if tenant_id:
-            tenant_usage = await self._get_usage(redis, f"token_usage:tenant:{tenant_id}:{today}")
             tenant_exceeded = tenant_usage.total_tokens >= self._config.tenant_daily_budget
             tenant_usage_data = {
                 "total_tokens": tenant_usage.total_tokens,
@@ -291,6 +321,29 @@ class TokenBudgetManager:
             result["tenant_usage"] = tenant_usage_data
 
         return result
+
+    @staticmethod
+    def _parse_usage_record(data: dict[str, Any]) -> "UsageRecord":
+        """解析 Redis hgetall 返回的用量数据
+
+        Args:
+            data: Redis 哈希字段字典
+
+        Returns:
+            UsageRecord 实例
+        """
+        if not data:
+            return UsageRecord()
+        try:
+            return UsageRecord(
+                prompt_tokens=int(data.get("prompt_tokens", 0)),
+                completion_tokens=int(data.get("completion_tokens", 0)),
+                total_tokens=int(data.get("total_tokens", 0)),
+                cost=float(data.get("cost", 0)),
+                call_count=int(data.get("call_count", 0)),
+            )
+        except Exception:
+            return UsageRecord()
 
     async def get_user_daily_usage(self, user_id: str) -> dict[str, Any]:
         """获取用户当日用量统计

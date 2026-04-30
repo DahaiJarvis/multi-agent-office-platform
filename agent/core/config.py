@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # LLM 路由策略
     llm_route_strategy: str = Field(default="priority", alias="LLM_ROUTE_STRATEGY")
 
+    # 嵌入模型配置
+    embedding_api_url: str = Field(default="", alias="EMBEDDING_API_URL")
+    embedding_model: str = Field(default="text-embedding-v3", alias="EMBEDDING_MODEL")
+    llm_api_key: str = Field(default="", alias="LLM_API_KEY")
+
     # PostgreSQL
     postgres_host: str = Field(default="localhost", alias="POSTGRES_HOST")
     postgres_port: int = Field(default=5432, alias="POSTGRES_PORT")

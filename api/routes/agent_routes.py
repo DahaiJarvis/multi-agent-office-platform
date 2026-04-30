@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse, summary="同步对话")
 async def chat(request: ChatRequest) -> ChatResponse:
     """处理用户对话请求（同步模式）
 
@@ -87,7 +87,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     )
 
 
-@router.post("/chat/stream")
+@router.post("/chat/stream", summary="流式对话")
 async def chat_stream(request: ChatRequest) -> StreamingResponse:
     """处理用户对话请求（流式模式）
 
@@ -258,7 +258,7 @@ def _format_sse(event: str, data: str) -> str:
 # ==================== 事件流 ====================
 
 
-@router.get("/events/{session_id}")
+@router.get("/events/{session_id}", summary="SSE事件流")
 async def event_stream(session_id: str) -> StreamingResponse:
     """SSE 事件流端点
 
@@ -327,7 +327,7 @@ class FeedbackRequestBody(BaseModel):
     intent: str | None = Field(default=None, description="意图标签")
 
 
-@router.post("/feedback")
+@router.post("/feedback", summary="提交对话反馈")
 async def submit_feedback(
     body: FeedbackRequestBody,
     user_id: str = "anonymous",
@@ -353,7 +353,7 @@ async def submit_feedback(
     return {"status": "ok", "message": "反馈已提交"}
 
 
-@router.get("/feedback/stats")
+@router.get("/feedback/stats", summary="查询反馈统计")
 async def get_feedback_stats(date: str | None = None) -> dict:
     """查询反馈统计"""
     from agent.core.feedback import get_feedback_service
@@ -363,7 +363,7 @@ async def get_feedback_stats(date: str | None = None) -> dict:
     return stats.model_dump()
 
 
-@router.get("/feedback/stats/{agent_name}")
+@router.get("/feedback/stats/{agent_name}", summary="查询指定Agent反馈统计")
 async def get_agent_feedback_stats(agent_name: str, date: str | None = None) -> dict:
     """查询指定 Agent 的反馈统计"""
     from agent.core.feedback import get_feedback_service

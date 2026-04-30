@@ -88,6 +88,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '../../stores/auth'
 import { sessionApi, type SessionInfo } from '../../api/session'
 
@@ -106,7 +107,7 @@ function formatTime(t: string) {
 async function refreshSessions() {
   loading.value = true
   try {
-    const { data } = await sessionApi.listUserSessions(authStore.userId)
+    const data = await sessionApi.listUserSessions(authStore.userId)
     sessions.value = data.sessions || data || []
   } catch {
     sessions.value = []
@@ -119,7 +120,7 @@ async function viewHistory(sessionId: string) {
   showHistory.value = true
   historyLoading.value = true
   try {
-    const { data } = await sessionApi.getHistory(sessionId)
+    const data = await sessionApi.getHistory(sessionId)
     historyMessages.value = data.messages || []
   } catch {
     historyMessages.value = []
@@ -132,15 +133,23 @@ async function archiveSession(sessionId: string) {
   try {
     await sessionApi.archive(sessionId)
     refreshSessions()
-  } catch { /* ignore */ }
+  } catch {
+    ElMessage.error('归档会话失败')
+  }
 }
 
 async function deleteSession(sessionId: string) {
-  if (!confirm('确认删除此会话?')) return
+  try {
+    await ElMessageBox.confirm('确认删除此会话?', '删除确认', { type: 'warning' })
+  } catch {
+    return
+  }
   try {
     await sessionApi.delete(sessionId)
     refreshSessions()
-  } catch { /* ignore */ }
+  } catch {
+    ElMessage.error('删除会话失败')
+  }
 }
 
 onMounted(refreshSessions)

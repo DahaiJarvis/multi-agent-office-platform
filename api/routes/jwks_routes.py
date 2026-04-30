@@ -83,7 +83,7 @@ def _rsa_public_key_to_jwk(public_key_pem: str, kid: str = "key-1") -> dict[str,
         raise ValueError(f"RSA 公钥格式无效: {str(e)}")
 
 
-@router.get("/.well-known/openid-configuration")
+@router.get("/.well-known/openid-configuration", summary="OIDC发现端点")
 async def openid_configuration() -> dict[str, Any]:
     """OIDC 发现端点
 
@@ -119,7 +119,7 @@ async def openid_configuration() -> dict[str, Any]:
     }
 
 
-@router.get("/.well-known/jwks.json")
+@router.get("/.well-known/jwks.json", summary="JWKS公钥端点")
 async def jwks_json() -> JSONResponse:
     """JWKS 公钥端点
 

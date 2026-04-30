@@ -49,7 +49,7 @@ class RateTemplateRequest(BaseModel):
     rating: float = Field(ge=1.0, le=5.0)
 
 
-@router.get("", response_model=list[PromptTemplate])
+@router.get("", response_model=list[PromptTemplate], summary="列出Prompt模板")
 async def api_list_templates(
     category: PromptCategory | None = None,
     keyword: str = Query(default=""),
@@ -62,7 +62,7 @@ async def api_list_templates(
     return list_templates(category=category, tags=tag_list, keyword=keyword, limit=limit, offset=offset)
 
 
-@router.get("/recommend", response_model=list[PromptTemplate])
+@router.get("/recommend", response_model=list[PromptTemplate], summary="推荐Prompt模板")
 async def api_recommend_templates(
     query: str = Query(..., min_length=1),
     limit: int = Query(default=5, ge=1, le=20),
@@ -71,7 +71,7 @@ async def api_recommend_templates(
     return recommend_templates(query, limit)
 
 
-@router.get("/categories")
+@router.get("/categories", summary="列出Prompt分类")
 async def api_list_categories() -> dict:
     """列出模板分类"""
     return {
@@ -90,7 +90,7 @@ async def api_list_categories() -> dict:
     }
 
 
-@router.get("/{template_id}", response_model=PromptTemplate)
+@router.get("/{template_id}", response_model=PromptTemplate, summary="获取Prompt模板详情")
 async def api_get_template(template_id: str) -> PromptTemplate:
     """获取模板详情"""
     tpl = get_template(template_id)
@@ -100,7 +100,7 @@ async def api_get_template(template_id: str) -> PromptTemplate:
     return tpl
 
 
-@router.post("", response_model=PromptTemplate)
+@router.post("", response_model=PromptTemplate, summary="创建Prompt模板")
 async def api_create_template(request: CreateTemplateRequest) -> PromptTemplate:
     """创建 Prompt 模板"""
     template = PromptTemplate(
@@ -115,7 +115,7 @@ async def api_create_template(request: CreateTemplateRequest) -> PromptTemplate:
     return create_template(template)
 
 
-@router.put("/{template_id}", response_model=PromptTemplate)
+@router.put("/{template_id}", response_model=PromptTemplate, summary="更新Prompt模板")
 async def api_update_template(template_id: str, request: CreateTemplateRequest) -> PromptTemplate:
     """更新模板"""
     result = update_template(template_id, request.model_dump(exclude_unset=True))
@@ -125,7 +125,7 @@ async def api_update_template(template_id: str, request: CreateTemplateRequest) 
     return result
 
 
-@router.delete("/{template_id}")
+@router.delete("/{template_id}", summary="删除Prompt模板")
 async def api_delete_template(template_id: str) -> dict:
     """删除模板"""
     success = delete_template(template_id)
@@ -135,7 +135,7 @@ async def api_delete_template(template_id: str) -> dict:
     return {"status": "ok"}
 
 
-@router.post("/{template_id}/render", response_model=PromptExecution)
+@router.post("/{template_id}/render", response_model=PromptExecution, summary="渲染Prompt模板")
 async def api_render_template(template_id: str, request: RenderTemplateRequest) -> PromptExecution:
     """渲染模板"""
     result = render_template(template_id, request.variables)
@@ -145,7 +145,7 @@ async def api_render_template(template_id: str, request: RenderTemplateRequest) 
     return result
 
 
-@router.post("/{template_id}/rate", response_model=PromptTemplate)
+@router.post("/{template_id}/rate", response_model=PromptTemplate, summary="评价Prompt模板")
 async def api_rate_template(template_id: str, request: RateTemplateRequest) -> PromptTemplate:
     """为模板评分"""
     result = rate_template(template_id, request.rating)

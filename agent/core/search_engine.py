@@ -93,8 +93,75 @@ class BaseSearchAdapter:
     def source_type(self) -> DataSource:
         raise NotImplementedError
 
+    @property
+    def adapter_name(self) -> str:
+        """MCP 适配器名称，子类可覆盖"""
+        return ""
+
+    @property
+    def title_field(self) -> str:
+        """结果中的标题字段名"""
+        return "title"
+
+    @property
+    def content_field(self) -> str:
+        """结果中的内容字段名"""
+        return "content"
+
     async def search(self, request: SearchRequest) -> list[SearchHit]:
         raise NotImplementedError
+
+    async def _mcp_search(self, request: SearchRequest) -> list[SearchHit]:
+        """通用 MCP 适配器搜索逻辑
+
+        通过 MCP 适配器发送搜索请求并解析结果，消除各数据源适配器的重复代码。
+        子类只需定义 adapter_name、title_field、content_field 即可复用。
+
+        Args:
+            request: 搜索请求
+
+        Returns:
+            搜索结果列表
+        """
+        try:
+            from agent.adapters.mcp_adapters import get_adapter
+            adapter = get_adapter(self.adapter_name)
+            if not adapter:
+                return []
+
+            resp = await adapter._request("GET", "/api/search", params={
+                "q": request.query,
+                "limit": request.limit,
+                "user_id": request.user_id,
+            })
+            if not resp.success:
+                return []
+
+            return self._parse_results(resp.data.get("results", []))
+        except Exception as e:
+            logger.debug("%s 搜索适配器异常: %s", self.source_type.value, e)
+            return []
+
+    def _parse_results(self, items: list[dict[str, Any]]) -> list[SearchHit]:
+        """解析搜索结果
+
+        Args:
+            items: 原始结果列表
+
+        Returns:
+            SearchHit 列表
+        """
+        hits = []
+        for item in items:
+            hits.append(SearchHit(
+                source=self.source_type,
+                title=item.get(self.title_field, ""),
+                content=item.get(self.content_field, "")[:500],
+                url=item.get("url", ""),
+                score=item.get("score", 0.5),
+                highlights=item.get("highlights", []),
+            ))
+        return hits
 
 
 class DocumentSearchAdapter(BaseSearchAdapter):
@@ -104,35 +171,12 @@ class DocumentSearchAdapter(BaseSearchAdapter):
     def source_type(self) -> DataSource:
         return DataSource.DOCUMENTS
 
+    @property
+    def adapter_name(self) -> str:
+        return "doc"
+
     async def search(self, request: SearchRequest) -> list[SearchHit]:
-        try:
-            from agent.adapters.mcp_adapters import get_adapter
-            doc_adapter = get_adapter("doc")
-            if not doc_adapter:
-                return []
-
-            resp = await doc_adapter._request("GET", "/api/search", params={
-                "q": request.query,
-                "limit": request.limit,
-                "user_id": request.user_id,
-            })
-            if not resp.success:
-                return []
-
-            hits = []
-            for item in resp.data.get("results", []):
-                hits.append(SearchHit(
-                    source=self.source_type,
-                    title=item.get("title", ""),
-                    content=item.get("content", "")[:500],
-                    url=item.get("url", ""),
-                    score=item.get("score", 0.5),
-                    highlights=item.get("highlights", []),
-                ))
-            return hits
-        except Exception as e:
-            logger.debug("文档搜索适配器异常: %s", e)
-            return []
+        return await self._mcp_search(request)
 
 
 class OASearchAdapter(BaseSearchAdapter):
@@ -142,34 +186,12 @@ class OASearchAdapter(BaseSearchAdapter):
     def source_type(self) -> DataSource:
         return DataSource.OA
 
+    @property
+    def adapter_name(self) -> str:
+        return "oa"
+
     async def search(self, request: SearchRequest) -> list[SearchHit]:
-        try:
-            from agent.adapters.mcp_adapters import get_adapter
-            oa_adapter = get_adapter("oa")
-            if not oa_adapter:
-                return []
-
-            resp = await oa_adapter._request("GET", "/api/search", params={
-                "q": request.query,
-                "limit": request.limit,
-                "user_id": request.user_id,
-            })
-            if not resp.success:
-                return []
-
-            hits = []
-            for item in resp.data.get("results", []):
-                hits.append(SearchHit(
-                    source=self.source_type,
-                    title=item.get("title", ""),
-                    content=item.get("content", "")[:500],
-                    url=item.get("url", ""),
-                    score=item.get("score", 0.5),
-                ))
-            return hits
-        except Exception as e:
-            logger.debug("OA 搜索适配器异常: %s", e)
-            return []
+        return await self._mcp_search(request)
 
 
 class EmailSearchAdapter(BaseSearchAdapter):
@@ -178,6 +200,18 @@ class EmailSearchAdapter(BaseSearchAdapter):
     @property
     def source_type(self) -> DataSource:
         return DataSource.EMAIL
+
+    @property
+    def adapter_name(self) -> str:
+        return "email"
+
+    @property
+    def title_field(self) -> str:
+        return "subject"
+
+    @property
+    def content_field(self) -> str:
+        return "body"
 
     async def search(self, request: SearchRequest) -> list[SearchHit]:
         try:
@@ -194,16 +228,8 @@ class EmailSearchAdapter(BaseSearchAdapter):
             if not resp.success:
                 return []
 
-            hits = []
-            for item in resp.data.get("results", resp.data if isinstance(resp.data, list) else []):
-                if isinstance(item, dict):
-                    hits.append(SearchHit(
-                        source=self.source_type,
-                        title=item.get("subject", item.get("title", "")),
-                        content=item.get("body", item.get("content", ""))[:500],
-                        score=item.get("score", 0.5),
-                    ))
-            return hits
+            items = resp.data.get("results", resp.data if isinstance(resp.data, list) else [])
+            return self._parse_results([i for i in items if isinstance(i, dict)])
         except Exception as e:
             logger.debug("邮件搜索适配器异常: %s", e)
             return []
@@ -216,33 +242,16 @@ class CalendarSearchAdapter(BaseSearchAdapter):
     def source_type(self) -> DataSource:
         return DataSource.CALENDAR
 
+    @property
+    def adapter_name(self) -> str:
+        return "calendar"
+
+    @property
+    def content_field(self) -> str:
+        return "description"
+
     async def search(self, request: SearchRequest) -> list[SearchHit]:
-        try:
-            from agent.adapters.mcp_adapters import get_adapter
-            cal_adapter = get_adapter("calendar")
-            if not cal_adapter:
-                return []
-
-            resp = await cal_adapter._request("GET", "/api/search", params={
-                "q": request.query,
-                "limit": request.limit,
-                "user_id": request.user_id,
-            })
-            if not resp.success:
-                return []
-
-            hits = []
-            for item in resp.data.get("results", []):
-                hits.append(SearchHit(
-                    source=self.source_type,
-                    title=item.get("title", ""),
-                    content=item.get("description", "")[:500],
-                    score=item.get("score", 0.5),
-                ))
-            return hits
-        except Exception as e:
-            logger.debug("日历搜索适配器异常: %s", e)
-            return []
+        return await self._mcp_search(request)
 
 
 class CRMSearchAdapter(BaseSearchAdapter):
@@ -252,33 +261,20 @@ class CRMSearchAdapter(BaseSearchAdapter):
     def source_type(self) -> DataSource:
         return DataSource.CRM
 
+    @property
+    def adapter_name(self) -> str:
+        return "crm"
+
+    @property
+    def title_field(self) -> str:
+        return "name"
+
+    @property
+    def content_field(self) -> str:
+        return "description"
+
     async def search(self, request: SearchRequest) -> list[SearchHit]:
-        try:
-            from agent.adapters.mcp_adapters import get_adapter
-            crm_adapter = get_adapter("crm")
-            if not crm_adapter:
-                return []
-
-            resp = await crm_adapter._request("GET", "/api/search", params={
-                "q": request.query,
-                "limit": request.limit,
-                "user_id": request.user_id,
-            })
-            if not resp.success:
-                return []
-
-            hits = []
-            for item in resp.data.get("results", []):
-                hits.append(SearchHit(
-                    source=self.source_type,
-                    title=item.get("name", item.get("title", "")),
-                    content=item.get("description", "")[:500],
-                    score=item.get("score", 0.5),
-                ))
-            return hits
-        except Exception as e:
-            logger.debug("CRM 搜索适配器异常: %s", e)
-            return []
+        return await self._mcp_search(request)
 
 
 # ==================== 搜索引擎 ====================
@@ -304,6 +300,10 @@ async def enterprise_search(request: SearchRequest) -> SearchResponse:
     """执行企业搜索
 
     联邦搜索策略：并行查询多个数据源，合并排序返回。
+    根据搜索类型选择不同的搜索方式：
+      - KEYWORD: 仅关键词搜索
+      - SEMANTIC: 仅语义搜索（基于向量嵌入）
+      - HYBRID: 关键词 + 语义搜索融合，取并集后按混合分数排序
 
     Args:
         request: 搜索请求
@@ -320,13 +320,18 @@ async def enterprise_search(request: SearchRequest) -> SearchResponse:
     else:
         active_adapters = [a for a in _adapters if a.source_type in sources]
 
-    tasks = [adapter.search(request) for adapter in active_adapters]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    all_hits: list[SearchHit] = []
-    for result in results:
-        if isinstance(result, list):
-            all_hits.extend(result)
+    if request.search_type == SearchType.KEYWORD:
+        all_hits = await _keyword_search(active_adapters, request)
+    elif request.search_type == SearchType.SEMANTIC:
+        all_hits = await _semantic_search(active_adapters, request)
+    elif request.search_type == SearchType.HYBRID:
+        keyword_hits, semantic_hits = await asyncio.gather(
+            _keyword_search(active_adapters, request),
+            _semantic_search(active_adapters, request),
+        )
+        all_hits = _merge_hybrid_results(keyword_hits, semantic_hits)
+    else:
+        all_hits = await _keyword_search(active_adapters, request)
 
     all_hits.sort(key=lambda h: h.score, reverse=True)
 
@@ -348,6 +353,151 @@ async def enterprise_search(request: SearchRequest) -> SearchResponse:
         suggestions=suggestions,
         facets=facets,
     )
+
+
+async def _keyword_search(
+    adapters: list[BaseSearchAdapter],
+    request: SearchRequest,
+) -> list[SearchHit]:
+    """关键词搜索：通过 MCP 适配器查询各数据源"""
+    tasks = [adapter.search(request) for adapter in adapters]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    hits: list[SearchHit] = []
+    for result in results:
+        if isinstance(result, list):
+            hits.extend(result)
+    return hits
+
+
+async def _semantic_search(
+    adapters: list[BaseSearchAdapter],
+    request: SearchRequest,
+) -> list[SearchHit]:
+    """语义搜索：基于向量嵌入的相似度搜索
+
+    通过 LLM 生成查询向量，然后在各数据源中执行向量相似度检索。
+    如果数据源不支持语义搜索，则回退到关键词搜索并降低权重。
+    """
+    query_embedding = await _get_query_embedding(request.query)
+    if not query_embedding:
+        return []
+
+    tasks = [_semantic_adapter_search(adapter, request, query_embedding) for adapter in adapters]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    hits: list[SearchHit] = []
+    for result in results:
+        if isinstance(result, list):
+            hits.extend(result)
+    return hits
+
+
+async def _semantic_adapter_search(
+    adapter: BaseSearchAdapter,
+    request: SearchRequest,
+    query_embedding: list[float],
+) -> list[SearchHit]:
+    """对单个适配器执行语义搜索
+
+    优先使用数据源的向量搜索接口，不支持时回退到关键词搜索并降权。
+    """
+    try:
+        from agent.adapters.mcp_adapters import get_adapter
+        mcp_adapter = get_adapter(adapter.adapter_name)
+        if not mcp_adapter:
+            return []
+
+        resp = await mcp_adapter._request("POST", "/api/search/semantic", json={
+            "query": request.query,
+            "query_embedding": query_embedding,
+            "limit": request.limit,
+            "user_id": request.user_id,
+        })
+        if resp.success:
+            return adapter._parse_results(resp.data.get("results", []))
+    except Exception:
+        pass
+
+    fallback_hits = await adapter.search(request)
+    for hit in fallback_hits:
+        hit.score *= 0.6
+    return fallback_hits
+
+
+async def _get_query_embedding(query: str) -> list[float]:
+    """获取查询文本的向量嵌入
+
+    通过配置的 LLM 嵌入模型生成查询向量。
+    """
+    try:
+        from agent.core.config import get_settings
+        settings = get_settings()
+
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                settings.embedding_api_url,
+                json={"input": query, "model": settings.embedding_model},
+                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("data", [{}])[0].get("embedding", [])
+    except Exception as e:
+        logger.debug("获取查询嵌入失败: %s", e)
+    return []
+
+
+def _merge_hybrid_results(
+    keyword_hits: list[SearchHit],
+    semantic_hits: list[SearchHit],
+) -> list[SearchHit]:
+    """融合关键词搜索和语义搜索结果
+
+    使用 Reciprocal Rank Fusion (RRF) 算法合并两路结果，
+    对同一文档取较高分数，避免重复。
+
+    Args:
+        keyword_hits: 关键词搜索结果
+        semantic_hits: 语义搜索结果
+
+    Returns:
+        合并后的结果列表
+    """
+    KEYWORD_WEIGHT = 0.5
+    SEMANTIC_WEIGHT = 0.5
+    RRF_K = 60
+
+    score_map: dict[str, float] = {}
+    hit_map: dict[str, SearchHit] = {}
+
+    for rank, hit in enumerate(sorted(keyword_hits, key=lambda h: h.score, reverse=True)):
+        key = f"{hit.source.value}:{hit.url or hit.title}"
+        rrf_score = KEYWORD_WEIGHT / (RRF_K + rank + 1)
+        score_map[key] = score_map.get(key, 0) + rrf_score
+        hit_map[key] = hit
+
+    for rank, hit in enumerate(sorted(semantic_hits, key=lambda h: h.score, reverse=True)):
+        key = f"{hit.source.value}:{hit.url or hit.title}"
+        rrf_score = SEMANTIC_WEIGHT / (RRF_K + rank + 1)
+        score_map[key] = score_map.get(key, 0) + rrf_score
+        if key not in hit_map:
+            hit_map[key] = hit
+
+    merged: list[SearchHit] = []
+    for key, hit in hit_map.items():
+        merged.append(SearchHit(
+            source=hit.source,
+            title=hit.title,
+            content=hit.content,
+            url=hit.url,
+            score=score_map[key],
+            highlights=hit.highlights,
+            metadata=hit.metadata,
+        ))
+
+    return merged
 
 
 def _compute_facets(hits: list[SearchHit]) -> dict[str, list[dict]]:

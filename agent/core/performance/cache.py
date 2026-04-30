@@ -91,14 +91,10 @@ class RedisCache:
     async def _get_client(self) -> Any:
         if self._client is None:
             try:
-                import redis.asyncio as aioredis
-
-                self._client = aioredis.from_url(
-                    self._redis_url or "redis://localhost:6379/0",
-                    decode_responses=True,
-                )
-            except ImportError:
-                logger.warning("redis 异步库未安装，L2 缓存不可用")
+                from agent.core.redis_manager import get_redis_client
+                self._client = await get_redis_client()
+            except Exception:
+                logger.warning("Redis 连接获取失败，L2 缓存不可用")
                 return None
         return self._client
 
