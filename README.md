@@ -1,66 +1,158 @@
-# 标准启动
-./scripts/start.sh
+# 企业级多Agent办公平台
 
-# 跳过 MCP 端口检查
-SKIP_MCP_PORTS=true ./scripts/start.sh
+基于 AutoGen 多Agent编排与 MCP 协议，将自然语言指令自动路由至9大企业业务系统并完成操作执行，实现"说一句话，办所有事"的AI原生办公自动化。
 
-# 自定义 API 端口
-API_PORT=9000 ./scripts/start.sh
+## 技术栈
 
+- **AI 编排**: AutoGen + 通义千问（多Agent编排与意图路由）
+- **工具协议**: MCP Protocol（Agent与工具层解耦）
+- **后端服务**: FastAPI + Pydantic（后端API与数据校验）
+- **可观测性**: OpenTelemetry + Langfuse（AI调用链追踪与质量评估）
+- **韧性保障**: Circuit Breaker + 降级策略（LLM调用链路容错）
+- **安全认证**: OIDC + PyJWT（企业SSO集成与跨系统认证）
+- **前端交互**: Vue3 + Pinia（前端交互与状态管理）
 
-## 项目访问与使用指南
+## 项目架构
 
-### 一、环境准备
+```
+┌─────────────────────────────────────────────────────┐
+│  前端 (Vue3 + Vite + TypeScript)                     │
+├─────────────────────────────────────────────────────┤
+│  API 网关 (Nginx → FastAPI + Uvicorn)               │
+├─────────────────────────────────────────────────────┤
+│  Agent 编排层 (AutoGen + MCP)                        │
+│  意图分类 → Agent路由 → 工具调用 → 结果聚合           │
+├─────────────────────────────────────────────────────┤
+│  MCP 服务层 (9个领域服务)                             │
+│  OA / 邮件 / 日历 / CRM / IM / 文档 / HR / 财务 / 知识库 │
+├─────────────────────────────────────────────────────┤
+│  基础设施 (PostgreSQL 16 / Redis 7 / K8s)            │
+├─────────────────────────────────────────────────────┤
+│  可观测性 (OpenTelemetry + Prometheus + Langfuse)     │
+├─────────────────────────────────────────────────────┤
+│  安全 (OIDC/SSO + AES-256 + PII检测 + 数据驻留)      │
+├─────────────────────────────────────────────────────┤
+│  韧性 (Circuit Breaker + 降级 + 多区域灾备)           │
+└─────────────────────────────────────────────────────┘
+```
 
-**1. 安装依赖**
+## 核心模块
+
+| 模块 | 路径 | 说明 |
+|------|------|------|
+| Agent 编排 | `agent/` | 意图分类、Agent路由、多Agent协作、熔断器、会话管理 |
+| API 服务 | `api/` | FastAPI 路由、中间件（认证/限流/CSRF/追踪）、数据模型 |
+| MCP 服务 | `mcp_servers/` | 9个领域MCP服务 + 注册中心 |
+| 安全模块 | `security/` | 认证/SSO/加密/PII检测/注入检测/审计/合规/数据驻留/多租户 |
+| 可观测性 | `observability/` | Prometheus指标、OpenTelemetry追踪、Langfuse、结构化日志 |
+| 部署配置 | `deploy/` | Docker/K8s清单、Nginx、Prometheus/Grafana、灰度发布、高可用 |
+| 前端 | `frontend/` | Vue3 SPA、对话界面、管理后台 |
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.11+
+- Node.js 20+
+- Redis 7+
+- PostgreSQL 16+
+- Docker（可选，用于运行基础设施）
+
+### 1. 初始化项目
+
 ```bash
 ./scripts/setup.sh
 ```
 
-**2. 启动基础设施**（Redis + PostgreSQL）
+该脚本会自动创建虚拟环境、安装依赖、生成 `.env` 配置文件。
+
+### 2. 启动基础设施
+
 ```bash
+# Redis
 docker run -d -p 6379:6379 redis:7-alpine
+
+# PostgreSQL
 docker run -d -p 5432:5432 \
   -e POSTGRES_DB=agent_platform \
   -e POSTGRES_PASSWORD=postgres \
   postgres:16-alpine
 ```
 
-**3. 配置 `.env`**
+### 3. 配置环境变量
+
 ```bash
 cp .env.example .env
-# 编辑 .env，至少填入 DASHSCOPE_API_KEY（通义千问 API Key）
 ```
 
-**4. 启动应用**
+编辑 `.env`，至少填入以下配置：
+
 ```bash
+# 必填: 通义千问 API Key
+DASHSCOPE_API_KEY=sk-your-dashscope-api-key
+
+# 数据库密码（与 Docker 启动参数一致）
+POSTGRES_PASSWORD=postgres
+```
+
+### 4. 启动应用
+
+```bash
+# 标准启动（后端 + 前端）
+./scripts/start.sh
+
+# 跳过 MCP 端口检查
 SKIP_MCP_PORTS=true ./scripts/start.sh
+
+# 跳过前端启动
+SKIP_FRONTEND=true ./scripts/start.sh
+
+# 自定义 API 端口
+API_PORT=9000 ./scripts/start.sh
 ```
 
-服务启动后访问 **http://localhost:8000**
+启动成功后：
 
----
+| 服务 | 地址 |
+|------|------|
+| 前端界面 | http://localhost:3000 |
+| API 服务 | http://localhost:8000 |
+| Swagger 文档 | http://localhost:8000/docs |
 
-### 二、API 接口总览
+### Docker Compose 一键启动
 
-所有接口前缀为 `/api/v1`，Swagger 文档：**http://localhost:8000/docs**
-
-#### 1. 认证 `/api/v1/auth`
-
-| 方法 | 路径 | 说明 | 是否需要Token |
-|------|------|------|:---:|
-| POST | `/auth/login` | 用户登录 | 否 |
-| POST | `/auth/logout` | 用户登出 | 是 |
-| POST | `/auth/refresh` | 刷新令牌 | 否 |
-
-**登录示例：**
 ```bash
+cd deploy/docker
+docker compose up -d
+```
+
+## 内置测试账号
+
+| 用户ID | 密码 | 角色 | 部门 |
+|--------|------|------|------|
+| admin001 | admin123 | admin | 技术部 |
+| mgr001 | mgr123 | manager | 产品部 |
+| hr001 | hr123 | hr_specialist | 人力资源部 |
+| fin001 | fin123 | finance | 财务部 |
+| emp001 | emp123 | employee | 运营部 |
+
+> 测试账号在首次启动时自动写入数据库，密码使用 bcrypt 哈希存储。
+
+## API 接口
+
+所有接口前缀为 `/api/v1`，完整文档见 Swagger UI。
+
+### 认证
+
+```bash
+# 登录
 curl -X POST http://localhost:8000/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"user_id": "admin001", "password": "admin123"}'
 ```
 
 返回：
+
 ```json
 {
   "access_token": "eyJ...",
@@ -72,153 +164,132 @@ curl -X POST http://localhost:8000/api/v1/auth/login \
 }
 ```
 
-**内置测试账号：**
+### Agent 对话
 
-| 用户ID | 密码 | 角色 |
-|--------|------|------|
-| admin001 | admin123 | admin |
-| mgr001 | mgr123 | manager |
-| hr001 | hr123 | hr_specialist |
-| fin001 | fin123 | finance |
-| emp001 | emp123 | employee |
-
-#### 2. Agent 对话 `/api/v1/agent`
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/agent/chat` | 同步对话（等完整响应） |
-| POST | `/agent/chat/stream` | 流式对话（SSE 逐Token推送） |
-| POST | `/agent/feedback` | 提交反馈（点赞/点踩） |
-| GET | `/agent/feedback/stats` | 反馈统计 |
-| GET | `/agent/feedback/stats/{agent}` | 指定Agent反馈统计 |
-
-**同步对话示例：**
 ```bash
 TOKEN="你的access_token"
 
+# 同步对话
 curl -X POST http://localhost:8000/api/v1/agent/chat \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{
-    "message": "帮我查一下张三的客户信息",
-    "user_id": "admin001"
-  }'
-```
+  -d '{"message": "查看我的待审批列表", "user_id": "admin001"}'
 
-返回：
-```json
-{
-  "session_id": "sess-xxx",
-  "message": "已为您查询到张三的客户信息...",
-  "agent_name": "CRM Agent",
-  "intent": "crm_query",
-  "collaboration_mode": "DIRECT"
-}
-```
-
-**流式对话示例：**
-```bash
+# 流式对话（SSE）
 curl -N http://localhost:8000/api/v1/agent/chat/stream \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{
-    "message": "帮我查一下张三的客户信息",
-    "user_id": "admin001"
-  }'
-```
+  -d '{"message": "查看我的待审批列表", "user_id": "admin001"}'
 
-SSE 逐事件推送：
-```
-data: {"event": "session_id", "data": "sess-xxx"}
-data: {"event": "intent", "data": "{\"intent\":\"crm_query\",\"confidence\":0.92,\"agent\":\"CRM Agent\",\"mode\":\"DIRECT\"}"}
-data: {"event": "chunk", "data": "已"}
-data: {"event": "chunk", "data": "为"}
-data: {"event": "chunk", "data": "您"}
-...
-data: {"event": "status", "data": "completed"}
-```
-
-**多轮对话**（传入 session_id 继续）：
-```bash
+# 多轮对话（传入 session_id）
 curl -X POST http://localhost:8000/api/v1/agent/chat \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{
-    "message": "再看看他的商机进展",
-    "session_id": "sess-xxx",
-    "user_id": "admin001"
-  }'
+  -d '{"message": "再看看他的商机进展", "session_id": "sess-xxx", "user_id": "admin001"}'
 ```
 
-#### 3. 会话管理 `/api/v1/session`
+### 接口总览
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/session/create` | 创建会话 |
-| GET | `/session/{id}` | 获取会话信息 |
-| GET | `/session/{id}/history` | 获取消息历史 |
-| POST | `/session/{id}/archive` | 归档到L3长期存储 |
-| GET | `/session/user/{uid}/history` | 查询用户归档会话 |
-| DELETE | `/session/{id}` | 删除会话 |
+| 模块 | 路径前缀 | 说明 |
+|------|---------|------|
+| 认证 | `/api/v1/auth` | 登录/登出/刷新令牌 |
+| Agent 对话 | `/api/v1/agent` | 同步/流式对话、反馈 |
+| 会话管理 | `/api/v1/session` | 创建/查询/归档/删除 |
+| 系统管理 | `/api/v1/admin` | 健康检查/灰度/审计/指标 |
+| 审批流程 | `/api/v1/approval` | 审批操作与查询 |
+| 工作流 | `/api/v1/workflow` | 工作流定义与执行 |
+| 插件管理 | `/api/v1/plugin` | 插件注册与配置 |
+| 知识库 | `/api/v1/knowledge` | 知识库代理（IDA） |
+| 多租户 | `/api/v1/tenant` | 租户管理 |
+| 合规 | `/api/v1/compliance` | 合规审计 |
+| Prometheus | `/metrics` | 监控指标 |
 
-#### 4. 系统管理 `/api/v1/admin`
+## 部署
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/admin/health` | 基础健康检查 |
-| GET | `/admin/health/detail` | 深度健康检查 |
-| GET | `/admin/mcp/status` | MCP服务状态 |
-| GET | `/admin/failover/status` | 故障转移状态 |
-| GET | `/admin/canary/flags` | 灰度功能开关 |
-| POST | `/admin/canary/rollout` | 更新灰度比例 |
-| POST | `/admin/canary/whitelist` | 更新白名单 |
-| POST | `/admin/canary/toggle` | 启用/禁用功能 |
-| GET | `/admin/metrics/summary` | 运营指标汇总 |
-| GET | `/admin/token/usage/{uid}` | 用户Token用量 |
-| GET | `/admin/token/budget/{uid}` | Token预算检查 |
-| GET | `/admin/audit/logs` | 查询审计日志 |
-| POST | `/admin/audit/flush` | 刷新审计缓冲区 |
-
-**健康检查（无需Token）：**
-```bash
-curl http://localhost:8000/api/v1/admin/health
-```
-
-#### 5. Prometheus 指标
+### Kubernetes
 
 ```bash
-curl http://localhost:8000/metrics
+# 应用 K8s 清单
+kubectl apply -f deploy/k8s/configmap.yaml
+kubectl apply -f deploy/k8s/agent-deployment.yaml
+kubectl apply -f deploy/k8s/mcp-deployments.yaml
 ```
 
----
+### 监控
 
-### 三、典型使用流程
+```bash
+# Prometheus + Alertmanager
+kubectl apply -f deploy/monitoring/prometheus.yml
+kubectl apply -f deploy/monitoring/alert_rules.yml
 
-```
-1. 登录获取 Token
-   POST /auth/login  →  access_token
-
-2. 发起对话（新会话）
-   POST /agent/chat  { message, user_id }  →  session_id + 回复
-
-3. 多轮对话（继续会话）
-   POST /agent/chat  { message, session_id, user_id }  →  回复
-
-4. 查看历史
-   GET /session/{id}/history
-
-5. 归档会话
-   POST /session/{id}/archive
-
-6. 提交反馈
-   POST /agent/feedback  { session_id, message_index, feedback_type }
+# 导入 Grafana 仪表盘
+# Grafana → Dashboards → Import → 粘贴 deploy/monitoring/grafana_dashboard.json
 ```
 
-### 四、交互式文档
+## 项目结构
 
-启动后访问 FastAPI 自动生成的 Swagger UI：
+```
+multi-agent-office-platform/
+├── agent/                  # Agent 编排层
+│   ├── adapters/           # MCP 适配器
+│   ├── agents/             # Agent 实现（Supervisor/Domain/Reviewer）
+│   ├── core/               # 核心模块
+│   │   └── performance/    # 性能优化（缓存/连接池/语义缓存）
+│   ├── guardrails/         # 安全护栏
+│   └── teams/              # 多Agent协作与路由
+├── api/                    # API 服务层
+│   ├── middleware/          # 中间件（认证/限流/CSRF/追踪）
+│   ├── models/             # 请求/响应模型
+│   └── routes/             # 路由定义
+├── config/                 # 配置文件
+│   └── prompts/            # Prompt 模板（YAML）
+├── deploy/                 # 部署配置
+│   ├── docker/             # Dockerfile + docker-compose
+│   ├── k8s/                # Kubernetes 清单
+│   ├── monitoring/         # Prometheus/Grafana/告警规则
+│   └── nginx/              # Nginx 反向代理
+├── frontend/               # Vue3 前端
+│   └── src/                # 源码（views/stores/api/components）
+├── mcp_servers/            # MCP 领域服务
+├── observability/          # 可观测性（指标/追踪/日志）
+├── scripts/                # 运维脚本（启动/部署/健康检查）
+├── security/               # 安全模块
+└── tests/                  # 测试
+    ├── unit/               # 单元测试
+    ├── integration/        # 集成测试
+    ├── e2e/                # 端到端测试
+    ├── performance/        # 性能测试（Locust）
+    └── mocks/              # LLM Mock 客户端
+```
 
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+## 开发
 
-在 Swagger UI 中可直接调试所有接口，点击右上角 `Authorize` 输入 `Bearer <access_token>` 即可认证。
+### 代码质量
+
+```bash
+# 格式化
+ruff format .
+
+# Lint 检查
+ruff check .
+
+# 类型检查
+mypy --ignore-missing-imports api/ agent/ security/
+
+# 运行测试
+pytest tests/ -v --cov=api --cov=agent --cov=security
+```
+
+### 安全扫描
+
+```bash
+# 代码安全扫描
+bandit -r api/ agent/ security/ -ll
+
+# 依赖漏洞检查
+safety check -r requirements.txt
+
+# 密钥泄露检测
+detect-secrets scan --all-files
+```
+
