@@ -246,7 +246,7 @@ async function handleSend() {
   let agentName = ''
   let intent = ''
   let mode = ''
-
+  console.log("session_id", chatStore)
   agentApi.chatStreamFetch(
     {
       message: text,

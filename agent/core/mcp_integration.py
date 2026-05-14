@@ -5,11 +5,13 @@
 支持从 MCP Registry 动态发现服务，替代纯硬编码注册表。
 """
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from autogen_ext.tools.mcp import McpWorkbench, SseMcpToolAdapter, StdioMcpToolAdapter
+from autogen_ext.tools.mcp import SseServerParams, StdioServerParams, mcp_server_tools
 
 from agent.core.config import get_settings
 
@@ -90,7 +92,7 @@ MCP_SERVER_REGISTRY: dict[str, MCPServerConfig] = {
         name="knowledge-mcp-server",
         description="知识库 MCP 服务 - 由智能文档助手提供",
         transport="sse",
-        url="http://localhost:9100/sse",
+        url="http://localhost:9010/sse",
     ),
 }
 
@@ -109,7 +111,10 @@ AGENT_TOOL_BINDINGS: dict[str, list[str]] = {
 
 # 工具缓存
 _tool_cache: dict[str, list[Any]] = {}
-_workbench_cache: dict[str, McpWorkbench] = {}
+# 缓存过期时间戳（失败缓存 60s 后过期，允许重新尝试连接）
+_cache_expiry: dict[str, float] = {}
+_CACHE_TTL_SECONDS = 60
+_adapter_cache: dict[str, list[Any]] = {}
 
 # Registry 同步状态
 _registry_synced: bool = False
@@ -214,10 +219,35 @@ async def ensure_registry_synced() -> None:
         await discover_from_registry()
 
 
+async def _check_sse_endpoint(url: str, timeout: float = 3.0) -> bool:
+    """快速检测 SSE 端点是否可达
+
+    在正式建立 SSE 连接之前，先通过 HTTP 检测端点是否可访问。
+    避免对不可达的服务发起长时间 SSE 连接导致系统卡住。
+
+    Args:
+        url: SSE 端点 URL，如 http://localhost:9100/sse
+        timeout: 检测超时秒数
+
+    Returns:
+        True 表示端点可达，False 表示不可达
+    """
+    try:
+        import httpx
+
+        base_url = url.replace("/sse", "")
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(base_url)
+            return response.status_code < 500
+    except Exception:
+        return False
+
+
 async def load_mcp_tools(server_names: list[str]) -> list[Any]:
     """从指定的 MCP 服务加载工具列表
 
     加载前自动确保 Registry 已同步，使动态发现的服务可用。
+    连接失败的服务会被标记为不可用并缓存空结果，避免反复重试。
 
     Args:
         server_names: MCP 服务名称列表，如 ["oa", "email"]
@@ -231,21 +261,34 @@ async def load_mcp_tools(server_names: list[str]) -> list[Any]:
 
     for name in server_names:
         config = MCP_SERVER_REGISTRY.get(name)
-        if not config or not config.enabled:
-            logger.warning("MCP 服务 %s 未注册或已禁用，跳过", name)
+        if not config:
+            logger.warning("MCP 服务 %s 未注册，跳过", name)
             continue
 
+        # 检查缓存是否过期（失败缓存过期后允许重新尝试连接）
         if name in _tool_cache:
-            all_tools.extend(_tool_cache[name])
+            if name in _cache_expiry and time.time() >= _cache_expiry[name]:
+                _tool_cache.pop(name, None)
+                _cache_expiry.pop(name, None)
+                config.enabled = True
+            else:
+                all_tools.extend(_tool_cache[name])
+                continue
+
+        if not config.enabled:
+            logger.warning("MCP 服务 %s 已禁用，跳过", name)
             continue
 
         try:
             tools = await _connect_and_load(name, config)
             _tool_cache[name] = tools
+            _cache_expiry.pop(name, None)
             all_tools.extend(tools)
             logger.info("成功加载 MCP 服务 %s 的 %d 个工具", name, len(tools))
         except Exception as e:
             logger.error("加载 MCP 服务 %s 失败: %s", name, e)
+            _tool_cache[name] = []
+            _cache_expiry[name] = time.time() + _CACHE_TTL_SECONDS
 
     return all_tools
 
@@ -253,27 +296,52 @@ async def load_mcp_tools(server_names: list[str]) -> list[Any]:
 async def _connect_and_load(service_key: str, config: MCPServerConfig) -> list[Any]:
     """连接 MCP 服务并加载工具
 
+    使用 mcp_server_tools() 获取 AutoGen 兼容的工具适配器列表。
+    返回的 SseMcpToolAdapter / StdioMcpToolAdapter 可直接传给 AssistantAgent。
+
     对于 knowledge 服务，SSE 连接时传递 X-MCP-API-Key 请求头，
     以通过智能文档助手 MCP Server 的 MCPAuthMiddleware 认证。
+
+    连接前先进行 SSE 端点预检，避免对不可达服务发起长时间连接。
 
     Args:
         service_key: 服务标识，如 "knowledge"
         config: MCP 服务配置
+
+    Raises:
+        ConnectionError: SSE 端点不可达
+        TimeoutError: 连接或加载工具超时
     """
     settings = get_settings()
 
     if config.transport == "sse":
-        connect_kwargs: dict[str, Any] = {"url": config.url}
+        reachable = await _check_sse_endpoint(config.url)
+        if not reachable:
+            config.enabled = False
+            raise ConnectionError(f"MCP 服务 [{service_key}] SSE 端点不可达: {config.url}")
+
+        connect_kwargs: dict[str, Any] = {"url": config.url, "timeout": 5, "sse_read_timeout": 30}
         if service_key == "knowledge" and settings.mcp_api_key:
             connect_kwargs["headers"] = {"X-MCP-API-Key": settings.mcp_api_key}
-        workbench = McpWorkbench(SseMcpToolAdapter(**connect_kwargs))
+        server_params = SseServerParams(**connect_kwargs)
     else:
-        workbench = McpWorkbench(
-            StdioMcpToolAdapter(command=config.command, args=config.args, env=config.env)
-        )
+        server_params = StdioServerParams(command=config.command, args=config.args, env=config.env)
 
-    _workbench_cache[config.name] = workbench
-    tools = await workbench.list_tools()
+    try:
+        tools = await asyncio.wait_for(
+            mcp_server_tools(server_params),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        logger.error("MCP 服务 %s 连接超时（15s），标记为不可用", config.name)
+        config.enabled = False
+        raise TimeoutError(f"MCP 服务 [{service_key}] 连接超时，请确认服务是否正常运行")
+    except Exception as e:
+        logger.error("MCP 服务 %s 连接异常: %s，标记为不可用", config.name, e)
+        config.enabled = False
+        raise
+
+    _adapter_cache[config.name] = tools
     return tools
 
 
@@ -292,14 +360,16 @@ async def load_agent_tools(agent_name: str) -> list[Any]:
 
 async def close_all_connections() -> None:
     """关闭所有 MCP 连接"""
-    for name, workbench in _workbench_cache.items():
+    for name, adapters in _adapter_cache.items():
         try:
-            await workbench.close()
+            for adapter in adapters:
+                if hasattr(adapter, "close"):
+                    await adapter.close()
             logger.info("已关闭 MCP 服务 %s 的连接", name)
         except Exception as e:
             logger.error("关闭 MCP 服务 %s 连接失败: %s", name, e)
 
-    _workbench_cache.clear()
+    _adapter_cache.clear()
     _tool_cache.clear()
 
 
@@ -365,9 +435,9 @@ async def call_tool_with_timeout(
     session_id: str = "",
     agent_name: str = "",
 ) -> Any:
-    """带超时、重试、校验和溯源的工具调用
+    """带超时、重试、熔断、校验和溯源的工具调用
 
-    在 FunctionTool 的执行函数中包裹超时控制、重试逻辑、
+    在 FunctionTool 的执行函数中包裹超时控制、重试逻辑、熔断保护、
     响应校验和调用溯源。
 
     Args:
@@ -375,7 +445,7 @@ async def call_tool_with_timeout(
         tool_input: 工具输入参数
         timeout: 超时秒数（None 则使用配置默认值）
         max_retries: 最大重试次数（None 则使用配置默认值）
-        server_name: MCP 服务名（用于校验和溯源）
+        server_name: MCP 服务名（用于熔断、校验和溯源）
         tool_name: 工具名（用于校验和溯源）
         agent_name: 调用方 Agent 名称（用于溯源）
         session_id: 会话ID（用于溯源）
@@ -385,6 +455,7 @@ async def call_tool_with_timeout(
 
     Raises:
         TimeoutError: 工具调用超时
+        CircuitOpenError: 熔断器打开，服务不可用
         Exception: 重试耗尽后抛出最后一次异常
     """
     import asyncio
@@ -393,6 +464,21 @@ async def call_tool_with_timeout(
     timeout = timeout or settings.tool_execution_timeout
     max_retries = max_retries or settings.tool_max_retries
     backoff = settings.tool_retry_backoff
+
+    # 熔断器检查
+    circuit_breaker = None
+    if server_name:
+        try:
+            from agent.core.circuit_breaker import get_circuit_breaker, CircuitOpenError
+            circuit_breaker = get_circuit_breaker(f"mcp_{server_name}")
+            if not circuit_breaker.allow_request():
+                raise CircuitOpenError(
+                    f"mcp_{server_name}",
+                    circuit_breaker.config.recovery_timeout,
+                    f"MCP 服务 [{server_name}] 当前不可用，请稍后重试"
+                )
+        except Exception:
+            pass
 
     # 启动溯源
     trace_id = ""
@@ -438,6 +524,10 @@ async def call_tool_with_timeout(
                 except Exception:
                     pass
 
+            # 熔断器记录成功
+            if circuit_breaker:
+                circuit_breaker.record_success()
+
             # 结束溯源 - 成功
             if trace_id:
                 try:
@@ -472,6 +562,10 @@ async def call_tool_with_timeout(
         if attempt < max_retries:
             wait_time = backoff * (2 ** attempt)
             await asyncio.sleep(wait_time)
+
+    # 熔断器记录失败
+    if circuit_breaker:
+        circuit_breaker.record_failure()
 
     # 结束溯源 - 失败
     if trace_id:

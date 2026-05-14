@@ -1,12 +1,63 @@
 """高可用与灾备模块
 
-提供健康检查增强、故障转移、服务降级等高可用能力。
+================================================================================
+模块职责
+================================================================================
+提供系统高可用和灾备能力，包括：
+  - 增强健康检查：深度检查各组件状态
+  - 故障转移：自动检测故障并切换到备用实例
+  - 服务降级：多级降级策略，保障核心功能可用
+  - 灾备指标：RTO/RPO 监控
 
-核心能力:
-  - 增强健康检查: 深度检查各组件状态（Redis/PG/MCP/LLM）
-  - 故障转移: 自动检测故障并切换到备用实例
-  - 服务降级: 多级降级策略，保障核心功能可用
-  - 灾备指标: RTO/RPO 监控
+================================================================================
+健康检查能力
+================================================================================
+深度检查各组件状态，包括：
+  - Redis：连通性、响应时间
+  - PostgreSQL：连通性、查询响应
+  - MCP 注册中心：服务注册状态
+  - LLM 服务：API 可用性
+  - IDA 服务：智能文档助手可用性
+
+================================================================================
+健康状态分级
+================================================================================
+HEALTHY（健康）：
+  - 组件正常工作
+  - 响应时间在预期范围内
+
+DEGRADED（降级）：
+  - 组件部分功能不可用
+  - 响应时间超过阈值
+  - 依赖组件故障
+
+UNHEALTHY（不健康）：
+  - 组件完全不可用
+  - 需要触发故障转移
+
+================================================================================
+与其他模块的关系
+================================================================================
+- circuit_breaker.py: 熔断器状态影响健康检查结果
+- session_manager.py: Redis 故障时触发降级
+- multi_region.py: 区域故障时触发灾备切换
+
+================================================================================
+使用示例
+================================================================================
+    # 创建健康检查器
+    checker = HealthChecker()
+
+    # 检查单个组件
+    redis_health = await checker.check_redis()
+    print(f"Redis 状态: {redis_health.status}, 延迟: {redis_health.latency_ms}ms")
+
+    # 执行全量检查
+    result = await checker.full_check()
+    print(f"系统状态: {result['status']}")
+
+    # 启动后台检查
+    await checker.start_background_check()
 """
 
 import asyncio
@@ -20,7 +71,15 @@ logger = logging.getLogger(__name__)
 
 
 class HealthStatus(str, Enum):
-    """健康状态"""
+    """健康状态枚举
+
+    定义组件的三级健康状态。
+
+    Attributes:
+        HEALTHY: 健康，组件正常工作
+        DEGRADED: 降级，组件部分功能不可用
+        UNHEALTHY: 不健康，组件完全不可用
+    """
 
     HEALTHY = "healthy"
     DEGRADED = "degraded"
@@ -29,7 +88,18 @@ class HealthStatus(str, Enum):
 
 @dataclass
 class ComponentHealth:
-    """组件健康状态"""
+    """组件健康状态
+
+    记录单个组件的健康检查结果。
+
+    Attributes:
+        name: 组件名称
+        status: 健康状态
+        latency_ms: 响应延迟（毫秒）
+        error: 错误信息
+        last_check: 最后检查时间戳
+        metadata: 附加元数据
+    """
 
     name: str
     status: HealthStatus = HealthStatus.HEALTHY
@@ -43,6 +113,24 @@ class HealthChecker:
     """增强健康检查器
 
     深度检查各组件状态，包括连通性、响应时间、功能可用性。
+
+    核心方法：
+    -------------------------------------------------------------------------
+    check_redis(): 检查 Redis 连通性
+    check_postgres(): 检查 PostgreSQL 连通性
+    check_mcp_registry(): 检查 MCP 注册中心
+    check_llm(): 检查 LLM 服务可用性
+    check_ida(): 检查 IDA 服务可用性
+    full_check(): 执行全量健康检查
+    start_background_check(): 启动后台定期检查
+    -------------------------------------------------------------------------
+
+    使用示例：
+        checker = HealthChecker()
+        result = await checker.full_check()
+        if result["status"] == HealthStatus.UNHEALTHY:
+            # 触发告警
+            pass
     """
 
     def __init__(self) -> None:
@@ -51,7 +139,18 @@ class HealthChecker:
         self._running = False
 
     async def check_redis(self) -> ComponentHealth:
-        """检查 Redis 连通性"""
+        """检查 Redis 连通性
+
+        执行 PING 命令验证 Redis 连接。
+
+        检查内容：
+        - 连接是否成功
+        - PING 命令响应
+        - 响应延迟
+
+        Returns:
+            ComponentHealth 包含 Redis 健康状态
+        """
         health = ComponentHealth(name="redis", last_check=time.time())
         start = time.monotonic()
         try:
@@ -76,7 +175,18 @@ class HealthChecker:
         return health
 
     async def check_postgres(self) -> ComponentHealth:
-        """检查 PostgreSQL 连通性"""
+        """检查 PostgreSQL 连通性
+
+        执行简单查询验证数据库连接。
+
+        检查内容：
+        - 连接是否成功
+        - SELECT 1 查询响应
+        - 响应延迟
+
+        Returns:
+            ComponentHealth 包含 PostgreSQL 健康状态
+        """
         health = ComponentHealth(name="postgres", last_check=time.time())
         start = time.monotonic()
         try:
@@ -101,7 +211,18 @@ class HealthChecker:
         return health
 
     async def check_mcp_registry(self) -> ComponentHealth:
-        """检查 MCP 注册中心"""
+        """检查 MCP 注册中心
+
+        调用 MCP 注册中心健康检查端点。
+
+        检查内容：
+        - HTTP 连接是否成功
+        - 健康检查端点响应
+        - 已注册服务数量
+
+        Returns:
+            ComponentHealth 包含 MCP 注册中心健康状态
+        """
         health = ComponentHealth(name="mcp_registry", last_check=time.time())
         start = time.monotonic()
         try:
@@ -126,7 +247,18 @@ class HealthChecker:
         return health
 
     async def check_llm(self) -> ComponentHealth:
-        """检查 LLM 服务可用性"""
+        """检查 LLM 服务可用性
+
+        发送简单请求验证 LLM API 可用性。
+
+        检查内容：
+        - API 连接是否成功
+        - 模型响应是否正常
+        - 响应延迟
+
+        Returns:
+            ComponentHealth 包含 LLM 服务健康状态
+        """
         health = ComponentHealth(name="llm", last_check=time.time())
         start = time.monotonic()
         try:
@@ -152,7 +284,18 @@ class HealthChecker:
         return health
 
     async def check_ida(self) -> ComponentHealth:
-        """检查 IDA（智能文档助手）服务可用性"""
+        """检查 IDA（智能文档助手）服务可用性
+
+        调用 IDA 健康检查端点。
+
+        检查内容：
+        - HTTP 连接是否成功
+        - 健康检查端点响应
+        - 响应延迟
+
+        Returns:
+            ComponentHealth 包含 IDA 服务健康状态
+        """
         health = ComponentHealth(name="ida", last_check=time.time())
         start = time.monotonic()
         try:
@@ -178,7 +321,18 @@ class HealthChecker:
         return health
 
     async def full_check(self) -> dict[str, Any]:
-        """执行全量健康检查"""
+        """执行全量健康检查
+
+        并行检查所有组件，返回整体健康状态。
+
+        整体状态判断逻辑：
+        - 任一组件 UNHEALTHY -> 整体 UNHEALTHY
+        - 任一组件 DEGRADED -> 整体 DEGRADED
+        - 所有组件 HEALTHY -> 整体 HEALTHY
+
+        Returns:
+            包含整体状态和各组件状态的字典
+        """
         checks = await asyncio.gather(
             self.check_redis(),
             self.check_postgres(),

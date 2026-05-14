@@ -154,6 +154,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("智能文档助手兼容性检查失败（非致命）: %s", e)
 
+    # 探测 IDA REST API 路径前缀
+    try:
+        from api.routes.knowledge_proxy_routes import detect_ida_api_prefix
+        prefix = await detect_ida_api_prefix()
+        logger.info("IDA API 路径前缀: %s", prefix)
+    except Exception as e:
+        logger.warning("IDA API 路径前缀探测失败（非致命）: %s", e)
+
     # 初始化用户凭证存储（数据库持久化）
     try:
         from security.user_store import get_user_store

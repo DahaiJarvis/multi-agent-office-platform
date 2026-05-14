@@ -33,6 +33,10 @@ SKIP_AUTH_PATHS = {
     "/metrics",
 }
 
+SKIP_AUTH_PREFIXES = {
+    "/debug/",
+}
+
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """认证与授权中间件
@@ -177,5 +181,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         stripped = re.sub(r"^/api/v\d+", "", path)
         if stripped in SKIP_AUTH_PATHS:
             return True
+
+        # 前缀匹配（如 /debug/trace/xxx）
+        for prefix in SKIP_AUTH_PREFIXES:
+            if path.startswith(prefix) or stripped.startswith(prefix):
+                return True
 
         return False

@@ -1,23 +1,61 @@
 """SSO 企业身份集成
 
-支持 OAuth2.0 / OIDC 协议，可对接：
+================================================================================
+模块职责
+================================================================================
+提供企业级 SSO（单点登录）集成，支持多种身份提供商（IdP）：
   - Microsoft Entra ID (Azure AD)
   - Okta
   - 企业微信 (WeCom)
   - 钉钉 (DingTalk)
   - 飞书 (Feishu/Lark)
 
-架构设计：
+================================================================================
+架构设计
+================================================================================
+核心组件：
   - SSOProvider: 抽象基类，定义统一接口
   - EntraIDProvider / OktaProvider / WeComProvider / DingTalkProvider: 具体实现
   - SSOManager: 统一管理所有 SSO 提供者，处理授权回调与用户映射
 
-集成流程：
-  1. 前端重定向到 /api/v1/auth/sso/{provider}/authorize
-  2. 后端构建授权 URL 并重定向到 IdP
-  3. IdP 认证后回调 /api/v1/auth/sso/{provider}/callback
-  4. 后端交换授权码获取 Token，提取用户信息
-  5. 映射到本地用户，签发 JWT Token 对
+================================================================================
+SSO 集成流程
+================================================================================
+1. 前端重定向到 /api/v1/auth/sso/{provider}/authorize
+2. 后端构建授权 URL 并重定向到 IdP
+3. IdP 认证后回调 /api/v1/auth/sso/{provider}/callback
+4. 后端交换授权码获取 Token，提取用户信息
+5. 映射到本地用户，签发 JWT Token 对
+
+================================================================================
+PKCE 安全增强
+================================================================================
+所有 SSO 提供者都支持 PKCE（Proof Key for Code Exchange）：
+  - 生成 code_verifier 和 code_challenge
+  - 授权请求携带 code_challenge
+  - Token 交换时携带 code_verifier
+  - 防止授权码拦截攻击
+
+================================================================================
+与其他模块的关系
+================================================================================
+- auth.py: SSO 登录成功后调用 create_token_pair() 签发 Token
+- user_store.py: 用户映射和本地用户管理
+- tenant.py: 多租户隔离
+
+================================================================================
+使用示例
+================================================================================
+    # 获取授权 URL
+    manager = SSOManager()
+    auth_params = await manager.build_authorization_url("entra_id")
+    # 重定向用户到 auth_params.authorization_url
+
+    # 处理回调
+    token_result = await manager.handle_callback("entra_id", code, state)
+    # token_result.user_info 包含用户信息
+    # 签发本地 Token
+    token_pair = create_token_pair(user_id=token_result.user_info.external_id)
 """
 
 import abc
@@ -37,7 +75,17 @@ logger = logging.getLogger(__name__)
 
 
 class SSOProviderType(str, Enum):
-    """SSO 提供者类型"""
+    """SSO 提供者类型枚举
+
+    定义支持的 SSO 提供者类型。
+
+    Attributes:
+        ENTRA_ID: Microsoft Entra ID (Azure AD)
+        OKTA: Okta
+        WECOM: 企业微信
+        DINGTALK: 钉钉
+        FEISHU: 飞书
+    """
 
     ENTRA_ID = "entra_id"
     OKTA = "okta"
@@ -47,7 +95,19 @@ class SSOProviderType(str, Enum):
 
 
 class SSOUserInfo(BaseModel):
-    """SSO 用户信息（统一格式）"""
+    """SSO 用户信息（统一格式）
+
+    从不同 IdP 提取的用户信息，统一为此格式。
+
+    Attributes:
+        external_id: IdP 侧的用户唯一标识
+        email: 用户邮箱
+        display_name: 用户显示名称
+        phone: 用户手机号
+        department: 用户部门
+        avatar_url: 用户头像 URL
+        raw_claims: IdP 返回的原始声明
+    """
 
     external_id: str = Field(description="IdP 侧的用户唯一标识")
     email: str = Field(default="", description="用户邮箱")
@@ -59,7 +119,15 @@ class SSOUserInfo(BaseModel):
 
 
 class SSOAuthorizationParams(BaseModel):
-    """SSO 授权参数"""
+    """SSO 授权参数
+
+    用于前端发起 SSO 授权请求。
+
+    Attributes:
+        authorization_url: 授权 URL，前端需重定向到此地址
+        state: CSRF 防护 state 参数
+        code_verifier: PKCE code_verifier
+    """
 
     authorization_url: str = Field(description="授权 URL，前端需重定向到此地址")
     state: str = Field(description="CSRF 防护 state 参数")
@@ -67,7 +135,17 @@ class SSOAuthorizationParams(BaseModel):
 
 
 class SSOTokenResult(BaseModel):
-    """SSO Token 交换结果"""
+    """SSO Token 交换结果
+
+    从 IdP 获取的 Token 和用户信息。
+
+    Attributes:
+        access_token: IdP 的 access_token
+        id_token: IdP 的 id_token（OIDC）
+        refresh_token: IdP 的 refresh_token
+        expires_in: Token 有效期（秒）
+        user_info: 提取的用户信息
+    """
 
     access_token: str = Field(default="", description="IdP 的 access_token")
     id_token: str = Field(default="", description="IdP 的 id_token（OIDC）")
@@ -80,10 +158,18 @@ class SSOProvider(abc.ABC):
     """SSO 提供者抽象基类
 
     所有 SSO 提供者必须实现以下方法：
-    - build_authorization_url: 构建授权 URL
-    - exchange_code: 用授权码交换 Token
-    - get_user_info: 从 Token 中提取用户信息
-    - refresh_idp_token: 刷新 IdP Token
+      - build_authorization_url: 构建授权 URL
+      - exchange_code: 用授权码交换 Token
+      - refresh_idp_token: 刷新 IdP Token
+
+    子类需要实现具体的 IdP 对接逻辑。
+
+    Attributes:
+        _config: 提供者配置
+        _client_id: 客户端ID
+        _client_secret: 客户端密钥
+        _redirect_uri: 回调地址
+        _scopes: 请求的权限范围
     """
 
     def __init__(self, config: dict[str, Any]):
@@ -135,6 +221,11 @@ class SSOProvider(abc.ABC):
 
     def _generate_pkce_pair(self) -> tuple[str, str]:
         """生成 PKCE code_verifier 和 code_challenge
+
+        PKCE 流程：
+        1. 生成随机 code_verifier
+        2. 计算 SHA256 哈希
+        3. Base64 URL 编码得到 code_challenge
 
         Returns:
             (code_verifier, code_challenge)

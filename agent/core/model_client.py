@@ -1,10 +1,57 @@
 """LLM 客户端初始化与管理
 
-阿里云通义千问系列模型客户端，兼容 OpenAI 接口格式。
-模型分级策略：
-  - qwen-max:   高推理能力，用于 Supervisor / Reviewer
-  - qwen-plus:  均衡性能，用于领域 Agent
-  - qwen-turbo: 轻量快速，用于简单任务 / 意图分类
+================================================================================
+模块职责
+================================================================================
+提供阿里云通义千问系列模型客户端的初始化和管理，包括：
+  - 模型分级策略
+  - 客户端缓存
+  - 语义缓存集成
+  - Token 用量记录
+
+================================================================================
+模型分级策略
+================================================================================
+三级模型配置，平衡成本与能力：
+  -------------------------------------------------------------------------
+  qwen-max（最高能力）：
+    - 适用场景：复杂推理、合同审查、数据分析
+    - 用于：Supervisor Agent、Reviewer Agent
+    - 成本：高
+
+  qwen-plus（均衡性能）：
+    - 适用场景：常规办公任务、邮件处理、日程管理
+    - 用于：领域 Agent（EmailAgent、ApprovalAgent 等）
+    - 成本：中
+
+  qwen-turbo（轻量快速）：
+    - 适用场景：简单查询、意图分类、快速响应
+    - 用于：意图分类、轻量级任务
+    - 成本：低
+  -------------------------------------------------------------------------
+
+================================================================================
+与其他模块的关系
+================================================================================
+- supervisor.py: 使用 get_supervisor_client() 和 get_lightweight_client()
+- domain.py: 使用 get_domain_agent_client()
+- reviewer.py: 使用 get_reviewer_client()
+- token_budget.py: 自动记录 Token 用量
+
+================================================================================
+使用示例
+================================================================================
+    # 获取不同级别的客户端
+    supervisor_client = get_supervisor_client()  # qwen-max
+    domain_client = get_domain_agent_client()    # qwen-plus
+    lightweight_client = get_lightweight_client()  # qwen-turbo
+
+    # 带语义缓存的调用
+    result = await cached_model_call(
+        messages=[UserMessage(content="帮我发邮件")],
+        agent_name="EmailAgent",
+        tier="plus",
+    )
 """
 
 from autogen_ext.models.openai import OpenAIChatCompletionClient
@@ -18,14 +65,17 @@ logger = logging.getLogger(__name__)
 
 _settings = get_settings()
 
+# 模型级别映射
 MODEL_TIERS = {
     "max": _settings.model_qwen_max,
     "plus": _settings.model_qwen_plus,
     "turbo": _settings.model_qwen_turbo,
 }
 
+# 客户端缓存，避免重复创建
 _client_cache: dict[str, OpenAIChatCompletionClient] = {}
 
+# 通义千问模型能力声明
 _QWEN_MODEL_INFO = ModelInfo(
     vision=False,
     function_calling=True,
@@ -40,6 +90,13 @@ def _create_client(model: str, temperature: float | None = None) -> OpenAIChatCo
 
     通义千问模型名称（如 qwen-max）不属于 OpenAI 标准模型，
     AutoGen 要求提供 model_info 以声明模型能力。
+
+    Args:
+        model: 模型名称
+        temperature: 推理温度（可选）
+
+    Returns:
+        OpenAIChatCompletionClient 实例
     """
     kwargs: dict = {
         "model": model,
@@ -55,8 +112,13 @@ def _create_client(model: str, temperature: float | None = None) -> OpenAIChatCo
 def get_model_client(tier: str = "plus") -> OpenAIChatCompletionClient:
     """获取指定级别的模型客户端
 
+    从缓存中获取或创建新的客户端实例。
+
     Args:
-        tier: 模型级别，可选 max / plus / turbo
+        tier: 模型级别，可选：
+            - "max": qwen-max，最高能力
+            - "plus": qwen-plus，均衡性能（默认）
+            - "turbo": qwen-turbo，轻量快速
 
     Returns:
         OpenAIChatCompletionClient 实例
@@ -70,12 +132,25 @@ def get_model_client(tier: str = "plus") -> OpenAIChatCompletionClient:
 
 
 def get_supervisor_client() -> OpenAIChatCompletionClient:
-    """获取 Supervisor 专用客户端（qwen-max）"""
+    """获取 Supervisor 专用客户端
+
+    Supervisor 需要高推理能力，使用 qwen-max。
+
+    Returns:
+        qwen-max 客户端实例
+    """
     return get_model_client("max")
 
 
 def get_reviewer_client() -> OpenAIChatCompletionClient:
-    """获取 Reviewer 专用客户端（qwen-max，低温度）"""
+    """获取 Reviewer 专用客户端
+
+    Reviewer 需要高推理能力和低温度（确保审核严谨性），
+    使用 qwen-max + temperature=0.1。
+
+    Returns:
+        qwen-max 低温度客户端实例
+    """
     model_name = MODEL_TIERS["max"]
     cache_key = f"{model_name}:reviewer"
 
@@ -86,12 +161,24 @@ def get_reviewer_client() -> OpenAIChatCompletionClient:
 
 
 def get_domain_agent_client() -> OpenAIChatCompletionClient:
-    """获取领域 Agent 客户端（qwen-plus）"""
+    """获取领域 Agent 客户端
+
+    领域 Agent 处理常规办公任务，使用 qwen-plus。
+
+    Returns:
+        qwen-plus 客户端实例
+    """
     return get_model_client("plus")
 
 
 def get_lightweight_client() -> OpenAIChatCompletionClient:
-    """获取轻量级客户端（qwen-turbo），用于简单任务 / 意图分类"""
+    """获取轻量级客户端
+
+    用于简单任务和意图分类，使用 qwen-turbo。
+
+    Returns:
+        qwen-turbo 客户端实例
+    """
     return get_model_client("turbo")
 
 
@@ -104,8 +191,22 @@ async def cached_model_call(
 ) -> Any:
     """带语义缓存的 LLM 调用
 
-    先查询语义缓存，命中则直接返回；未命中则调用 LLM 并写入缓存。
-    适用于 Agent 的主推理调用，不适用于需要实时数据的场景。
+    执行流程：
+    -------------------------------------------------------------------------
+    1. 提取用户查询文本作为缓存 key
+    2. 查询语义缓存，命中则直接返回
+    3. 未命中则调用 LLM
+    4. 记录 Token 用量
+    5. 写入语义缓存
+    -------------------------------------------------------------------------
+
+    适用场景：
+    - Agent 的主推理调用
+    - 语义相似但表述不同的查询
+
+    不适用场景：
+    - 需要实时数据的查询
+    - 每次结果必须不同的场景
 
     Args:
         messages: 消息列表（AutoGen LLMMessage 格式）
@@ -172,6 +273,11 @@ def _record_token_usage(result: Any, tier: str, agent_name: str) -> None:
     """从 LLM 响应中提取 Token 用量并记录到预算管理器
 
     AutoGen CreateResult 包含 usage 字段，格式为 RequestUsage。
+
+    Args:
+        result: LLM 响应结果
+        tier: 模型级别
+        agent_name: Agent 名称
     """
     try:
         usage = getattr(result, "usage", None)

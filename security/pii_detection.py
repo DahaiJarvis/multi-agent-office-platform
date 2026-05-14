@@ -1,16 +1,73 @@
 """扩展型 PII (个人身份信息) 检测引擎
 
-在原有手机号/身份证/邮箱基础上，扩展检测范围：
-  - 护照号码（中国/国际格式）
-  - 社会保障号 (SSN)
-  - 银行卡号
-  - 中文姓名（基于常见姓氏库 + 姓名模式）
-  - 地址信息（中国地址模式）
-  - 车牌号
-  - 军官证号
-  - 自定义规则（正则 + 关键词）
+================================================================================
+模块职责
+================================================================================
+检测和脱敏文本中的个人身份信息（PII），包括：
+  - 基础信息：手机号、身份证号、邮箱
+  - 证件信息：护照号码、军官证号
+  - 金融信息：银行卡号、社会保障号（SSN）
+  - 个人信息：中文姓名、地址信息
+  - 其他信息：车牌号
+  - 自定义规则：支持正则表达式和关键词组合
 
-支持自定义规则热加载，无需重启服务。
+================================================================================
+检测能力
+================================================================================
+支持的 PII 类型：
+  -------------------------------------------------------------------------
+  手机号：中国大陆手机号（1开头，11位）
+  身份证号：中国居民身份证（18位，含校验）
+  邮箱：标准邮箱格式
+  护照号：中国护照、国际护照格式
+  SSN：美国社会保障号（XXX-XX-XXXX）
+  银行卡号：主流银行卡（Luhn 校验）
+  中文姓名：基于常见姓氏库 + 姓名模式
+  地址信息：中国地址模式
+  车牌号：中国大陆车牌
+  军官证号：军官证格式
+  自定义：用户自定义规则
+  -------------------------------------------------------------------------
+
+================================================================================
+敏感级别
+================================================================================
+根据 PII 类型和敏感程度分为四级：
+  - PUBLIC: 公开信息
+  - INTERNAL: 内部信息
+  - CONFIDENTIAL: 机密信息（手机号、邮箱等）
+  - RESTRICTED: 高度机密（身份证、银行卡等）
+
+================================================================================
+与其他模块的关系
+================================================================================
+- guardrails.py: 在输入/输出过滤中调用 PII 检测
+- desensitize.py: 使用 PII 检测结果进行脱敏处理
+- compliance.py: 合规检查中验证 PII 处理
+
+================================================================================
+使用示例
+================================================================================
+    # 检测 PII
+    result = detect_pii("我的手机号是 13812345678，身份证是 110101199001011234")
+
+    # 检查是否有 PII
+    if result.has_pii:
+        print(f"发现 {len(result.detections)} 处 PII")
+
+        # 查看检测结果
+        for detection in result.detections:
+            print(f"类型: {detection.category}, 值: {detection.value}")
+
+        # 获取脱敏后的内容
+        print(result.redacted_content)
+
+    # 添加自定义规则
+    add_custom_rule(CustomPIIRule(
+        name="员工工号",
+        pattern=r"EMP\d{6}",
+        sensitivity=PIISensitivity.CONFIDENTIAL,
+    ))
 """
 
 import logging
@@ -24,7 +81,23 @@ logger = logging.getLogger(__name__)
 
 
 class PIICategory(str, Enum):
-    """PII 类别"""
+    """PII 类别枚举
+
+    定义所有支持的 PII 类型。
+
+    Attributes:
+        PHONE: 手机号
+        ID_CARD: 身份证号
+        EMAIL: 邮箱
+        PASSPORT: 护照号
+        SSN: 社会保障号
+        BANK_CARD: 银行卡号
+        NAME: 姓名
+        ADDRESS: 地址
+        LICENSE_PLATE: 车牌号
+        MILITARY_ID: 军官证号
+        CUSTOM: 自定义类型
+    """
 
     PHONE = "phone"
     ID_CARD = "id_card"
@@ -40,7 +113,16 @@ class PIICategory(str, Enum):
 
 
 class PIISensitivity(str, Enum):
-    """敏感级别"""
+    """敏感级别枚举
+
+    根据 PII 的敏感程度分为四级，用于确定脱敏策略。
+
+    Attributes:
+        PUBLIC: 公开信息，无需脱敏
+        INTERNAL: 内部信息，轻度脱敏
+        CONFIDENTIAL: 机密信息，中度脱敏（手机号、邮箱等）
+        RESTRICTED: 高度机密，完全脱敏（身份证、银行卡等）
+    """
 
     PUBLIC = "public"
     INTERNAL = "internal"
@@ -49,7 +131,19 @@ class PIISensitivity(str, Enum):
 
 
 class PIIDetection(BaseModel):
-    """单条 PII 检测结果"""
+    """单条 PII 检测结果
+
+    记录检测到的单个 PII 实例的详细信息。
+
+    Attributes:
+        category: PII 类别
+        sensitivity: 敏感级别
+        value: 原始值
+        start: 在文本中的起始位置
+        end: 在文本中的结束位置
+        confidence: 置信度（0.0-1.0）
+        rule_name: 匹配的规则名称
+    """
 
     category: PIICategory
     sensitivity: PIISensitivity
@@ -61,7 +155,16 @@ class PIIDetection(BaseModel):
 
 
 class PIIDetectionResult(BaseModel):
-    """PII 检测综合结果"""
+    """PII 检测综合结果
+
+    包含文本中所有 PII 的检测结果和脱敏后的内容。
+
+    Attributes:
+        has_pii: 是否包含 PII
+        detections: 所有检测结果列表
+        redacted_content: 脱敏后的内容
+        summary: 各类 PII 的数量统计
+    """
 
     has_pii: bool
     detections: list[PIIDetection] = Field(default_factory=list)
@@ -70,7 +173,19 @@ class PIIDetectionResult(BaseModel):
 
 
 class CustomPIIRule(BaseModel):
-    """自定义 PII 检测规则"""
+    """自定义 PII 检测规则
+
+    用于扩展 PII 检测能力，支持正则表达式和关键词组合。
+
+    Attributes:
+        name: 规则名称
+        category: PII 类别（默认为 CUSTOM）
+        sensitivity: 敏感级别（默认为 CONFIDENTIAL）
+        pattern: 正则表达式
+        keywords: 关键词列表，与正则配合使用
+        enabled: 是否启用
+        description: 规则描述
+    """
 
     name: str = Field(description="规则名称")
     category: PIICategory = Field(default=PIICategory.CUSTOM)
@@ -102,7 +217,23 @@ COMMON_SURNAMES = set(
 
 
 def _luhn_check(number: str) -> bool:
-    """Luhn 校验算法，用于银行卡号验证"""
+    """Luhn 校验算法
+
+    用于银行卡号验证，确保卡号的有效性。
+
+    算法步骤：
+    1. 从右向左遍历数字
+    2. 偶数位置的数字乘以 2，大于 9 则减去 9
+    3. 所有数字求和
+    4. 总和能被 10 整除则有效
+
+    Args:
+        number: 待校验的数字字符串
+
+    Returns:
+        True: 校验通过
+        False: 校验失败
+    """
     digits = [int(d) for d in number if d.isdigit()]
     if len(digits) < 2:
         return False
@@ -117,7 +248,22 @@ def _luhn_check(number: str) -> bool:
 
 
 def _id_card_check(id_number: str) -> bool:
-    """身份证号校验"""
+    """身份证号校验
+
+    校验中国居民身份证号码的有效性。
+
+    校验规则：
+    1. 长度必须为 18 位
+    2. 前 17 位为数字，第 18 位为数字或 X
+    3. 使用加权因子计算校验码
+
+    Args:
+        id_number: 身份证号码
+
+    Returns:
+        True: 校验通过
+        False: 校验失败
+    """
     if len(id_number) != 18:
         return False
     weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]

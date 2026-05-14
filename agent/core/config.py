@@ -174,9 +174,9 @@ class Settings(BaseSettings):
     rate_limit_burst: int = Field(default=100, alias="RATE_LIMIT_BURST")
 
     # 工具执行边界
-    tool_execution_timeout: int = Field(default=30, description="工具调用超时秒数")
-    tool_max_retries: int = Field(default=2, description="工具调用最大重试次数")
-    tool_retry_backoff: float = Field(default=1.0, description="工具调用重试退避基数(秒)")
+    tool_execution_timeout: int = Field(default=10, description="工具调用超时秒数")
+    tool_max_retries: int = Field(default=1, description="工具调用最大重试次数")
+    tool_retry_backoff: float = Field(default=0.5, description="工具调用重试退避基数(秒)")
     tool_daily_quota: int = Field(default=1000, description="单工具每日调用配额")
 
     # 执行控制
@@ -184,6 +184,7 @@ class Settings(BaseSettings):
     execution_llm_timeout: int = Field(default=30, description="单轮LLM调用超时(秒)")
     execution_max_retries: int = Field(default=2, description="任务执行最大重试次数")
     execution_compaction_threshold: int = Field(default=80000, description="上下文压缩Token阈值")
+    execution_stream_idle_timeout: int = Field(default=120, description="流式执行chunk间隔超时(秒)")
 
     # MCP Registry
     mcp_registry_url: str = Field(
@@ -191,9 +192,14 @@ class Settings(BaseSettings):
     )
 
     # 智能文档助手集成配置
-    # 注意：IDA 服务默认端口为 9100，与 docker-compose.yml 中的端口映射保持一致
-    ida_backend_url: str = Field(default="http://localhost:9100", alias="IDA_BACKEND_URL")
-    ida_mcp_sse_url: str = Field(default="http://localhost:9100/sse", alias="IDA_MCP_SSE_URL")
+    # 本地开发：后端 5000，MCP Server 9010
+    # Docker 部署：通过环境变量 IDA_BACKEND_URL / IDA_MCP_SSE_URL 覆盖
+    ida_backend_url: str = Field(default="http://localhost:5000", alias="IDA_BACKEND_URL")
+    ida_mcp_sse_url: str = Field(default="http://localhost:9010/sse", alias="IDA_MCP_SSE_URL")
+    # IDA REST API 路径前缀，启动时自动探测，也可手动配置
+    # 自动探测逻辑：依次尝试 /api/v1/ 和 /api/，选择可用的版本
+    # 手动配置示例：/api/v1 或 /api（不带尾部斜杠）
+    ida_api_prefix: str = Field(default="", alias="IDA_API_PREFIX")
     # SSE 连接认证密钥，用于 MCP 客户端连接 IDA SSE 端点时的 API Key 验证
     mcp_api_key: str = Field(default="", alias="MCP_API_KEY")
     # 映射 Token 有效期（秒），用于主平台向 IDA 签发的 RSA-JWT Token

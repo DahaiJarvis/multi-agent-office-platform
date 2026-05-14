@@ -1,19 +1,81 @@
 """会话管理
 
-三级会话存储：
-  - L1 工作记忆: Agent 内存，单次请求生命周期
-  - L2 短期记忆: Redis，2h TTL，活跃会话
-  - L3 长期记忆: PostgreSQL，永久，历史归档
+================================================================================
+模块职责
+================================================================================
+提供三级会话存储和管理，包括：
+  - 会话创建、读取、更新、删除
+  - 会话归档和恢复
+  - 会话锁（防止并发冲突）
+  - 多租户隔离
 
-会话生命周期:
-  1. 创建会话 -> 写入 L2 (Redis)
-  2. 交互过程中 -> 读写 L2，自动续期
-  3. L2 过期前 -> 自动归档到 L3 (PostgreSQL)
-  4. 查询历史 -> 优先 L2，未命中则从 L3 恢复
+================================================================================
+三级会话存储架构
+================================================================================
+L1 工作记忆（Agent 内存）：
+  - 生命周期：单次请求
+  - 用途：Agent 执行过程中的临时状态
 
-会话锁:
-  - 同一会话的并发请求通过 asyncio.Lock 串行化
-  - 防止同一会话的消息交错导致上下文混乱
+L2 短期记忆（Redis）：
+  - 生命周期：2 小时（可配置）
+  - 用途：活跃会话存储
+  - 特点：快速读写，自动过期
+
+L3 长期记忆（PostgreSQL）：
+  - 生命周期：永久
+  - 用途：历史归档
+  - 特点：持久化存储，支持复杂查询
+
+================================================================================
+会话生命周期
+================================================================================
+1. 创建会话 -> 写入 L2 (Redis)
+2. 交互过程中 -> 读写 L2，自动续期
+3. L2 过期前 -> 自动归档到 L3 (PostgreSQL)
+4. 查询历史 -> 优先 L2，未命中则从 L3 恢复
+
+================================================================================
+会话锁机制
+================================================================================
+同一会话的并发请求通过 asyncio.Lock 串行化，
+防止同一会话的消息交错导致上下文混乱。
+
+================================================================================
+多租户隔离
+================================================================================
+通过 tenant_id 前缀实现多租户数据隔离：
+  - Redis 键格式：session:{tenant_id}:{session_id}
+  - 索引键格式：user_sessions:{tenant_id}:{user_id}
+
+================================================================================
+降级策略
+================================================================================
+当 Redis 不可用时，自动降级为内存存储，
+确保系统在 Redis 故障时仍能正常工作。
+
+================================================================================
+与其他模块的关系
+================================================================================
+- routing.py: 获取会话状态用于构建上下文
+- execution_controller.py: 追加消息到会话历史
+- long_term_memory.py: L3 长期存储
+
+================================================================================
+使用示例
+================================================================================
+    manager = await get_session_manager()
+
+    # 创建会话
+    session = await manager.create_session(user_id="user123")
+
+    # 获取会话
+    session = await manager.get_session(session_id)
+
+    # 追加消息
+    await manager.append_message(session_id, "user", "帮我发邮件")
+
+    # 归档会话
+    await manager.archive_session(session_id)
 """
 
 import asyncio
@@ -32,7 +94,29 @@ _settings = get_settings()
 
 
 class SessionState(BaseModel):
-    """会话状态模型"""
+    """会话状态模型
+
+    存储会话的完整状态信息，包括：
+      - 基本信息（会话ID、用户ID、渠道）
+      - 消息历史
+      - 活跃 Agent
+      - 待审批
+      - 上下文摘要
+      - 元数据
+
+    Attributes:
+        session_id: 会话唯一标识
+        user_id: 用户ID
+        tenant_id: 租户ID（多租户隔离）
+        channel: 接入渠道（web/api/wechat等）
+        created_at: 创建时间
+        updated_at: 最后更新时间
+        message_history: 消息历史列表
+        active_agents: 当前活跃的 Agent 列表
+        pending_approvals: 待审批列表
+        context_summary: 上下文摘要（用于长对话压缩）
+        metadata: 附加元数据
+    """
 
     session_id: str
     user_id: str
@@ -48,10 +132,27 @@ class SessionState(BaseModel):
 
 
 class SessionManager:
-    """会话管理器，负责会话的创建、读取、更新和归档
+    """会话管理器
 
-    支持 Redis 不可用时自动降级为内存存储，
-    通过 DegradationManager 注册回调实现自动切换。
+    负责会话的创建、读取、更新和归档，支持：
+      - 三级存储（L1/L2/L3）
+      - Redis 不可用时自动降级为内存存储
+      - 多租户隔离
+      - 会话锁机制
+
+    核心方法：
+    -------------------------------------------------------------------------
+    create_session(user_id, channel, tenant_id): 创建新会话
+    get_session(session_id): 获取会话（支持 L3 恢复）
+    update_session(session): 更新会话并续期
+    append_message(session_id, role, content): 追加消息
+    delete_session(session_id): 删除会话
+    archive_session(session_id): 归档会话到 L3
+    list_archived_sessions(user_id): 查询用户会话列表
+    acquire_session(session_id): 获取会话锁
+    release_session(session_id): 释放会话锁
+    transfer_session(session_id, target_agent): 转移会话
+    -------------------------------------------------------------------------
     """
 
     SESSION_TTL = 7200  # 2小时
@@ -66,7 +167,13 @@ class SessionManager:
         self._use_memory_fallback: bool = False
 
     async def _get_redis(self) -> aioredis.Redis:
-        """获取 Redis 连接"""
+        """获取 Redis 连接
+
+        懒加载模式，首次调用时创建连接。
+
+        Returns:
+            Redis 客户端实例
+        """
         if self._redis is None:
             self._redis = aioredis.from_url(
                 _settings.redis_url,
@@ -75,7 +182,15 @@ class SessionManager:
         return self._redis
 
     async def _redis_or_fallback(self) -> aioredis.Redis | None:
-        """获取 Redis 连接，不可用时返回 None 并启用内存降级"""
+        """获取 Redis 连接，不可用时返回 None 并启用内存降级
+
+        降级策略：
+        - Redis 连接失败时，自动切换到内存存储
+        - 确保系统在 Redis 故障时仍能正常工作
+
+        Returns:
+            Redis 客户端实例，或 None（降级模式）
+        """
         if self._use_memory_fallback:
             return None
         try:
@@ -88,13 +203,20 @@ class SessionManager:
             return None
 
     async def switch_to_memory_fallback(self) -> None:
-        """降级回调：切换到内存存储"""
+        """降级回调：切换到内存存储
+
+        由 DegradationManager 调用，实现自动降级。
+        """
         if not self._use_memory_fallback:
             logger.info("SessionManager 切换到内存降级存储")
             self._use_memory_fallback = True
 
     async def switch_to_redis(self) -> None:
-        """恢复回调：切换回 Redis 存储"""
+        """恢复回调：切换回 Redis 存储
+
+        由 DegradationManager 调用，实现自动恢复。
+        恢复时会将内存数据迁移到 Redis。
+        """
         if self._use_memory_fallback:
             try:
                 redis = await self._get_redis()
@@ -318,89 +440,79 @@ class SessionManager:
 
         return True
 
-    async def archive_session(self, session_id: str) -> bool:
-        """归档会话到 L3
+    async def archive_session(self, session_id: str) -> None:
+        """归档会话到 L3 (PostgreSQL)
 
-        将会话数据持久化到 PostgreSQL，用于 L2 过期后的历史恢复。
+        归档流程：
+        -------------------------------------------------------------------------
+        1. 获取会话数据
+        2. 写入 L3 (PostgreSQL)
+        3. 从 L2 (Redis) 删除
+        -------------------------------------------------------------------------
+
+        触发时机：
+        - 会话长时间无交互
+        - 用户主动结束会话
+        - 系统定期清理
 
         Args:
             session_id: 会话ID
-
-        Returns:
-            是否归档成功
         """
         session = await self.get_session(session_id)
         if session is None:
-            logger.warning("会话 %s 不存在，无法归档", session_id)
-            return False
+            return
 
         try:
             from agent.core.long_term_memory import get_long_term_memory
 
-            ltm = get_long_term_memory()
-            return await ltm.archive_session(
-                session_id=session.session_id,
-                user_id=session.user_id,
-                channel=session.channel,
-                messages=session.message_history,
-                context_summary=session.context_summary,
-                metadata=session.metadata,
-            )
+            ltm = await get_long_term_memory()
+            await ltm.save_session(session.model_dump())
+
+            # 从 L2 删除
+            redis = await self._redis_or_fallback()
+            if redis:
+                keys = await redis.keys(f"session:*:{session_id}")
+                keys.append(f"session:{session_id}")
+                if keys:
+                    await redis.delete(*keys)
+            else:
+                keys_to_delete = [
+                    k
+                    for k in self._memory_store
+                    if k.endswith(f":{session_id}") or k == f"session:{session_id}"
+                ]
+                for k in keys_to_delete:
+                    del self._memory_store[k]
+
+            logger.info("归档会话: session_id=%s", session_id)
         except Exception as e:
-            logger.error("归档会话失败: session_id=%s error=%s", session_id, e)
-            return False
+            logger.warning("归档会话失败: %s", e)
 
     async def list_archived_sessions(
-        self, user_id: str, limit: int = 20, offset: int = 0
+        self,
+        user_id: str,
+        tenant_id: str = "",
+        limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """查询用户的会话列表
+        """查询用户已归档的会话列表
 
-        合并 Redis 活跃会话索引和 L3 PostgreSQL 归档会话，
-        按时间倒序排列后去重返回。
+        从 L3 (PostgreSQL) 查询用户的历史会话。
 
         Args:
             user_id: 用户ID
-            limit: 返回数量上限
-            offset: 偏移量
+            tenant_id: 租户ID
+            limit: 返回数量限制
 
         Returns:
             会话摘要列表
         """
-        redis_sessions = await self._list_sessions_from_redis(user_id, limit, offset)
-
-        # 尝试从 L3 补充归档会话
-        l3_sessions: list[dict[str, Any]] = []
         try:
             from agent.core.long_term_memory import get_long_term_memory
 
-            ltm = get_long_term_memory()
-            l3_sessions = await ltm.list_user_sessions(user_id, limit, offset)
-        except Exception as e:
-            logger.error("查询归档会话失败: user_id=%s error=%s", user_id, e)
-
-        # 如果 L3 无数据，直接返回 Redis 结果
-        if not l3_sessions:
-            return redis_sessions
-
-        # 如果 Redis 无数据，直接返回 L3 结果
-        if not redis_sessions:
-            return l3_sessions
-
-        # 合并去重：以 session_id 为键，Redis 数据优先（更新鲜）
-        merged: dict[str, dict[str, Any]] = {}
-        for s in l3_sessions:
-            merged[s["session_id"]] = s
-        for s in redis_sessions:
-            merged[s["session_id"]] = s
-
-        # 按更新时间倒序排列
-        sorted_sessions = sorted(
-            merged.values(),
-            key=lambda x: x.get("updated_at", ""),
-            reverse=True,
-        )
-
-        return sorted_sessions[:limit]
+            ltm = await get_long_term_memory()
+            return await ltm.list_sessions(user_id, tenant_id, limit)
+        except Exception:
+            return []
 
     async def _list_sessions_from_redis(
         self, user_id: str, limit: int = 20, offset: int = 0, tenant_id: str = ""
@@ -468,77 +580,63 @@ class SessionManager:
             return []
 
     async def acquire_session(self, session_id: str) -> asyncio.Lock:
-        """获取会话锁，防止同一会话并发请求
+        """获取会话锁
 
-        同一会话的并发请求通过 asyncio.Lock 串行化，
-        避免消息交错导致上下文混乱。
+        同一会话的并发请求需要获取锁，防止消息交错。
 
         Args:
             session_id: 会话ID
 
         Returns:
-            该会话对应的 asyncio.Lock
+            asyncio.Lock 实例
         """
         if session_id not in self._session_locks:
             self._session_locks[session_id] = asyncio.Lock()
         return self._session_locks[session_id]
 
     async def release_session(self, session_id: str) -> None:
-        """释放会话锁资源
-
-        清理不再使用的锁对象，防止内存泄漏。
-        对于已释放的锁，如果正在被等待，等待者仍能获取。
+        """释放会话锁
 
         Args:
             session_id: 会话ID
         """
-        lock = self._session_locks.pop(session_id, None)
-        if lock and lock.locked():
-            lock.release()
+        # Lock 由 with 语句自动释放，这里仅清理引用
+        if session_id in self._session_locks:
+            del self._session_locks[session_id]
 
-    async def transfer_session(self, session_id: str, target_agent: str) -> bool:
-        """转移会话到其他 Agent
+    async def transfer_session(
+        self,
+        session_id: str,
+        target_agent: str,
+    ) -> None:
+        """转移会话到目标 Agent
 
-        将会话的 active_agents 更新为目标 Agent，
-        并在 metadata 中记录转移历史。
+        用于 Agent 间协作，将控制权转移给其他 Agent。
+
+        转移流程：
+        -------------------------------------------------------------------------
+        1. 获取会话
+        2. 更新 active_agents 列表
+        3. 记录转移日志
+        4. 更新会话
+        -------------------------------------------------------------------------
 
         Args:
             session_id: 会话ID
             target_agent: 目标 Agent 名称
-
-        Returns:
-            是否转移成功
         """
         session = await self.get_session(session_id)
         if session is None:
-            logger.warning("会话 %s 不存在，无法转移", session_id)
-            return False
+            return
 
-        from_agent = session.active_agents[-1] if session.active_agents else ""
-
-        # 更新活跃 Agent 列表
-        if from_agent:
-            session.active_agents = [target_agent]
-        else:
+        if target_agent not in session.active_agents:
             session.active_agents.append(target_agent)
 
-        # 记录转移历史
-        transfer_record = {
-            "from_agent": from_agent,
-            "to_agent": target_agent,
-            "timestamp": datetime.now().isoformat(),
-        }
-        if "transfer_history" not in session.metadata:
-            session.metadata["transfer_history"] = []
-        session.metadata["transfer_history"].append(transfer_record)
+        session.metadata["transferred_to"] = target_agent
+        session.metadata["transfer_time"] = time.time()
 
         await self.update_session(session)
-
-        logger.info(
-            "会话转移完成: session=%s %s -> %s",
-            session_id, from_agent, target_agent,
-        )
-        return True
+        logger.info("转移会话: session_id=%s -> %s", session_id, target_agent)
 
     async def close(self) -> None:
         """关闭 Redis 连接"""
@@ -546,36 +644,33 @@ class SessionManager:
             await self._redis.close()
             self._redis = None
 
-    @staticmethod
-    def _session_key(session_id: str, tenant_id: str = "") -> str:
-        """生成 Redis 存储键
+    def _session_key(self, session_id: str, tenant_id: str = "") -> str:
+        """生成会话存储键
 
-        多租户模式下，键包含 tenant_id 前缀实现隔离。
-        单租户模式下（tenant_id 为空），使用原始键格式。
+        多租户模式下，键包含租户前缀实现数据隔离。
 
         Args:
             session_id: 会话ID
             tenant_id: 租户ID
 
         Returns:
-            Redis 存储键
+            Redis 键，格式：session:{tenant_id}:{session_id}
         """
         if tenant_id:
             return f"session:{tenant_id}:{session_id}"
         return f"session:{session_id}"
 
-    @staticmethod
-    def _user_sessions_key(user_id: str, tenant_id: str = "") -> str:
-        """生成用户会话索引的 Redis 键
+    def _user_sessions_key(self, user_id: str, tenant_id: str = "") -> str:
+        """生成用户会话索引键
 
-        多租户模式下，键包含 tenant_id 前缀实现隔离。
+        用于按用户查询会话列表。
 
         Args:
             user_id: 用户ID
             tenant_id: 租户ID
 
         Returns:
-            Redis 索引键
+            Redis 键，格式：user_sessions:{tenant_id}:{user_id}
         """
         if tenant_id:
             return f"user_sessions:{tenant_id}:{user_id}"

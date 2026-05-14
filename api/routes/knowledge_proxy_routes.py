@@ -53,6 +53,66 @@ settings = get_settings()
 # 生命周期由 FastAPI lifespan 管理（通过 close_knowledge_proxy_client 关闭）
 _shared_client: httpx.AsyncClient | None = None
 
+# IDA API 路径前缀缓存（启动时探测，运行时使用）
+_ida_api_prefix: str = ""
+
+# IDA API 版本探测候选列表（按优先级排序，优先使用高版本）
+_IDA_PREFIX_CANDIDATES = ["/api/v1", "/api"]
+
+
+async def detect_ida_api_prefix() -> str:
+    """自动探测 IDA REST API 路径前缀
+
+    启动时依次尝试候选路径，找到第一个可用的版本。
+    探测逻辑：
+      1. 如果配置了 IDA_API_PREFIX，直接使用
+      2. 否则依次尝试 /api/v1 和 /api
+      3. 通过 HEAD/GET 请求检测路径是否可达（非 404）
+      4. 探测失败时使用默认值 /api/v1
+
+    Returns:
+        IDA API 路径前缀，如 /api/v1 或 /api
+    """
+    global _ida_api_prefix
+
+    if settings.ida_api_prefix:
+        prefix = settings.ida_api_prefix.rstrip("/")
+        _ida_api_prefix = prefix
+        logger.info("IDA API 前缀使用配置值: %s", prefix)
+        return prefix
+
+    client = get_knowledge_proxy_client()
+
+    for prefix in _IDA_PREFIX_CANDIDATES:
+        try:
+            probe_url = f"{settings.ida_backend_url}{prefix}/knowledge-bases"
+            response = await client.get(
+                probe_url,
+                params={"page": 1, "per_page": 1},
+                timeout=5.0,
+            )
+            if response.status_code != 404:
+                _ida_api_prefix = prefix
+                logger.info("IDA API 前缀自动探测成功: %s (status=%d)", prefix, response.status_code)
+                return prefix
+        except Exception:
+            continue
+
+    _ida_api_prefix = "/api/v1"
+    logger.warning("IDA API 前缀自动探测失败，使用默认值: /api/v1")
+    return _ida_api_prefix
+
+
+def get_ida_api_prefix() -> str:
+    """获取 IDA API 路径前缀
+
+    优先使用已探测的缓存值，未探测时返回默认值。
+
+    Returns:
+        IDA API 路径前缀
+    """
+    return _ida_api_prefix or settings.ida_api_prefix.rstrip("/") or "/api/v1"
+
 
 def get_knowledge_proxy_client() -> httpx.AsyncClient:
     """获取共享 HTTP 客户端单例
@@ -387,10 +447,11 @@ async def _ida_request(method: str, path: str, token: str, **kwargs) -> Any:
 
     封装 httpx 请求调用，统一处理连接失败、超时等网络异常，
     避免每个端点函数重复编写 try/except。
+    path 参数只需传资源路径，API 前缀由 get_ida_api_prefix() 自动拼接。
 
     Args:
         method: HTTP 方法（GET/POST/PUT/DELETE）
-        path: IDA API 路径，如 /api/knowledge-bases
+        path: IDA API 资源路径，如 /knowledge-bases（不含 /api/v1 前缀）
         token: RSA-JWT 映射 Token
         **kwargs: 传递给 httpx 请求的额外参数（json/params/timeout 等）
 
@@ -401,7 +462,8 @@ async def _ida_request(method: str, path: str, token: str, **kwargs) -> Any:
         AppException: 网络异常或 IDA 返回错误时
     """
     client = get_knowledge_proxy_client()
-    url = f"{settings.ida_backend_url}{path}"
+    prefix = get_ida_api_prefix()
+    url = f"{settings.ida_backend_url}{prefix}{path}"
     headers = _get_ida_headers(token)
 
     try:
@@ -471,7 +533,7 @@ async def proxy_list_knowledge_bases(
     """
     token = await _get_user_token(request)
     return await _ida_request(
-        "GET", "/api/knowledge-bases", token,
+        "GET", "/knowledge-bases", token,
         params={"page": page, "per_page": per_page},
     )
 
@@ -495,7 +557,7 @@ async def proxy_create_knowledge_base(
     """
     token = await _get_user_token(request)
     return await _ida_request(
-        "POST", "/api/knowledge-bases", token,
+        "POST", "/knowledge-bases", token,
         json=body.model_dump(exclude_none=True),
     )
 
@@ -513,7 +575,7 @@ async def proxy_get_knowledge_base(kb_id: str, request: Request):
     """
     token = await _get_user_token(request)
     return await _ida_request(
-        "GET", f"/api/knowledge-bases/{kb_id}", token,
+        "GET", f"/knowledge-bases/{kb_id}", token,
     )
 
 
@@ -538,7 +600,7 @@ async def proxy_update_knowledge_base(
     """
     token = await _get_user_token(request)
     return await _ida_request(
-        "PUT", f"/api/knowledge-bases/{kb_id}", token,
+        "PUT", f"/knowledge-bases/{kb_id}", token,
         json=body.model_dump(exclude_none=True),
     )
 
@@ -556,7 +618,7 @@ async def proxy_delete_knowledge_base(kb_id: str, request: Request):
     """
     token = await _get_user_token(request)
     return await _ida_request(
-        "DELETE", f"/api/knowledge-bases/{kb_id}", token,
+        "DELETE", f"/knowledge-bases/{kb_id}", token,
     )
 
 
@@ -575,7 +637,7 @@ async def proxy_list_documents(kb_id: str, request: Request, page: int = 1, per_
     """
     token = await _get_user_token(request)
     return await _ida_request(
-        "GET", f"/api/knowledge-bases/{kb_id}/documents", token,
+        "GET", f"/knowledge-bases/{kb_id}/documents", token,
         params={"page": page, "per_page": per_page},
     )
 
@@ -607,7 +669,7 @@ async def proxy_upload_document(
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
-                f"{settings.ida_backend_url}/api/knowledge-bases/{kb_id}/documents",
+                f"{settings.ida_backend_url}{get_ida_api_prefix()}/knowledge-bases/{kb_id}/documents",
                 headers={"Authorization": f"Bearer {token}"},
                 files={"file": (file.filename, file_content, file.content_type)},
                 data={"folder_path": folder_path},
@@ -638,7 +700,7 @@ async def proxy_delete_document(kb_id: str, doc_id: str, request: Request):
     """
     token = await _get_user_token(request)
     return await _ida_request(
-        "DELETE", f"/api/knowledge-bases/{kb_id}/documents/{doc_id}", token,
+        "DELETE", f"/knowledge-bases/{kb_id}/documents/{doc_id}", token,
     )
 
 
@@ -661,7 +723,7 @@ async def proxy_qa_ask(
     """
     token = await _get_user_token(request)
     return await _ida_request(
-        "POST", "/api/qa/ask", token,
+        "POST", "/qa/ask", token,
         json=body.model_dump(exclude_none=True),
         timeout=60.0,
     )
@@ -702,7 +764,7 @@ async def proxy_qa_ask_stream(
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
                     "POST",
-                    f"{settings.ida_backend_url}/api/qa/ask/stream",
+                    f"{settings.ida_backend_url}{get_ida_api_prefix()}/qa/ask/stream",
                     json=body.model_dump(exclude_none=True),
                     headers=_get_ida_headers(token),
                 ) as response:
@@ -773,7 +835,7 @@ async def proxy_parse_files(request: Request):
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
-                f"{settings.ida_backend_url}/api/qa/parse-files",
+                f"{settings.ida_backend_url}{get_ida_api_prefix()}/qa/parse-files",
                 headers={"Authorization": f"Bearer {token}"},
                 files=file_list,
             )
@@ -813,7 +875,7 @@ async def proxy_analyze_image(
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{settings.ida_backend_url}/api/qa/analyze-image",
+                f"{settings.ida_backend_url}{get_ida_api_prefix()}/qa/analyze-image",
                 headers={"Authorization": f"Bearer {token}"},
                 files={"image": (image.filename, image_content, image.content_type)},
                 data={"query": query},

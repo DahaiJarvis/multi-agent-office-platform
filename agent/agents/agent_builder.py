@@ -1,7 +1,9 @@
 """Agent Builder - 自定义 Agent 创建与管理
 
-企业用户可根据自身业务需求创建自定义 Agent，无需开发团队介入。
-支持：
+================================================================================
+模块职责
+================================================================================
+提供企业级自定义 Agent 创建与管理能力，支持：
   - 自定义系统提示词
   - 选择绑定的 MCP 工具
   - 配置模型级别
@@ -9,7 +11,68 @@
   - 版本管理与发布控制
   - Agent 模板市场
 
-与 AgentForce Builder、Coze 可视化构建器对齐。
+================================================================================
+核心功能
+================================================================================
+1. Agent 生命周期管理
+   - 创建（create_custom_agent）
+   - 更新（update_custom_agent）
+   - 发布（publish_custom_agent）
+   - 禁用（disable_custom_agent）
+   - 归档（archive_custom_agent）
+   - 删除（delete_custom_agent）
+
+2. 版本管理
+   - 自动版本记录
+   - 版本差异计算
+   - 版本回滚（rollback_agent_version）
+
+3. 模板管理
+   - 官方模板（合同审查、IT支持、入职引导、数据分析）
+   - 从模板创建 Agent（create_from_template）
+   - 模板使用统计
+
+4. 灰度发布
+   - 按比例灰度（canary_percentage）
+   - 白名单灰度（canary_whitelist）
+
+================================================================================
+与其他模块的关系
+================================================================================
+- domain.py: 自定义 Agent 注册到 AGENT_PROMPTS 和 AGENT_CREATORS
+- mcp_integration.py: 自定义 Agent 绑定 MCP 工具
+- team_factory.py: 自定义 Agent 可被意图路由调用
+
+================================================================================
+使用示例
+================================================================================
+    # 创建自定义 Agent
+    config = CustomAgentConfig(
+        name="ContractReviewAgent",
+        display_name="合同审查助手",
+        description="自动审查合同条款，识别风险点",
+        system_prompt="你是合同审查专家...",
+        mcp_servers=["doc", "oa"],
+        model_tier=ModelTier.MAX,
+    )
+    agent = create_custom_agent(config, created_by="user123")
+
+    # 发布 Agent
+    publish_custom_agent(agent.agent_id, published_by="user123")
+
+    # 从模板创建
+    agent = create_from_template(
+        template_id="tpl-contract-review",
+        name="MyContractReviewer",
+        created_by="user123",
+    )
+
+================================================================================
+对标产品
+================================================================================
+- AgentForce Builder（Salesforce）
+- Coze 可视化构建器（字节跳动）
+- GPTs（OpenAI）
 """
 
 import hashlib
@@ -26,7 +89,24 @@ logger = logging.getLogger(__name__)
 
 
 class AgentStatus(str, Enum):
-    """Agent 生命周期状态"""
+    """Agent 生命周期状态
+
+    定义 Agent 从创建到归档的完整生命周期。
+
+    状态流转：
+    -------------------------------------------------------------------------
+    DRAFT -> PUBLISHED -> DISABLED -> ARCHIVED
+      |         |           |
+      v         v           v
+    (删除)    (禁用)      (归档)
+    -------------------------------------------------------------------------
+
+    状态说明：
+    - DRAFT: 草稿状态，可编辑，不可使用
+    - PUBLISHED: 已发布，用户可使用
+    - DISABLED: 已禁用，暂停使用
+    - ARCHIVED: 已归档，不可修改，可删除
+    """
 
     DRAFT = "draft"
     PUBLISHED = "published"
@@ -35,7 +115,25 @@ class AgentStatus(str, Enum):
 
 
 class ModelTier(str, Enum):
-    """模型级别"""
+    """模型级别
+
+    定义 Agent 可使用的模型级别，平衡成本与能力。
+
+    级别说明：
+    -------------------------------------------------------------------------
+    - MAX: 最高能力模型（qwen-max）
+      - 适用场景：复杂推理、合同审查、数据分析
+      - 成本：高
+
+    - PLUS: 中等能力模型（qwen-plus）
+      - 适用场景：常规办公任务、邮件处理
+      - 成本：中
+
+    - TURBO: 轻量级模型（qwen-turbo）
+      - 适用场景：简单查询、意图分类
+      - 成本：低
+    -------------------------------------------------------------------------
+    """
 
     MAX = "max"
     PLUS = "plus"
@@ -43,7 +141,24 @@ class ModelTier(str, Enum):
 
 
 class CustomAgentConfig(BaseModel):
-    """自定义 Agent 配置"""
+    """自定义 Agent 配置
+
+    定义自定义 Agent 的完整配置，包括：
+      - 基本信息（名称、描述、标签）
+      - 模型配置（模型级别、温度、最大轮次）
+      - 工具绑定（MCP 服务列表）
+      - 安全配置（审核要求、角色权限）
+      - 发布配置（灰度比例、白名单）
+
+    配置验证：
+    -------------------------------------------------------------------------
+    - name: 长度 1-64 字符，唯一标识
+    - system_prompt: 长度 10-8192 字符
+    - temperature: 范围 0.0-2.0
+    - max_rounds: 范围 1-50
+    - canary_percentage: 范围 0-100
+    -------------------------------------------------------------------------
+    """
 
     agent_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str = Field(min_length=1, max_length=64, description="Agent 名称，如 'ContractReviewAgent'")
@@ -75,7 +190,30 @@ class CustomAgentConfig(BaseModel):
 
 
 class AgentTemplate(BaseModel):
-    """Agent 模板"""
+    """Agent 模板
+
+    提供 Agent 创建的快捷方式，包含预设配置。
+
+    模板类型：
+    -------------------------------------------------------------------------
+    - 官方模板（is_official=True）
+      - 由平台提供，经过验证
+      - 包含合同审查、IT支持、入职引导、数据分析等
+
+    - 用户模板（is_official=False）
+      - 由企业用户创建
+      - 可分享给团队使用
+    -------------------------------------------------------------------------
+
+    Attributes:
+        template_id: 模板唯一标识
+        name: 模板名称
+        description: 模板描述
+        category: 模板分类（legal/it/hr/analytics/general）
+        config: 模板配置（CustomAgentConfig）
+        usage_count: 使用次数
+        is_official: 是否官方模板
+    """
 
     template_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str = Field(description="模板名称")
@@ -87,7 +225,15 @@ class AgentTemplate(BaseModel):
 
 
 class AgentVersionDiff(BaseModel):
-    """Agent 版本差异"""
+    """Agent 版本差异
+
+    记录版本更新时的字段变更。
+
+    Attributes:
+        field: 变更的字段名
+        old_value: 旧值
+        new_value: 新值
+    """
 
     field: str
     old_value: str
@@ -95,7 +241,18 @@ class AgentVersionDiff(BaseModel):
 
 
 class AgentVersionRecord(BaseModel):
-    """Agent 版本记录"""
+    """Agent 版本记录
+
+    保存 Agent 的历史版本，支持版本回滚。
+
+    Attributes:
+        agent_id: Agent ID
+        version: 版本号
+        config: 该版本的完整配置
+        diff_from_previous: 与上一版本的差异
+        created_at: 创建时间
+        created_by: 创建者
+    """
 
     agent_id: str
     version: int
@@ -106,14 +263,32 @@ class AgentVersionRecord(BaseModel):
 
 
 # ==================== 存储 ====================
-
+# -------------------------------------------------------------------------
+# 内存存储，用于开发测试
+# 生产环境应替换为持久化存储（数据库/Redis）
+# -------------------------------------------------------------------------
 _agents_store: dict[str, CustomAgentConfig] = {}
 _versions_store: dict[str, list[AgentVersionRecord]] = {}
 _templates_store: dict[str, AgentTemplate] = {}
 
 
 def _init_default_templates() -> None:
-    """初始化官方 Agent 模板"""
+    """初始化官方 Agent 模板
+
+    创建系统内置的官方模板，包括：
+      - 合同审查助手（ContractReviewAgent）
+      - IT 技术支持（ITSupportAgent）
+      - 新员工入职引导（OnboardingAgent）
+      - 数据分析助手（DataAnalystAgent）
+
+    模板特点：
+    -------------------------------------------------------------------------
+    - 经过验证的配置
+    - 专业的系统提示词
+    - 合理的工具绑定
+    - 适当的模型配置
+    -------------------------------------------------------------------------
+    """
     if _templates_store:
         return
 
@@ -272,12 +447,39 @@ _init_default_templates()
 def create_custom_agent(config: CustomAgentConfig, created_by: str) -> CustomAgentConfig:
     """创建自定义 Agent
 
+    创建流程：
+    -------------------------------------------------------------------------
+    1. 设置创建者和时间戳
+    2. 设置初始状态为 DRAFT
+    3. 设置初始版本号为 1
+    4. 保存到存储
+    5. 创建初始版本记录
+    -------------------------------------------------------------------------
+
     Args:
-        config: Agent 配置
+        config: Agent 配置，包含：
+            - name: Agent 名称（唯一标识）
+            - display_name: 显示名称
+            - description: 功能描述
+            - system_prompt: 系统提示词
+            - mcp_servers: MCP 服务列表
+            - model_tier: 模型级别
+            - temperature: 推理温度
+            - tags: 标签
         created_by: 创建者用户ID
 
     Returns:
         创建后的 Agent 配置
+
+    使用示例：
+        config = CustomAgentConfig(
+            name="ContractReviewAgent",
+            display_name="合同审查助手",
+            system_prompt="你是合同审查专家...",
+            mcp_servers=["doc", "oa"],
+            model_tier=ModelTier.MAX,
+        )
+        agent = create_custom_agent(config, created_by="user123")
     """
     config.created_by = created_by
     config.status = AgentStatus.DRAFT
@@ -294,7 +496,14 @@ def create_custom_agent(config: CustomAgentConfig, created_by: str) -> CustomAge
 
 
 def get_custom_agent(agent_id: str) -> CustomAgentConfig | None:
-    """获取自定义 Agent 配置"""
+    """获取自定义 Agent 配置
+
+    Args:
+        agent_id: Agent ID
+
+    Returns:
+        Agent 配置，不存在时返回 None
+    """
     return _agents_store.get(agent_id)
 
 
@@ -305,13 +514,25 @@ def list_custom_agents(
 ) -> list[CustomAgentConfig]:
     """列出自定义 Agent
 
+    支持按创建者、状态、标签过滤。
+
     Args:
-        created_by: 按创建者过滤
-        status: 按状态过滤
-        tags: 按标签过滤
+        created_by: 按创建者过滤（空字符串表示不过滤）
+        status: 按状态过滤（None 表示不过滤）
+        tags: 按标签过滤（任意标签匹配即可）
 
     Returns:
-        Agent 配置列表
+        Agent 配置列表，按更新时间降序排列
+
+    使用示例：
+        # 列出所有已发布的 Agent
+        agents = list_custom_agents(status=AgentStatus.PUBLISHED)
+
+        # 列出某用户创建的 Agent
+        agents = list_custom_agents(created_by="user123")
+
+        # 列出包含特定标签的 Agent
+        agents = list_custom_agents(tags=["法务", "合同"])
     """
     agents = list(_agents_store.values())
 
@@ -333,15 +554,39 @@ def update_custom_agent(
 ) -> CustomAgentConfig | None:
     """更新自定义 Agent 配置
 
-    更新时自动创建新版本记录。
+    更新流程：
+    -------------------------------------------------------------------------
+    1. 检查 Agent 是否存在
+    2. 检查 Agent 是否已归档（已归档不可修改）
+    3. 保存旧配置用于计算差异
+    4. 应用更新
+    5. 增加版本号
+    6. 如果已发布，回退到 DRAFT 状态
+    7. 保存版本记录
+    -------------------------------------------------------------------------
 
     Args:
         agent_id: Agent ID
-        updates: 更新字段字典
+        updates: 更新字段字典，如：
+            {
+                "system_prompt": "新的提示词",
+                "temperature": 0.5,
+                "tags": ["新标签"],
+            }
         updated_by: 更新者用户ID
 
     Returns:
         更新后的 Agent 配置，或 None（Agent 不存在）
+
+    Raises:
+        ValueError: Agent 已归档，不可修改
+
+    使用示例：
+        agent = update_custom_agent(
+            agent_id="agent-123",
+            updates={"temperature": 0.5},
+            updated_by="user123",
+        )
     """
     agent = _agents_store.get(agent_id)
     if not agent:
@@ -373,7 +618,14 @@ def update_custom_agent(
 def publish_custom_agent(agent_id: str, published_by: str) -> CustomAgentConfig | None:
     """发布自定义 Agent
 
-    只有 DRAFT 状态的 Agent 可以发布。发布后用户可使用。
+    发布流程：
+    -------------------------------------------------------------------------
+    1. 检查 Agent 是否存在
+    2. 检查 Agent 状态是否为 DRAFT
+    3. 更新状态为 PUBLISHED
+    4. 记录发布时间
+    5. 注册到运行时（使 Agent 可被调用）
+    -------------------------------------------------------------------------
 
     Args:
         agent_id: Agent ID
@@ -381,6 +633,12 @@ def publish_custom_agent(agent_id: str, published_by: str) -> CustomAgentConfig 
 
     Returns:
         发布后的 Agent 配置，或 None
+
+    Raises:
+        ValueError: Agent 状态不是 DRAFT
+
+    使用示例：
+        agent = publish_custom_agent("agent-123", published_by="user123")
     """
     agent = _agents_store.get(agent_id)
     if not agent:
@@ -400,7 +658,16 @@ def publish_custom_agent(agent_id: str, published_by: str) -> CustomAgentConfig 
 
 
 def disable_custom_agent(agent_id: str) -> CustomAgentConfig | None:
-    """禁用自定义 Agent"""
+    """禁用自定义 Agent
+
+    禁用后用户无法使用该 Agent，但配置仍保留。
+
+    Args:
+        agent_id: Agent ID
+
+    Returns:
+        禁用后的 Agent 配置，或 None
+    """
     agent = _agents_store.get(agent_id)
     if not agent:
         return None
@@ -415,7 +682,16 @@ def disable_custom_agent(agent_id: str) -> CustomAgentConfig | None:
 
 
 def archive_custom_agent(agent_id: str) -> CustomAgentConfig | None:
-    """归档自定义 Agent"""
+    """归档自定义 Agent
+
+    归档后 Agent 不可修改，但可删除。
+
+    Args:
+        agent_id: Agent ID
+
+    Returns:
+        归档后的 Agent 配置，或 None
+    """
     agent = _agents_store.get(agent_id)
     if not agent:
         return None
@@ -430,7 +706,23 @@ def archive_custom_agent(agent_id: str) -> CustomAgentConfig | None:
 
 
 def delete_custom_agent(agent_id: str) -> bool:
-    """删除自定义 Agent（仅限 DRAFT 或 ARCHIVED 状态）"""
+    """删除自定义 Agent
+
+    只能删除 DRAFT 或 ARCHIVED 状态的 Agent。
+
+    Args:
+        agent_id: Agent ID
+
+    Returns:
+        True: 删除成功
+        False: Agent 不存在
+
+    Raises:
+        ValueError: Agent 状态不允许删除
+
+    使用示例：
+        success = delete_custom_agent("agent-123")
+    """
     agent = _agents_store.get(agent_id)
     if not agent:
         return False

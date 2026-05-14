@@ -1,8 +1,71 @@
-"""任务路由
+"""任务路由引擎
 
-Supervisor 的路由决策逻辑：意图分类 -> 路由表匹配 -> 团队创建 -> 上下文注入 -> 任务执行
-支持同步执行和流式执行两种模式。
-集成 ExecutionController 实现超时控制、重试逻辑和上下文压缩。
+这是整个多 Agent 系统的入口模块，负责将用户请求路由到正确的 Agent 并执行。
+
+================================================================================
+模块职责
+================================================================================
+
+1. 意图分类：调用 LLM 识别用户意图（如 approval_query、email_send 等）
+2. 置信度校验：低置信度时请求用户澄清
+3. 团队创建：根据意图创建对应的 Agent 团队（DIRECT/SELECTOR/SWARM）
+4. 上下文注入：将对话历史注入任务描述，使 Agent 理解上下文
+5. 任务执行：调用 ExecutionController 执行任务（含超时控制、重试、上下文压缩）
+6. 结果返回：返回执行结果或错误信息
+
+================================================================================
+核心流程
+================================================================================
+
+用户消息 -> 意图分类 -> 置信度校验 -> 创建团队 -> 注入上下文 -> 执行任务 -> 返回结果
+
+详细步骤：
+  1. classify_intent(user_message) 使用轻量模型分类意图
+  2. 如果 confidence < 0.7，返回 clarification_needed 请求用户澄清
+  3. create_team(intent) 根据意图创建 Agent 团队
+  4. _build_contextual_task() 将对话历史注入任务描述
+  5. ExecutionController.execute_with_control() 执行任务
+  6. 返回执行结果
+
+================================================================================
+两种执行模式
+================================================================================
+
+1. route_and_execute()：同步执行，等待完整结果后返回
+2. route_and_execute_stream()：流式执行，逐 Token 返回中间结果
+
+================================================================================
+与其他模块的关系
+================================================================================
+
+- agent.agents.supervisor：提供意图分类能力（classify_intent）
+- agent.teams.team_factory：提供团队创建能力（create_team）
+- agent.teams.execution_controller：提供执行控制能力（超时、重试、压缩）
+- agent.core.session_manager：提供会话状态管理
+- observability.tracing：提供追踪能力（Langfuse）
+- observability.metrics：提供指标记录能力
+
+================================================================================
+使用示例
+================================================================================
+
+    # 同步执行
+    result = await route_and_execute(
+        user_message="帮我查一下待审批列表",
+        session_id="session-123",
+        user_id="user-456",
+    )
+
+    # 流式执行
+    async for event in route_and_execute_stream(
+        user_message="帮我发一封邮件",
+        session_id="session-123",
+        user_id="user-456",
+    ):
+        if event["type"] == "chunk":
+            print(event["content"], end="")
+        elif event["type"] == "complete":
+            print("\\n完成")
 """
 
 import logging
@@ -10,7 +73,18 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from autogen_agentchat.messages import TextMessage, ToolCallSummaryMessage, HandoffMessage
+from autogen_agentchat.messages import (
+    TextMessage,
+    ToolCallSummaryMessage,
+    HandoffMessage,
+    BaseAgentEvent,
+    BaseChatMessage,
+    ModelClientStreamingChunkEvent,
+    ToolCallRequestEvent,
+    ToolCallExecutionEvent,
+    ThoughtEvent,
+    StopMessage,
+)
 
 from agent.agents.supervisor import (
     classify_intent,
@@ -27,6 +101,7 @@ from observability.tracing import langfuse_tracer, span_cache
 logger = logging.getLogger(__name__)
 
 # 置信度阈值，低于此值需要用户确认
+# 当 LLM 对意图分类的置信度低于 70% 时，不直接执行，而是请求用户澄清
 CONFIDENCE_THRESHOLD = 0.7
 
 
@@ -37,36 +112,103 @@ async def route_and_execute(
     session: SessionState | None = None,
     knowledge_base_id: str | None = None,
 ) -> dict[str, Any]:
-    """路由并执行用户请求
+    """路由并执行用户请求（同步模式）
 
-    完整流程：
-    1. 意图分类（选择知识库时跳过，直接路由到 KnowledgeAgent）
-    2. 置信度校验
-    3. 路由表匹配
-    4. 创建团队
-    5. 上下文注入（L2 短期记忆）
-    6. 执行任务
-    7. 返回结果
+    这是整个系统的主入口函数，完成从用户消息到执行结果的完整流程。
+
+    执行流程：
+    -------------------------------------------------------------------------
+    步骤 1：获取会话状态
+      - 从 SessionManager 获取会话，包含对话历史和上下文摘要
+      - 会话状态用于构建带上下文的任务描述
+
+    步骤 2：意图分类
+      - 调用 classify_intent() 使用轻量模型识别用户意图
+      - 如果指定了 knowledge_base_id，跳过意图分类，直接路由到 KnowledgeAgent
+      - 意图分类结果包含：intent（意图标签）、confidence（置信度）、
+        target_agent（目标 Agent）、collaboration_mode（协作模式）
+
+    步骤 3：置信度校验
+      - 如果 confidence < 0.7，返回 clarification_needed，请求用户澄清
+      - 避免在意图不明确时执行错误操作
+
+    步骤 4：创建团队
+      - 调用 create_team(intent) 根据意图创建 Agent 团队
+      - DIRECT 模式：单个 Agent
+      - SELECTOR 模式：SelectorGroupChat（可能包含 Reviewer）
+      - SWARM 模式：Swarm（包含 Supervisor + 领域 Agent + Reviewer）
+
+    步骤 5：构建带上下文的任务描述
+      - 调用 _build_contextual_task() 将对话历史注入任务描述
+      - 使 Agent 能够理解对话上下文，实现多轮对话
+
+    步骤 6：执行任务
+      - 调用 ExecutionController.execute_with_control() 执行
+      - ExecutionController 负责：超时控制、重试逻辑、上下文压缩
+      - 记录执行指标和追踪数据
+
+    步骤 7：返回结果
+      - 成功：返回 status=success 和 Agent 输出
+      - 超时：返回 status=error 和超时提示
+      - 失败：返回 status=error 和错误信息
+    -------------------------------------------------------------------------
 
     Args:
-        user_message: 用户消息
-        session_id: 会话ID
-        user_id: 用户ID
-        session: 会话状态（可选，传入时直接使用，否则从 SessionManager 获取）
-        knowledge_base_id: 知识库ID（可选，选择知识库后直接路由到 KnowledgeAgent）
+        user_message: 用户原始消息文本
+        session_id: 会话唯一标识，用于获取会话状态和追踪
+        user_id: 用户唯一标识，用于审计日志和权限校验
+        session: 会话状态对象（可选），传入时直接使用，否则从 SessionManager 获取
+        knowledge_base_id: 知识库 ID（可选），指定后直接路由到 KnowledgeAgent，
+                          跳过意图分类，用于知识库选择后的场景
 
     Returns:
-        执行结果字典
+        执行结果字典，包含以下字段：
+        - status: 执行状态（success / error / clarification_needed）
+        - message: Agent 输出内容或错误提示
+        - agent_name: 执行的 Agent 名称
+        - intent: 识别的意图标签
+        - confidence: 意图分类置信度（仅 clarification_needed 时返回）
+        - collaboration_mode: 协作模式（仅 success 时返回）
+
+    示例返回值：
+        # 成功
+        {
+            "status": "success",
+            "message": "您有 3 条待审批...",
+            "agent_name": "ApprovalAgent",
+            "intent": "approval_query",
+            "collaboration_mode": "direct"
+        }
+
+        # 需要澄清
+        {
+            "status": "clarification_needed",
+            "message": "我不太确定您的意图（置信度: 65%），请更详细地描述您的需求。",
+            "intent": "general",
+            "confidence": 0.65
+        }
+
+        # 执行失败
+        {
+            "status": "error",
+            "message": "任务执行超时（超过 600s），请简化请求或稍后重试。",
+            "agent_name": "KnowledgeAgent",
+            "intent": "knowledge_query"
+        }
     """
     start_time = time.time()
 
-    # 获取会话状态（L2 短期记忆）
+    # 步骤 1：获取会话状态（L2 短期记忆）
+    # 会话状态包含对话历史和上下文摘要，用于构建带上下文的任务描述
     if session is None:
         session_mgr = await get_session_manager()
         session = await session_mgr.get_session(session_id)
 
-    # 1. 意图分类（选择知识库时跳过，直接路由到 KnowledgeAgent）
+    # 步骤 2：意图分类
+    # 使用轻量模型（qwen-turbo）识别用户意图
+    # 如果指定了知识库 ID，跳过意图分类，直接路由到 KnowledgeAgent
     if knowledge_base_id:
+        # 知识库直路由：用户已选择知识库，直接路由到 KnowledgeAgent
         intent = IntentResult(
             intent="knowledge_query",
             confidence=1.0,
@@ -80,6 +222,7 @@ async def route_and_execute(
             intent.target_agent,
         )
     else:
+        # 正常意图分类：调用 LLM 识别意图
         intent = await classify_intent(user_message)
         logger.info(
             "意图分类: intent=%s confidence=%.2f agent=%s mode=%s",
@@ -89,7 +232,7 @@ async def route_and_execute(
             intent.collaboration_mode.value,
         )
 
-    # 记录意图分类 Span
+    # 记录意图分类 Span（用于 Langfuse 追踪）
     try:
         intent_duration = (time.time() - start_time) * 1000
         langfuse_tracer.trace_intent_classification(
@@ -115,7 +258,7 @@ async def route_and_execute(
     except Exception:
         pass
 
-    # 发布意图分类事件
+    # 发布意图分类事件（用于事件驱动架构）
     try:
         await publish_event(
             EventType.INTENT_CLASSIFIED,
@@ -130,7 +273,9 @@ async def route_and_execute(
     except Exception:
         pass
 
-    # 2. 置信度校验
+    # 步骤 3：置信度校验
+    # 当置信度低于阈值时，不直接执行，而是请求用户澄清
+    # 避免在意图不明确时执行错误操作（如误发邮件）
     if intent.confidence < CONFIDENCE_THRESHOLD:
         return {
             "status": "clarification_needed",
@@ -139,7 +284,8 @@ async def route_and_execute(
             "confidence": intent.confidence,
         }
 
-    # 3. 创建团队
+    # 步骤 4：创建团队
+    # 根据意图的 collaboration_mode 创建对应的 Agent 团队
     try:
         team = await create_team(intent)
     except Exception as e:
@@ -150,7 +296,8 @@ async def route_and_execute(
             "intent": intent.intent,
         }
 
-    # 4. 构建带上下文的任务描述
+    # 步骤 5：构建带上下文的任务描述
+    # 将对话历史注入任务描述，使 Agent 能够理解多轮对话上下文
     task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
 
     # 发布 Agent 启动事件
@@ -167,13 +314,15 @@ async def route_and_execute(
     except Exception:
         pass
 
-    # 5. 执行任务（集成 ExecutionController：超时控制、重试、上下文压缩）
+    # 步骤 6：执行任务
+    # 调用 ExecutionController 执行，包含超时控制、重试逻辑、上下文压缩
     try:
         controller = get_execution_controller()
         result, exec_meta = await controller.execute_with_control(
             team, task, session_id, user_id,
         )
 
+        # 处理超时
         if exec_meta.status == "timeout":
             duration = time.time() - start_time
             record_agent_call(intent.target_agent, "error", duration)
@@ -192,6 +341,7 @@ async def route_and_execute(
                 "intent": intent.intent,
             }
 
+        # 处理执行错误
         if exec_meta.status == "error" and result is None:
             duration = time.time() - start_time
             record_agent_call(intent.target_agent, "error", duration)
@@ -211,12 +361,13 @@ async def route_and_execute(
                 "intent": intent.intent,
             }
 
+        # 提取 Agent 输出
         output = result.messages[-1].content if result and result.messages else "处理完成"
 
         duration = time.time() - start_time
         record_agent_call(intent.target_agent, "success", duration)
 
-        # 记录 Agent 调用审计日志
+        # 记录审计日志
         try:
             from agent.core.audit import audit_log, AuditEventType
             await audit_log(
@@ -237,6 +388,7 @@ async def route_and_execute(
         except Exception:
             pass
 
+        # 记录 Langfuse 追踪
         langfuse_tracer.trace_agent_call(
             trace_id=session_id,
             agent_name=intent.target_agent,
@@ -252,7 +404,7 @@ async def route_and_execute(
             },
         )
 
-        # 记录 Agent 调用 Span 和统计
+        # 记录 Span 和统计
         try:
             await span_cache.store_span(
                 session_id=session_id,
@@ -293,7 +445,7 @@ async def route_and_execute(
         record_agent_call(intent.target_agent, "error", duration)
         logger.error("任务执行失败: agent=%s error=%s", intent.target_agent, e)
 
-        # 记录 Agent 调用失败统计
+        # 记录失败统计
         try:
             await span_cache.increment_agent_stats(
                 intent.target_agent, duration * 1000, success=False,
@@ -301,7 +453,7 @@ async def route_and_execute(
         except Exception:
             pass
 
-        # 记录 Agent 调用失败审计日志
+        # 记录失败审计日志
         try:
             from agent.core.audit import audit_log, AuditEventType
             await audit_log(
@@ -329,6 +481,7 @@ async def route_and_execute(
         }
     finally:
         # After-turn 知识提取（异步，不阻塞主流程）
+        # 从对话中提取有价值的知识存储到长期记忆
         try:
             from agent.core.context_manager import extract_and_store_knowledge
             tenant_id = ""
@@ -356,19 +509,42 @@ async def _build_contextual_task(
 ) -> str:
     """构建带上下文的任务描述
 
-    将会话历史注入到任务描述中，使 Agent 能够理解对话上下文。
-    对于 DIRECT 模式，注入简短的历史摘要；
-    对于 SELECTOR/SWARM 模式，注入更完整的上下文。
-    当指定知识库时，在任务描述中注入知识库标识，引导 Agent 使用对应知识库。
+    将会话历史注入到任务描述中，使 Agent 能够理解对话上下文，实现多轮对话。
+
+    注入内容：
+    -------------------------------------------------------------------------
+    1. 知识库上下文（如果指定了 knowledge_base_id）
+       - 注入知识库 ID
+       - 引导 Agent 使用知识库检索工具
+
+    2. 前情摘要（如果会话有 context_summary）
+       - 之前对话的压缩摘要
+       - 帮助 Agent 快速了解历史背景
+
+    3. 对话历史（最近 6 轮）
+       - 用户和助手的对话记录
+       - 使 Agent 能够理解上下文引用（如"它"、"那个"等）
+    -------------------------------------------------------------------------
 
     Args:
         user_message: 用户原始消息
         intent: 意图分类结果
-        session: 会话状态
-        knowledge_base_id: 知识库ID（可选，指定后注入到任务上下文）
+        session: 会话状态，包含对话历史和上下文摘要
+        knowledge_base_id: 知识库 ID（可选），指定后注入到任务上下文
 
     Returns:
-        带上下文的任务描述
+        带上下文的任务描述，格式如下：
+
+        [知识库ID] kb-123
+        请使用知识库检索工具在指定知识库中搜索相关信息来回答用户问题。
+
+        [前情摘要] 用户之前询问了项目进度...
+
+        [对话历史]
+        用户: 帮我查一下项目进度
+        助手: 项目 A 进度 80%...
+
+        [当前请求] 那项目 B 呢？
     """
     parts = []
 
@@ -378,7 +554,7 @@ async def _build_contextual_task(
         parts.append("请使用知识库检索工具在指定知识库中搜索相关信息来回答用户问题。")
 
     if session is not None and session.message_history:
-        # 提取最近的对话历史（取最近几轮，避免过长）
+        # 提取最近的对话历史（取最近 6 轮，避免过长）
         recent_history = session.message_history[-6:]
         history_parts = []
         for msg in recent_history:
@@ -391,6 +567,7 @@ async def _build_contextual_task(
         if history_parts:
             history_text = "\n".join(history_parts)
 
+            # 注入前情摘要（如果有）
             if session.context_summary:
                 parts.append(f"[前情摘要] {session.context_summary}")
 
@@ -413,13 +590,49 @@ async def route_and_execute_stream(
     与 route_and_execute 流程一致，但使用 AutoGen 的 run_stream()
     逐 Token 产出中间结果，实现真正的流式输出。
 
+    流式输出适用于：
+    - 长文本生成（如报告、邮件起草）
+    - 实时反馈用户体验
+    - 前端打字机效果展示
+
+    流程与 route_and_execute 相同，此处不再赘述。
+
     Yields:
-        流式事件字典，包含以下类型:
-        - {"type": "intent", "intent": ..., "confidence": ..., "agent": ..., "mode": ...}
-        - {"type": "clarification", "message": ...}
-        - {"type": "error", "message": ...}
-        - {"type": "chunk", "agent_name": ..., "content": ...}
-        - {"type": "complete", "agent_name": ..., "intent": ..., "mode": ...}
+        流式事件字典，按时间顺序输出以下类型：
+
+        1. 意图分类结果：
+           {"type": "intent", "intent": "approval_query", "confidence": 0.95,
+            "agent": "ApprovalAgent", "mode": "direct"}
+
+        2. 需要澄清：
+           {"type": "clarification", "message": "我不太确定您的意图..."}
+
+        3. 错误：
+           {"type": "error", "message": "任务执行失败: ..."}
+
+        4. 流式内容块（核心输出）：
+           {"type": "chunk", "agent_name": "ApprovalAgent", "content": "您有"}
+
+        5. 执行完成：
+           {"type": "complete", "agent_name": "ApprovalAgent",
+            "intent": "approval_query", "mode": "direct"}
+
+        6. 控制事件（内部使用，通常不展示给用户）：
+           {"type": "retry", "attempt": 1, "max_retries": 2}
+           {"type": "compacted", "original_tokens": 100000, "compacted_tokens": 50000}
+
+    使用示例：
+        async for event in route_and_execute_stream(
+            user_message="帮我写一封邮件",
+            session_id="session-123",
+            user_id="user-456",
+        ):
+            if event["type"] == "chunk":
+                print(event["content"], end="", flush=True)
+            elif event["type"] == "complete":
+                print("\\n[完成]")
+            elif event["type"] == "error":
+                print(f"\\n[错误] {event['message']}")
     """
     start_time = time.time()
 
@@ -427,7 +640,7 @@ async def route_and_execute_stream(
         session_mgr = await get_session_manager()
         session = await session_mgr.get_session(session_id)
 
-    # 1. 意图分类（选择知识库时跳过，直接路由到 KnowledgeAgent）
+    # 步骤 1：意图分类
     if knowledge_base_id:
         intent = IntentResult(
             intent="knowledge_query",
@@ -477,6 +690,7 @@ async def route_and_execute_stream(
     except Exception:
         pass
 
+    # 输出意图分类结果
     yield {
         "type": "intent",
         "intent": intent.intent,
@@ -496,7 +710,7 @@ async def route_and_execute_stream(
     except Exception:
         pass
 
-    # 2. 置信度校验
+    # 步骤 2：置信度校验
     if intent.confidence < CONFIDENCE_THRESHOLD:
         yield {
             "type": "clarification",
@@ -504,7 +718,7 @@ async def route_and_execute_stream(
         }
         return
 
-    # 3. 创建团队
+    # 步骤 3：创建团队
     try:
         team = await create_team(intent)
     except Exception as e:
@@ -515,7 +729,7 @@ async def route_and_execute_stream(
         }
         return
 
-    # 4. 构建带上下文的任务描述
+    # 步骤 4：构建带上下文的任务描述
     task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
 
     # 发布 Agent 启动事件
@@ -528,7 +742,7 @@ async def route_and_execute_stream(
     except Exception:
         pass
 
-    # 5. 流式执行任务（集成 ExecutionController：超时控制、重试、上下文压缩）
+    # 步骤 5：流式执行任务
     full_response = ""
     current_agent = intent.target_agent
 
@@ -570,29 +784,119 @@ async def route_and_execute_stream(
                         "message": message.get("message", "任务执行失败"),
                     }
                     return
-                # 其他 dict 类型事件直接传递
                 continue
 
-            # 处理 AutoGen 消息
-            if isinstance(message, (TextMessage, ToolCallSummaryMessage, HandoffMessage)):
-                content = message.content if hasattr(message, "content") else str(message)
-                if content and isinstance(content, str):
-                    source_name = getattr(message, "source", current_agent)
-                    if source_name:
-                        current_agent = source_name
+            # 处理 AutoGen BaseAgentEvent（流式 Token、工具调用等）
+            if isinstance(message, BaseAgentEvent):
+                if isinstance(message, ModelClientStreamingChunkEvent):
+                    # 逐 Token 流式输出事件：LLM 每生成一个 Token 即推送
+                    chunk_content = message.content or ""
+                    if chunk_content:
+                        full_response += chunk_content
+                        yield {
+                            "type": "chunk",
+                            "agent_name": message.source or current_agent,
+                            "content": chunk_content,
+                        }
+                elif isinstance(message, ToolCallRequestEvent):
+                    # 工具调用请求事件：通知前端 Agent 正在调用工具
+                    tool_names = [tc.name for tc in message.content] if message.content else []
+                    logger.debug("流式-工具调用请求: agent=%s tools=%s", message.source, tool_names)
+                    yield {
+                        "type": "tool_call",
+                        "agent_name": message.source or current_agent,
+                        "tools": tool_names,
+                    }
+                elif isinstance(message, ToolCallExecutionEvent):
+                    # 工具调用结果事件：记录到 full_response，不直接展示给用户
+                    for result in message.content:
+                        result_content = result.content if hasattr(result, "content") else ""
+                        if result_content:
+                            full_response += str(result_content)
+                elif isinstance(message, ThoughtEvent):
+                    # Agent 思考过程事件：可用于前端展示"正在思考"
+                    logger.debug("流式-Agent思考: agent=%s", message.source)
+                    yield {
+                        "type": "thought",
+                        "agent_name": message.source or current_agent,
+                        "content": message.content or "",
+                    }
+                # 其他 BaseAgentEvent 子类（SelectSpeakerEvent 等）忽略
+                continue
 
-                    delta = content[len(full_response):]
-                    if delta:
-                        full_response = content
+            # 处理 AutoGen BaseChatMessage（最终消息）
+            if isinstance(message, BaseChatMessage):
+                if isinstance(message, TextMessage):
+                    content = message.content or ""
+                    if content:
+                        full_response += content
                         yield {
                             "type": "chunk",
                             "agent_name": current_agent,
-                            "content": delta,
+                            "content": content,
                         }
+                elif isinstance(message, ToolCallSummaryMessage):
+                    # ToolCallSummaryMessage 是工具调用的摘要，不直接展示给用户
+                    full_response += message.content or ""
+                elif isinstance(message, HandoffMessage):
+                    # Agent 切换：记录新 Agent 并通知前端
+                    current_agent = message.target
+                    logger.info("流式-Agent 切换: %s -> %s", intent.target_agent, current_agent)
+                    yield {
+                        "type": "handoff",
+                        "from_agent": intent.target_agent,
+                        "to_agent": current_agent,
+                    }
+                    # HandoffMessage.context 是 List[ChatMessage]，不作为输出内容
+                elif isinstance(message, StopMessage):
+                    # 终止消息
+                    content = message.content or ""
+                    if content:
+                        full_response += content
+                        yield {
+                            "type": "chunk",
+                            "agent_name": current_agent,
+                            "content": content,
+                        }
+                continue
 
+    except Exception as e:
         duration = time.time() - start_time
-        record_agent_call(intent.target_agent, "success", duration)
+        record_agent_call(intent.target_agent, "error", duration)
+        logger.error("流式-任务执行失败: agent=%s error=%s", intent.target_agent, e)
 
+        # 发布错误事件
+        try:
+            await publish_event(EventType.ERROR, session_id, {
+                "agent_name": intent.target_agent,
+                "error": str(e),
+                "duration_ms": round(duration * 1000),
+            })
+        except Exception:
+            pass
+
+        yield {
+            "type": "error",
+            "message": f"任务执行失败: {str(e)}",
+        }
+        return
+
+    # 步骤 6：输出完成事件
+    duration = time.time() - start_time
+    record_agent_call(intent.target_agent, "success", duration)
+
+    # 发布 Agent 完成事件
+    try:
+        await publish_event(EventType.AGENT_END, session_id, {
+            "agent_name": intent.target_agent,
+            "status": "success",
+            "duration_ms": round(duration * 1000),
+        })
+    except Exception:
+        pass
+
+    # 记录 Langfuse 追踪
+    try:
         langfuse_tracer.trace_agent_call(
             trace_id=session_id,
             agent_name=intent.target_agent,
@@ -602,76 +906,15 @@ async def route_and_execute_stream(
                 "user_id": user_id,
                 "intent": intent.intent,
                 "mode": intent.collaboration_mode.value,
-                "review_required": intent.review_required,
             },
         )
+    except Exception:
+        pass
 
-        # 记录 Agent 调用 Span 和统计
-        try:
-            await span_cache.store_span(
-                session_id=session_id,
-                span_type="agent_call",
-                input_data={"user_message": user_message, "intent": intent.intent},
-                output_data={"message": full_response[:500], "agent": intent.target_agent},
-                duration_ms=duration * 1000,
-            )
-            await span_cache.increment_agent_stats(
-                intent.target_agent, duration * 1000, success=True,
-            )
-        except Exception:
-            pass
-
-        # 发布 Agent 完成事件
-        try:
-            await publish_event(EventType.AGENT_END, session_id, {
-                "agent_name": intent.target_agent,
-                "status": "success",
-                "duration_ms": round(duration * 1000),
-            })
-        except Exception:
-            pass
-
-        yield {
-            "type": "complete",
-            "agent_name": current_agent,
-            "intent": intent.intent,
-            "mode": intent.collaboration_mode.value,
-            "full_message": full_response,
-        }
-
-        # After-turn 知识提取（流式完成后异步执行，不阻塞主流程）
-        try:
-            from agent.core.context_manager import extract_and_store_knowledge
-            tenant_id = ""
-            try:
-                from security.tenant import get_current_tenant_id
-                tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
-            if session and session.message_history:
-                await extract_and_store_knowledge(
-                    user_id=user_id,
-                    session_id=session_id,
-                    messages=session.message_history,
-                    tenant_id=tenant_id,
-                )
-        except Exception:
-            pass
-
-    except Exception as e:
-        duration = time.time() - start_time
-        record_agent_call(intent.target_agent, "error", duration)
-        logger.error("流式-任务执行失败: agent=%s error=%s", intent.target_agent, e)
-
-        # 记录 Agent 调用失败统计
-        try:
-            await span_cache.increment_agent_stats(
-                intent.target_agent, duration * 1000, success=False,
-            )
-        except Exception:
-            pass
-
-        yield {
-            "type": "error",
-            "message": f"任务执行失败: {str(e)}",
-        }
+    yield {
+        "type": "complete",
+        "agent_name": intent.target_agent,
+        "intent": intent.intent,
+        "mode": intent.collaboration_mode.value,
+        "full_message": full_response,
+    }

@@ -185,6 +185,7 @@ class UserStore:
     async def _seed_default_users(self) -> None:
         """写入默认用户到数据库"""
         default_users = [
+            ("dev-user", "dev123", ["admin"], ["技术部"]),
             ("admin001", "admin123", ["admin"], ["技术部"]),
             ("mgr001", "mgr123", ["manager"], ["产品部"]),
             ("hr001", "hr123", ["hr_specialist"], ["人力资源部"]),

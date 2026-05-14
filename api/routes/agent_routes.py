@@ -6,8 +6,10 @@
   - GET /agent/events/{session_id}: SSE 事件流，实时推送事件总线事件
 """
 
+import asyncio
 import json
 import logging
+from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -122,6 +124,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
             final_mode = ""
 
             # 创建事件总线订阅，并行监听事件总线事件
+            event_bus_gen: AsyncGenerator[str, None] | None = None
             try:
                 from agent.core.event_bus import subscribe_events, EventType
 
@@ -134,7 +137,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                     EventType.DEGRADATION,
                 ]
 
-                async def _listen_event_bus() -> None:
+                async def _listen_event_bus() -> AsyncGenerator[str, None]:
                     async for event in subscribe_events(session.session_id, _event_types):
                         if event.data.get("heartbeat"):
                             continue
@@ -157,8 +160,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 knowledge_base_id=request.knowledge_base_id,
             )
 
-            # 创建两个异步任务
-            async def _consume_stream() -> None:
+            async def _consume_stream() -> AsyncGenerator[str, None]:
                 nonlocal full_message, final_agent, final_intent, final_mode
                 async for event in stream_gen:
                     event_type = event.get("type")
@@ -180,6 +182,24 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                         yield _format_sse("chunk", event["content"])
                         final_agent = event.get("agent_name", final_agent)
 
+                    elif event_type == "tool_call":
+                        yield _format_sse("tool_call", json.dumps({
+                            "agent_name": event.get("agent_name", ""),
+                            "tools": event.get("tools", []),
+                        }, ensure_ascii=False))
+
+                    elif event_type == "thought":
+                        yield _format_sse("thought", json.dumps({
+                            "agent_name": event.get("agent_name", ""),
+                            "content": event.get("content", ""),
+                        }, ensure_ascii=False))
+
+                    elif event_type == "handoff":
+                        yield _format_sse("handoff", json.dumps({
+                            "from_agent": event.get("from_agent", ""),
+                            "to_agent": event.get("to_agent", ""),
+                        }, ensure_ascii=False))
+
                     elif event_type == "complete":
                         final_agent = event.get("agent_name", final_agent)
                         final_intent = event.get("intent", "")
@@ -195,16 +215,28 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                         yield _format_sse("status", "error")
 
             # 优先处理流式对话，同时尝试获取事件总线事件
-            async for sse_data in _consume_stream():
-                yield sse_data
+            try:
+                async for sse_data in _consume_stream():
+                    yield sse_data
 
-                # 在每个 chunk 之后检查事件总线是否有事件
+                    # 在每个 chunk 之后非阻塞地检查事件总线是否有事件
+                    # 使用 asyncio.wait_for 设置短超时，避免阻塞主流程
+                    if event_bus_gen is not None:
+                        try:
+                            while True:
+                                bus_sse = await asyncio.wait_for(
+                                    event_bus_gen.__anext__(),
+                                    timeout=0.01,
+                                )
+                                yield bus_sse
+                        except (asyncio.TimeoutError, StopAsyncIteration):
+                            pass
+            finally:
+                # 确保关闭事件总线订阅，防止内存泄漏
                 if event_bus_gen is not None:
                     try:
-                        async for bus_sse in event_bus_gen:
-                            yield bus_sse
-                            break
-                    except (StopAsyncIteration, RuntimeError):
+                        await event_bus_gen.aclose()
+                    except Exception:
                         pass
 
             if full_message:

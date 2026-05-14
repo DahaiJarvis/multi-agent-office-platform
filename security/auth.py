@@ -1,11 +1,70 @@
 """JWT 认证
 
-Token 签发、验证、刷新与撤销，与架构文档 7.2.1 节对齐。
-支持 OAuth2.0 / SSO 对接，当前实现 JWT 基础认证。
+================================================================================
+模块职责
+================================================================================
+提供 JWT Token 的签发、验证、刷新与撤销功能，包括：
+  - Token 签发（访问令牌 + 刷新令牌）
+  - Token 验证（签名验证 + 黑名单检查）
+  - Token 刷新（通过刷新令牌获取新的访问令牌）
+  - Token 撤销（加入黑名单）
+
+================================================================================
+签名算法
+================================================================================
 默认使用 RS256（RSA 非对称密钥）签名算法：
-  - 私钥（jwt_private_key）用于签发 Token
-  - 公钥（jwt_public_key）用于验证 Token
-Token 黑名单基于 Redis 存储，支持分布式部署。
+  - 私钥（jwt_private_key）：用于签发 Token
+  - 公钥（jwt_public_key）：用于验证 Token
+
+优势：
+  - 公钥可公开，子系统能独立验证 Token
+  - 支持 JWKS 端点，便于密钥轮换
+
+================================================================================
+OIDC 标准兼容
+================================================================================
+Token 包含 OIDC 标准字段：
+  - sub: 全局唯一用户标识
+  - iss: Token 签发者标识
+  - aud: Token 受众列表
+  - iat: 签发时间
+  - exp: 过期时间
+  - jti: Token 唯一标识
+
+================================================================================
+Token 黑名单
+================================================================================
+基于 Redis 存储，支持分布式部署：
+  - 撤销 Token 时将 jti 加入黑名单
+  - 验证 Token 时检查黑名单
+  - 黑名单 TTL 与 Token 过期时间一致
+
+================================================================================
+与其他模块的关系
+================================================================================
+- sso.py: SSO 登录成功后调用 create_token_pair() 签发 Token
+- permission.py: 从 Token 中提取用户角色和部门
+- tenant.py: 从 Token 中提取租户ID
+
+================================================================================
+使用示例
+================================================================================
+    # 签发 Token
+    token_pair = create_token_pair(
+        user_id="user123",
+        roles=["admin"],
+        departments=["IT"],
+        tenant_id="tenant001",
+    )
+
+    # 验证 Token
+    payload = verify_token(token_pair.access_token)
+
+    # 刷新 Token
+    new_token_pair = refresh_token(token_pair.refresh_token)
+
+    # 撤销 Token
+    revoke_token(token_pair.access_token)
 """
 
 import logging
@@ -24,7 +83,9 @@ logger = logging.getLogger(__name__)
 def _get_signing_key() -> str:
     """获取 JWT 签名密钥
 
-    RS256 模式返回私钥用于签发，HS256 模式返回对称密钥。
+    根据配置的签名算法返回对应的密钥：
+    - RS256 模式：返回私钥（用于签发）
+    - HS256 模式：返回对称密钥
 
     Returns:
         签名密钥字符串
@@ -38,7 +99,9 @@ def _get_signing_key() -> str:
 def _get_verify_key() -> str:
     """获取 JWT 验证密钥
 
-    RS256 模式返回公钥用于验证，HS256 模式返回对称密钥。
+    根据配置的签名算法返回对应的密钥：
+    - RS256 模式：返回公钥（用于验证）
+    - HS256 模式：返回对称密钥
 
     Returns:
         验证密钥字符串
@@ -52,13 +115,27 @@ def _get_verify_key() -> str:
 class TokenPayload(BaseModel):
     """JWT Token 载荷
 
-    OIDC 规范扩展字段说明：
-    - sub: OIDC 标准字段，全局唯一用户标识，与 user_id 值相同
-    - iss: Token 签发者标识，用于跨系统验证 Token 来源
-    - aud: Token 受众列表，包含所有授权访问的子系统标识
-    - tenant_id: 租户ID，用于多租户数据隔离
+    包含 OIDC 标准字段和业务扩展字段。
+
+    OIDC 标准字段：
+    -------------------------------------------------------------------------
+    sub: 全局唯一用户标识（与 user_id 值相同）
+    iss: Token 签发者标识，用于跨系统验证 Token 来源
+    aud: Token 受众列表，包含所有授权访问的子系统标识
+    iat: Token 签发时间（Unix 时间戳）
+    exp: Token 过期时间（Unix 时间戳）
+    jti: Token 唯一标识，用于撤销
+
+    业务扩展字段：
+    -------------------------------------------------------------------------
+    user_id: 用户ID
+    roles: 用户角色列表
+    departments: 用户部门列表
+    tenant_id: 租户ID，用于多租户数据隔离
+    type: Token 类型（access/refresh）
 
     兼容策略：
+    -------------------------------------------------------------------------
     - sub 和 user_id 值相同，现有代码读取 user_id 不受影响
     - iss 和 aud 为新增字段，旧 Token 无这两个字段时验证跳过
     - tenant_id 为新增字段，旧 Token 无此字段时默认为空字符串
@@ -78,7 +155,16 @@ class TokenPayload(BaseModel):
 
 
 class TokenPair(BaseModel):
-    """Token 对（访问令牌 + 刷新令牌）"""
+    """Token 对（访问令牌 + 刷新令牌）
+
+    OAuth2.0 标准的 Token 响应格式。
+
+    Attributes:
+        access_token: 访问令牌，用于 API 认证
+        refresh_token: 刷新令牌，用于获取新的访问令牌
+        token_type: Token 类型，固定为 "Bearer"
+        expires_in: 访问令牌有效期（秒）
+    """
 
     access_token: str
     refresh_token: str
@@ -87,7 +173,14 @@ class TokenPair(BaseModel):
 
 
 def _generate_jti() -> str:
-    """生成 Token 唯一标识"""
+    """生成 Token 唯一标识
+
+    使用 UUID 生成全局唯一的 Token 标识，
+    用于 Token 撤销时加入黑名单。
+
+    Returns:
+        UUID 字符串
+    """
     import uuid
     return str(uuid.uuid4())
 
@@ -97,7 +190,6 @@ def _build_oidc_claims(user_id: str, settings) -> dict[str, Any]:
 
     根据配置生成 sub、iss、aud 字段，用于 Token 签发。
     sub 与 user_id 值相同，确保向后兼容。
-    iss 和 aud 从配置读取，未配置时使用默认值。
 
     Args:
         user_id: 用户ID，同时作为 sub 的值

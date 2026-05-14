@@ -218,6 +218,7 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             supported_intents=["calendar_query", "calendar_create", "calendar_update", "calendar_conflict"],
             supported_actions=["query", "create", "update", "cancel", "conflict_check"],
             required_services=["calendar"],
+            security_constraints=["创建日程需确认参与者是否冲突", "删除他人日程需特别确认"],
             priority=10,
         ),
         CapabilityCard(
