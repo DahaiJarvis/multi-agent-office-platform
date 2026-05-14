@@ -94,6 +94,12 @@ MCP_SERVER_REGISTRY: dict[str, MCPServerConfig] = {
         transport="sse",
         url="http://localhost:9010/sse",
     ),
+    "web_search": MCPServerConfig(
+        name="web-search-mcp-server",
+        description="网络搜索 MCP 服务 - 提供联网搜索能力",
+        transport="sse",
+        url="http://localhost:9011/sse",
+    ),
 }
 
 # Agent 与 MCP 服务的工具绑定关系
@@ -205,6 +211,7 @@ def _match_local_key(service_name: str) -> str:
         "hr-mcp-server": "hr",
         "finance-mcp-server": "finance",
         "knowledge-mcp-server": "knowledge",
+        "web-search-mcp-server": "web_search",
     }
     return name_mapping.get(service_name, "")
 

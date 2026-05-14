@@ -197,6 +197,21 @@ services:
     depends_on:
       - mcp-registry
 
+  # 网络搜索 MCP 服务
+  mcp-web-search:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.mcp
+    ports:
+      - "9011:9011"
+    environment:
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      - DASHSCOPE_BASE_URL=${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      - WEB_SEARCH_MODEL=${WEB_SEARCH_MODEL:-qwen-turbo}
+    command: ["python", "-m", "mcp_servers.web_search_server.server"]
+    depends_on:
+      - mcp-registry
+
   # 智能文档助手 (IDA)
   ida:
     image: ${IDA_IMAGE:-ida:latest}

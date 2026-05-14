@@ -871,6 +871,8 @@ def _register_to_runtime(agent: CustomAgentConfig) -> None:
             model_client=get_model_client(agent.model_tier.value),
             tools=tools,
             system_message=agent.system_prompt,
+            reflect_on_tool_use=True,
+            max_tool_iterations=5,
         )
 
     AGENT_CREATORS[agent.name] = _create_custom
@@ -1179,6 +1181,8 @@ async def create_agent_from_skills(
         model_client=get_model_client(model_tier.value),
         tools=tools,
         system_message=system_prompt,
+        reflect_on_tool_use=True,
+        max_tool_iterations=5,
     )
 
     # 注册到运行时
@@ -1193,6 +1197,8 @@ async def create_agent_from_skills(
             model_client=get_model_client(model_tier.value),
             tools=await load_mcp_tools(all_mcp_servers),
             system_message=system_prompt,
+            reflect_on_tool_use=True,
+            max_tool_iterations=5,
         )
 
     AGENT_CREATORS[agent_name] = _create

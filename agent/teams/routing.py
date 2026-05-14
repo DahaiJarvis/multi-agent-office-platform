@@ -808,11 +808,20 @@ async def route_and_execute_stream(
                         "tools": tool_names,
                     }
                 elif isinstance(message, ToolCallExecutionEvent):
-                    # 工具调用结果事件：记录到 full_response，不直接展示给用户
+                    # 工具调用结果事件：通知前端工具执行状态
                     for result in message.content:
                         result_content = result.content if hasattr(result, "content") else ""
+                        is_error = result.is_error if hasattr(result, "is_error") else False
+                        tool_name = result.name if hasattr(result, "name") else ""
                         if result_content:
                             full_response += str(result_content)
+                        yield {
+                            "type": "tool_result",
+                            "agent_name": message.source or current_agent,
+                            "tool_name": tool_name,
+                            "is_error": is_error,
+                            "content": str(result_content)[:500] if result_content else "",
+                        }
                 elif isinstance(message, ThoughtEvent):
                     # Agent 思考过程事件：可用于前端展示"正在思考"
                     logger.debug("流式-Agent思考: agent=%s", message.source)

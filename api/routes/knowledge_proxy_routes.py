@@ -56,6 +56,9 @@ _shared_client: httpx.AsyncClient | None = None
 # IDA API 路径前缀缓存（启动时探测，运行时使用）
 _ida_api_prefix: str = ""
 
+# IDA 连接状态缓存，避免短时间内重复探测
+_ida_last_connect_ok: bool = False
+
 # IDA API 版本探测候选列表（按优先级排序，优先使用高版本）
 _IDA_PREFIX_CANDIDATES = ["/api/v1", "/api"]
 
@@ -73,7 +76,7 @@ async def detect_ida_api_prefix() -> str:
     Returns:
         IDA API 路径前缀，如 /api/v1 或 /api
     """
-    global _ida_api_prefix
+    global _ida_api_prefix, _ida_last_connect_ok
 
     if settings.ida_api_prefix:
         prefix = settings.ida_api_prefix.rstrip("/")
@@ -93,12 +96,14 @@ async def detect_ida_api_prefix() -> str:
             )
             if response.status_code != 404:
                 _ida_api_prefix = prefix
+                _ida_last_connect_ok = True
                 logger.info("IDA API 前缀自动探测成功: %s (status=%d)", prefix, response.status_code)
                 return prefix
         except Exception:
             continue
 
     _ida_api_prefix = "/api/v1"
+    _ida_last_connect_ok = False
     logger.warning("IDA API 前缀自动探测失败，使用默认值: /api/v1")
     return _ida_api_prefix
 
@@ -448,6 +453,7 @@ async def _ida_request(method: str, path: str, token: str, **kwargs) -> Any:
     封装 httpx 请求调用，统一处理连接失败、超时等网络异常，
     避免每个端点函数重复编写 try/except。
     path 参数只需传资源路径，API 前缀由 get_ida_api_prefix() 自动拼接。
+    连接失败时自动重试一次（重新探测 API 前缀），支持 IDA 延迟启动场景。
 
     Args:
         method: HTTP 方法（GET/POST/PUT/DELETE）
@@ -461,6 +467,32 @@ async def _ida_request(method: str, path: str, token: str, **kwargs) -> Any:
     Raises:
         AppException: 网络异常或 IDA 返回错误时
     """
+    return await _ida_request_with_retry(method, path, token, retry_on_connect=True, **kwargs)
+
+
+async def _ida_request_with_retry(
+    method: str, path: str, token: str, *, retry_on_connect: bool = True, **kwargs
+) -> Any:
+    """IDA 请求核心实现，支持连接失败时重试
+
+    首次连接失败时，重新探测 IDA API 前缀并重试一次，
+    解决 IDA 在主平台之后启动导致请求不可达的问题。
+
+    Args:
+        method: HTTP 方法
+        path: IDA API 资源路径
+        token: JWT Token
+        retry_on_connect: 连接失败时是否重试
+        **kwargs: 传递给 httpx 的额外参数
+
+    Returns:
+        IDA 响应的 JSON 数据
+
+    Raises:
+        AppException: 网络异常或 IDA 返回错误时
+    """
+    global _ida_last_connect_ok
+
     client = get_knowledge_proxy_client()
     prefix = get_ida_api_prefix()
     url = f"{settings.ida_backend_url}{prefix}{path}"
@@ -468,10 +500,26 @@ async def _ida_request(method: str, path: str, token: str, **kwargs) -> Any:
 
     try:
         response = await client.request(method, url, headers=headers, **kwargs)
+        _ida_last_connect_ok = True
         return _handle_ida_response(response)
     except AppException:
         raise
     except httpx.ConnectError:
+        if retry_on_connect:
+            logger.warning("IDA 服务连接失败，尝试重新探测并重试: %s", url)
+            try:
+                new_prefix = await detect_ida_api_prefix()
+                new_url = f"{settings.ida_backend_url}{new_prefix}{path}"
+                response = await client.request(method, new_url, headers=headers, **kwargs)
+                _ida_last_connect_ok = True
+                return _handle_ida_response(response)
+            except (httpx.ConnectError, httpx.TimeoutException):
+                pass
+            except AppException:
+                raise
+            except Exception:
+                pass
+        _ida_last_connect_ok = False
         logger.error("IDA 服务连接失败: %s", url)
         raise AppException(
             ErrorCode.SERVICE_UNAVAILABLE,
@@ -665,19 +713,35 @@ async def proxy_upload_document(
     """
     token = await _get_user_token(request)
     file_content = await file.read()
+    prefix = get_ida_api_prefix()
+    ida_url = f"{settings.ida_backend_url}{prefix}/knowledge-bases/{kb_id}/documents"
+    req_headers = {"Authorization": f"Bearer {token}"}
+    req_files = {"file": (file.filename, file_content, file.content_type)}
+    req_data = {"folder_path": folder_path}
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{settings.ida_backend_url}{get_ida_api_prefix()}/knowledge-bases/{kb_id}/documents",
-                headers={"Authorization": f"Bearer {token}"},
-                files={"file": (file.filename, file_content, file.content_type)},
-                data={"folder_path": folder_path},
-            )
+            response = await client.post(ida_url, headers=req_headers, files=req_files, data=req_data)
+        _ida_last_connect_ok = True
         return _handle_ida_response(response)
     except AppException:
         raise
     except httpx.ConnectError:
+        if not _ida_last_connect_ok:
+            try:
+                new_prefix = await detect_ida_api_prefix()
+                new_url = f"{settings.ida_backend_url}{new_prefix}/knowledge-bases/{kb_id}/documents"
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    response = await client.post(new_url, headers=req_headers, files=req_files, data=req_data)
+                _ida_last_connect_ok = True
+                return _handle_ida_response(response)
+            except (httpx.ConnectError, httpx.TimeoutException):
+                pass
+            except AppException:
+                raise
+            except Exception:
+                pass
+        _ida_last_connect_ok = False
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务连接失败，请确认服务是否正常运行")
     except httpx.TimeoutException:
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务响应超时，请稍后重试")
@@ -752,6 +816,10 @@ async def proxy_qa_ask_stream(
         StreamingResponse: SSE 事件流
     """
     token = await _get_user_token(request)
+    prefix = get_ida_api_prefix()
+    ida_url = f"{settings.ida_backend_url}{prefix}/qa/ask/stream"
+    req_headers = _get_ida_headers(token)
+    req_json = body.model_dump(exclude_none=True)
 
     async def stream_generator():
         """SSE 流生成器
@@ -759,14 +827,14 @@ async def proxy_qa_ask_stream(
         使用 httpx 流式请求逐块读取 IDA 响应，
         透传每个 SSE 事件到前端。
         错误时发送与前端解析逻辑对齐的 error 事件。
+        连接失败时自动重新探测 IDA 并重试一次。
         """
+        global _ida_last_connect_ok
+
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
-                    "POST",
-                    f"{settings.ida_backend_url}{get_ida_api_prefix()}/qa/ask/stream",
-                    json=body.model_dump(exclude_none=True),
-                    headers=_get_ida_headers(token),
+                    "POST", ida_url, json=req_json, headers=req_headers,
                 ) as response:
                     if response.status_code >= 400:
                         error_text = await response.aread()
@@ -776,7 +844,6 @@ async def proxy_qa_ask_stream(
                             response.status_code,
                             error_msg[:200],
                         )
-                        # 尝试解析 IDA 返回的 JSON 错误信息
                         try:
                             error_json = json.loads(error_msg)
                             detail = error_json.get("detail", error_json.get("message", error_msg))
@@ -787,9 +854,39 @@ async def proxy_qa_ask_stream(
                         yield _build_sse_error_event(detail, error_code)
                         return
 
+                    _ida_last_connect_ok = True
                     async for chunk in response.aiter_text():
                         yield chunk
         except httpx.ConnectError as e:
+            if not _ida_last_connect_ok:
+                try:
+                    new_prefix = await detect_ida_api_prefix()
+                    new_url = f"{settings.ida_backend_url}{new_prefix}/qa/ask/stream"
+                    async with httpx.AsyncClient(timeout=120.0) as client:
+                        async with client.stream(
+                            "POST", new_url, json=req_json, headers=req_headers,
+                        ) as response:
+                            if response.status_code >= 400:
+                                error_text = await response.aread()
+                                error_msg = error_text.decode(errors="replace")
+                                try:
+                                    error_json = json.loads(error_msg)
+                                    detail = error_json.get("detail", error_json.get("message", error_msg))
+                                except (json.JSONDecodeError, TypeError):
+                                    detail = f"IDA 服务返回 HTTP {response.status_code}"
+                                error_code = "IDA_AUTH_ERROR" if response.status_code in (401, 403) else "IDA_SERVICE_ERROR"
+                                yield _build_sse_error_event(detail, error_code)
+                                return
+
+                            _ida_last_connect_ok = True
+                            async for chunk in response.aiter_text():
+                                yield chunk
+                    return
+                except (httpx.ConnectError, httpx.TimeoutException):
+                    pass
+                except Exception:
+                    pass
+            _ida_last_connect_ok = False
             logger.error("IDA 流式问答连接失败: %s", str(e))
             yield _build_sse_error_event("知识库服务连接失败，请稍后重试", "IDA_SERVICE_ERROR")
         except httpx.ReadTimeout as e:
@@ -832,17 +929,33 @@ async def proxy_parse_files(request: Request):
         content = await f.read()
         file_list.append(("files", (f.filename, content, f.content_type)))
 
+    prefix = get_ida_api_prefix()
+    ida_url = f"{settings.ida_backend_url}{prefix}/qa/parse-files"
+    req_headers = {"Authorization": f"Bearer {token}"}
+
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{settings.ida_backend_url}{get_ida_api_prefix()}/qa/parse-files",
-                headers={"Authorization": f"Bearer {token}"},
-                files=file_list,
-            )
+            response = await client.post(ida_url, headers=req_headers, files=file_list)
+        _ida_last_connect_ok = True
         return _handle_ida_response(response)
     except AppException:
         raise
     except httpx.ConnectError:
+        if not _ida_last_connect_ok:
+            try:
+                new_prefix = await detect_ida_api_prefix()
+                new_url = f"{settings.ida_backend_url}{new_prefix}/qa/parse-files"
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    response = await client.post(new_url, headers=req_headers, files=file_list)
+                _ida_last_connect_ok = True
+                return _handle_ida_response(response)
+            except (httpx.ConnectError, httpx.TimeoutException):
+                pass
+            except AppException:
+                raise
+            except Exception:
+                pass
+        _ida_last_connect_ok = False
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务连接失败，请确认服务是否正常运行")
     except httpx.TimeoutException:
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务响应超时，请稍后重试")
@@ -872,18 +985,35 @@ async def proxy_analyze_image(
     token = await _get_user_token(request)
     image_content = await image.read()
 
+    prefix = get_ida_api_prefix()
+    ida_url = f"{settings.ida_backend_url}{prefix}/qa/analyze-image"
+    req_headers = {"Authorization": f"Bearer {token}"}
+    req_files = {"image": (image.filename, image_content, image.content_type)}
+    req_data = {"query": query}
+
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                f"{settings.ida_backend_url}{get_ida_api_prefix()}/qa/analyze-image",
-                headers={"Authorization": f"Bearer {token}"},
-                files={"image": (image.filename, image_content, image.content_type)},
-                data={"query": query},
-            )
+            response = await client.post(ida_url, headers=req_headers, files=req_files, data=req_data)
+        _ida_last_connect_ok = True
         return _handle_ida_response(response)
     except AppException:
         raise
     except httpx.ConnectError:
+        if not _ida_last_connect_ok:
+            try:
+                new_prefix = await detect_ida_api_prefix()
+                new_url = f"{settings.ida_backend_url}{new_prefix}/qa/analyze-image"
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(new_url, headers=req_headers, files=req_files, data=req_data)
+                _ida_last_connect_ok = True
+                return _handle_ida_response(response)
+            except (httpx.ConnectError, httpx.TimeoutException):
+                pass
+            except AppException:
+                raise
+            except Exception:
+                pass
+        _ida_last_connect_ok = False
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务连接失败，请确认服务是否正常运行")
     except httpx.TimeoutException:
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务响应超时，请稍后重试")

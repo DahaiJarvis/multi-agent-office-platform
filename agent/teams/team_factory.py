@@ -318,6 +318,8 @@ async def _create_swarm_agent_with_handoffs(
             tools=tools,
             system_message=REVIEWER_SYSTEM_PROMPT,
             handoffs=handoff_targets,
+            reflect_on_tool_use=True,
+            max_tool_iterations=5,
         )
 
     # 领域 Agent（如 KnowledgeAgent、EmailAgent 等）
@@ -329,6 +331,8 @@ async def _create_swarm_agent_with_handoffs(
         tools=tools,
         system_message=system_prompt,
         handoffs=handoff_targets,
+        reflect_on_tool_use=True,
+        max_tool_iterations=5,
     )
 
 

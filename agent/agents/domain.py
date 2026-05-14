@@ -341,6 +341,8 @@ async def _create_single_agent(agent_name: str) -> AssistantAgent:
         model_client=get_domain_agent_client(),
         tools=tools,
         system_message=prompt,
+        reflect_on_tool_use=True,
+        max_tool_iterations=5,
     )
 
 

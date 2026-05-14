@@ -195,4 +195,6 @@ async def create_reviewer_agent() -> AssistantAgent:
         model_client=get_reviewer_client(),
         tools=tools,
         system_message=REVIEWER_SYSTEM_PROMPT,
+        reflect_on_tool_use=True,
+        max_tool_iterations=5,
     )

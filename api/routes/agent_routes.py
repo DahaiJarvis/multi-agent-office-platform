@@ -188,6 +188,14 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                             "tools": event.get("tools", []),
                         }, ensure_ascii=False))
 
+                    elif event_type == "tool_result":
+                        yield _format_sse("tool_result", json.dumps({
+                            "agent_name": event.get("agent_name", ""),
+                            "tool_name": event.get("tool_name", ""),
+                            "is_error": event.get("is_error", False),
+                            "content": event.get("content", ""),
+                        }, ensure_ascii=False))
+
                     elif event_type == "thought":
                         yield _format_sse("thought", json.dumps({
                             "agent_name": event.get("agent_name", ""),

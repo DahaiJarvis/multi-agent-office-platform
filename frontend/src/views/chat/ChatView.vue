@@ -273,13 +273,17 @@ async function handleSend() {
       } else if (data.event === 'status' && data.data === 'completed') {
         chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode })
       } else if (data.event === 'error') {
-        chatStore.appendToStreamingMessage(streamingId, `\n\n[错误] ${data.message || '服务异常'}`)
+        const errMsg = typeof data.data === 'string' ? data.data : (data.data?.message || data.message || '服务异常')
+        chatStore.appendToStreamingMessage(streamingId, `\n\n[错误] ${errMsg}`)
         chatStore.finalizeStreamingMessage(streamingId)
         chatStore.isStreaming = false
       }
     },
     (error) => {
-      chatStore.appendToStreamingMessage(streamingId, `\n\n[错误] ${error.message || '请求失败'}`)
+      const errMsg = typeof error === 'string'
+        ? error
+        : error?.data || error?.message || '请求失败'
+      chatStore.appendToStreamingMessage(streamingId, `\n\n[错误] ${errMsg}`)
       chatStore.finalizeStreamingMessage(streamingId)
       chatStore.isStreaming = false
     },

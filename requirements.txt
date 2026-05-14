@@ -4,6 +4,7 @@ autogen-ext>=0.4
 
 # MCP 协议
 mcp>=1.0
+anyio>=4.5
 
 # API 服务
 fastapi>=0.115

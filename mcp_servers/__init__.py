@@ -15,6 +15,7 @@
   - hr_server: HR 人事系统 MCP 服务
   - finance_server: 财务系统 MCP 服务
   - knowledge_server: 知识库 MCP 服务
+  - web_search_server: 网络搜索 MCP 服务
 
 基础设施:
   - base: 通用 API 客户端与配置

@@ -41,6 +41,11 @@ DEP_PORTS=(
     "5432:PostgreSQL"
 )
 
+# IDA 智能文档助手端口（独立服务，仅检查可用性，不主动终止）
+IDA_PORTS=(
+    "5000:IDA Backend"
+)
+
 # MCP 服务端口: MCP 子服务绑定的端口，被占用时需要释放
 MCP_PORTS=(
     "9001:OA MCP"
@@ -53,6 +58,7 @@ MCP_PORTS=(
     "9008:HR MCP"
     "9009:Finance MCP"
     "9010:Knowledge MCP"
+    "9011:Web Search MCP"
     "9099:MCP Registry"
 )
 
@@ -61,6 +67,7 @@ MCP_PORTS=(
 API_PID=""
 FRONTEND_PID=""
 ACTUAL_FRONTEND_PORT=""
+MCP_PIDS=()
 
 # ==================== 工具函数 ====================
 
@@ -406,6 +413,66 @@ start_frontend_dev() {
     log_info "前端开发服务器已启动 (PID: ${FRONTEND_PID})"
 }
 
+# MCP 服务启动配置: 模块路径 -> 端口
+MCP_SERVICE_MAP=(
+    "mcp_servers.knowledge_server.server:9010"
+    "mcp_servers.web_search_server.server:9011"
+)
+
+start_mcp_services() {
+    local skip_mcp="${SKIP_MCP_SERVICES:-}"
+    if [ "${skip_mcp}" = "true" ]; then
+        log_info "已跳过 MCP 服务启动 (SKIP_MCP_SERVICES=true)"
+        return 0
+    fi
+
+    log_step "启动 MCP 服务..."
+
+    for entry in "${MCP_SERVICE_MAP[@]}"; do
+        local module="${entry%%:*}"
+        local port="${entry##*:}"
+        local desc="${module##*.}"
+        desc="${desc%.server}"
+
+        local pid
+        pid="$(find_pid_by_port "${port}")"
+        if [ -n "$pid" ]; then
+            log_info "MCP 服务 ${desc} 已在运行 (PID: ${pid}, 端口: ${port})"
+            continue
+        fi
+
+        python3 -m "${module}" &
+        local mcp_pid=$!
+        MCP_PIDS+=("${mcp_pid}")
+        log_info "MCP 服务 ${desc} 已启动 (PID: ${mcp_pid}, 端口: ${port})"
+    done
+
+    # 等待 MCP 服务就绪
+    local ready_count=0
+    local max_wait=10
+    local waited=0
+    while [ ${waited} -lt ${max_wait} ]; do
+        ready_count=0
+        for entry in "${MCP_SERVICE_MAP[@]}"; do
+            local port="${entry##*:}"
+            local pid
+            pid="$(find_pid_by_port "${port}")"
+            if [ -n "$pid" ]; then
+                ready_count=$((ready_count + 1))
+            fi
+        done
+
+        if [ ${ready_count} -eq ${#MCP_SERVICE_MAP[@]} ]; then
+            break
+        fi
+
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    log_info "MCP 服务就绪: ${ready_count}/${#MCP_SERVICE_MAP[@]}"
+}
+
 # ==================== 信号处理 ====================
 
 cleanup() {
@@ -427,6 +494,15 @@ cleanup() {
         wait "${API_PID}" 2>/dev/null || true
         API_PID=""
     fi
+
+    # 终止 MCP 服务进程
+    for mcp_pid in "${MCP_PIDS[@]}"; do
+        if [ -n "${mcp_pid}" ] && kill -0 "${mcp_pid}" 2>/dev/null; then
+            log_info "终止 MCP 服务 (PID: ${mcp_pid})..."
+            kill "${mcp_pid}" 2>/dev/null || true
+        fi
+    done
+    MCP_PIDS=()
 
     log_info "所有服务已停止"
     exit 0
@@ -480,6 +556,14 @@ main() {
             log_info "已取消启动"
             exit 0
         fi
+    fi
+
+    # 4.5 检查 IDA 智能文档助手端口
+    log_step "检查 IDA 智能文档助手..."
+    if ! check_dependency_ports "${IDA_PORTS[@]}"; then
+        log_warn "IDA 后端服务未运行，知识库相关功能将不可用"
+        log_warn "请先启动 IDA 后端服务，或配置 IDA_BACKEND_URL 环境变量"
+        log_warn "IDA 启动后知识库功能将自动恢复"
     fi
 
     # 5. 检查并释放应用端口
@@ -566,7 +650,10 @@ main() {
         build_frontend
     fi
 
-    # 11. 启动后端 API 服务
+    # 11. 启动 MCP 服务（Knowledge、Web Search 等）
+    start_mcp_services
+
+    # 12. 启动后端 API 服务
     echo ""
     echo "========================================="
     echo "  启动配置"
@@ -600,7 +687,7 @@ main() {
         log_warn "Agent API 未在 15 秒内响应，可能仍在启动中"
     fi
 
-    # 12. 启动前端服务
+    # 13. 启动前端服务
     if [ "${frontend_available}" = true ]; then
         if [ "${env}" = "development" ]; then
             start_frontend_dev "${ACTUAL_FRONTEND_PORT}"
@@ -610,7 +697,7 @@ main() {
         fi
     fi
 
-    # 13. 输出访问地址
+    # 14. 输出访问地址
     echo ""
     echo "========================================="
     echo "  服务已启动"
