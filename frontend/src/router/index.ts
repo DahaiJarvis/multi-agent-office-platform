@@ -16,6 +16,7 @@ const routes: RouteRecordRaw[] = [
       { path: '', name: 'Chat', component: () => import('../views/chat/ChatView.vue') },
       { path: 'admin', name: 'Dashboard', component: () => import('../views/admin/DashboardView.vue') },
       { path: 'admin/health', name: 'Health', component: () => import('../views/admin/HealthView.vue') },
+      { path: 'admin/dr', name: 'DRMonitor', component: () => import('../views/admin/DRMonitorView.vue') },
       { path: 'admin/canary', name: 'Canary', component: () => import('../views/admin/CanaryView.vue') },
       { path: 'admin/audit', name: 'Audit', component: () => import('../views/admin/AuditView.vue') },
       { path: 'admin/token', name: 'TokenBudget', component: () => import('../views/admin/TokenBudgetView.vue') },

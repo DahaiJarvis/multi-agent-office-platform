@@ -116,6 +116,15 @@
             </transition>
           </router-link>
 
+          <router-link to="/admin/dr" class="nav-item" :class="{ active: $route.name === 'DRMonitor' }">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M2 5a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm6.707 5.707a1 1 0 00-1.414-1.414L6 10.586l-.293-.293a1 1 0 00-1.414 1.414l1 1a1 1 0 001.414 0l2-2z" />
+            </svg>
+            <transition name="fade">
+              <span v-if="!sidebarCollapsed" class="nav-label">灾备监控</span>
+            </transition>
+          </router-link>
+
           <router-link to="/admin/canary" class="nav-item" :class="{ active: $route.name === 'Canary' }">
             <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
               <path d="M10 2a1 1 0 011 1v1.322A7.007 7.007 0 0116.678 10H18a1 1 0 110 2h-1.322A7.007 7.007 0 0111 16.678V18a1 1 0 11-2 0v-1.322A7.007 7.007 0 014.322 12H3a1 1 0 110-2h1.322A7.007 7.007 0 019 4.322V3a1 1 0 011-1zm0 5a3 3 0 100 6 3 3 0 000-6z" />
@@ -219,6 +228,7 @@ const pageTitles: Record<string, string> = {
   PromptTemplates: 'Prompt模板库',
   Dashboard: '运营仪表盘',
   Health: '健康检查',
+  DRMonitor: '灾备监控',
   Canary: '灰度发布',
   Audit: '审计日志',
   TokenBudget: 'Token预算',

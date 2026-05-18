@@ -100,6 +100,91 @@ export interface AuditLogsResult {
   total?: number
 }
 
+export interface DRStatus {
+  rto: {
+    current_seconds: number
+    target_seconds: number
+    violations: number
+    last_failover_duration: number
+    failover_count: number
+    recovery_count: number
+  }
+  rpo: {
+    current_seconds: number
+    target_seconds: number
+    violations: number
+    current_replication_lag_ms: number
+    max_replication_lag_ms: number
+    data_loss_bytes: number
+  }
+  integrity: {
+    verified: boolean
+    last_check: string
+  }
+  compliance: {
+    rto_compliant: boolean
+    rpo_compliant: boolean
+  }
+}
+
+export interface FailoverEvent {
+  id: string
+  component: string
+  from_instance: string
+  to_instance: string
+  started_at: string
+  completed_at?: string
+  duration_seconds?: number
+  reason: string
+  status: string
+}
+
+export interface FailoverHistoryResult {
+  events: FailoverEvent[]
+  total: number
+}
+
+export interface ReplicationRegion {
+  name: string
+  role: string
+  status: string
+  replication_lag_ms: number
+  health_check_success_rate: number
+}
+
+export interface ReplicationSummary {
+  regions: Record<string, ReplicationRegion>
+  max_replication_lag_ms: number
+  estimated_rpo_seconds: number
+  unhealthy_regions: string[]
+  total_regions: number
+  healthy_regions: number
+}
+
+export interface HeartbeatTarget {
+  component: string
+  alive: boolean
+  latency_ms: number
+  consecutive_success: number
+  consecutive_failures: number
+  last_check: string
+}
+
+export interface HeartbeatStatus {
+  targets: HeartbeatTarget[]
+  total: number
+  alive: number
+  dead: number
+}
+
+export interface HAFullStatus {
+  health: Record<string, any>
+  heartbeat: HeartbeatStatus
+  failover: Record<string, any>
+  degradation: Record<string, any>
+  dr: DRStatus
+}
+
 export const adminApi = {
   health() {
     return http.get('/admin/health')
@@ -155,5 +240,33 @@ export const adminApi = {
 
   auditFlush() {
     return http.post('/admin/audit/flush')
+  },
+
+  drStatus() {
+    return http.get<DRStatus>('/admin/dr/status')
+  },
+
+  drMetrics() {
+    return http.get<DRStatus>('/admin/dr/metrics')
+  },
+
+  drHistory(limit?: number) {
+    return http.get<FailoverHistoryResult>('/admin/dr/history', { params: { limit } })
+  },
+
+  drVerifyIntegrity() {
+    return http.post<{ integrity_verified: boolean; timestamp: string }>('/admin/dr/verify-integrity')
+  },
+
+  drReplication() {
+    return http.get<ReplicationSummary>('/admin/dr/replication')
+  },
+
+  haFullStatus() {
+    return http.get<HAFullStatus>('/admin/ha/full-status')
+  },
+
+  heartbeatStatus() {
+    return http.get<HeartbeatStatus>('/admin/heartbeat/status')
   },
 }

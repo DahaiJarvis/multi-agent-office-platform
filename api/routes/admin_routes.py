@@ -358,3 +358,127 @@ async def get_sla_budget(tier: str) -> dict:
         return get_budget_for_tier(sla_tier)
     except ValueError:
         return {"error": f"无效的 SLA 层级: {tier}", "valid_tiers": [t.value for t in SLATier]}
+
+
+# ==================== RTO/RPO 灾备监控 ====================
+
+
+@router.get("/dr/status", summary="灾备指标总览")
+async def disaster_recovery_status() -> dict:
+    """获取 RTO/RPO 灾备指标总览
+
+    返回当前系统的灾备恢复指标，包括：
+    - RTO: 实际恢复时间 vs 目标恢复时间
+    - RPO: 实际数据丢失窗口 vs 目标数据丢失窗口
+    - 故障转移历史
+    - 数据完整性校验结果
+    """
+    from deploy.ha_manager import get_dr_monitor
+
+    monitor = get_dr_monitor()
+    return monitor.get_status()
+
+
+@router.get("/dr/metrics", summary="RTO/RPO 详细指标")
+async def dr_detailed_metrics() -> dict:
+    """获取 RTO/RPO 详细指标数据
+
+    返回灾备指标的完整数据，适合监控仪表盘展示。
+    """
+    from deploy.ha_manager import get_dr_monitor
+
+    monitor = get_dr_monitor()
+    metrics = monitor.get_metrics()
+
+    return {
+        "rto": {
+            "current_seconds": round(metrics.rto_seconds, 3),
+            "target_seconds": metrics.target_rto_seconds,
+            "violations": metrics.rto_violations,
+            "last_failover_duration": round(metrics.last_failover_duration, 3),
+            "failover_count": metrics.failover_count,
+            "recovery_count": metrics.recovery_count,
+        },
+        "rpo": {
+            "current_seconds": round(metrics.rpo_seconds, 3),
+            "target_seconds": metrics.target_rpo_seconds,
+            "violations": metrics.rpo_violations,
+            "current_replication_lag_ms": round(metrics.current_replication_lag_ms, 2),
+            "max_replication_lag_ms": round(metrics.max_replication_lag_ms, 2),
+            "data_loss_bytes": metrics.rpo_bytes,
+        },
+        "integrity": {
+            "verified": metrics.data_integrity_verified,
+            "last_check": metrics.last_integrity_check,
+        },
+        "compliance": {
+            "rto_compliant": metrics.rto_seconds <= metrics.target_rto_seconds,
+            "rpo_compliant": metrics.rpo_seconds <= metrics.target_rpo_seconds,
+        },
+    }
+
+
+@router.get("/dr/history", summary="故障转移历史")
+async def failover_history(limit: int = 20) -> dict:
+    """获取故障转移历史记录
+
+    Args:
+        limit: 返回记录数量，默认 20 条
+    """
+    from deploy.ha_manager import get_dr_monitor
+
+    monitor = get_dr_monitor()
+    events = monitor.get_failover_history(limit=limit)
+    return {"events": events, "total": len(events)}
+
+
+@router.post("/dr/verify-integrity", summary="手动触发数据完整性校验")
+async def verify_data_integrity() -> dict:
+    """手动触发数据完整性校验
+
+    校验 Redis 和 PostgreSQL 的主从数据一致性。
+    在故障转移完成后建议执行此操作。
+    """
+    from deploy.ha_manager import get_dr_monitor
+
+    monitor = get_dr_monitor()
+    result = await monitor.verify_data_integrity()
+    return {
+        "integrity_verified": result,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@router.get("/dr/replication", summary="跨区域复制状态")
+async def replication_status() -> dict:
+    """获取跨区域数据复制状态
+
+    返回各区域的数据复制延迟和整体 RPO 评估。
+    """
+    from deploy.multi_region import get_replication_summary
+
+    return get_replication_summary()
+
+
+@router.get("/ha/full-status", summary="高可用全量状态")
+async def ha_full_status() -> dict:
+    """获取高可用系统全量状态
+
+    整合健康检查、心跳监控、故障转移、降级、灾备指标的全量状态。
+    """
+    from deploy.ha_manager import get_ha_orchestrator
+
+    orchestrator = get_ha_orchestrator()
+    return orchestrator.get_full_status()
+
+
+@router.get("/heartbeat/status", summary="心跳监控状态")
+async def heartbeat_status() -> dict:
+    """获取心跳监控状态
+
+    返回各组件的心跳检测结果，包括存活状态、延迟、连续成功/失败次数。
+    """
+    from deploy.ha_manager import get_heartbeat_monitor
+
+    monitor = get_heartbeat_monitor()
+    return monitor.get_status()

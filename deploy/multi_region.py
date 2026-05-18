@@ -544,3 +544,143 @@ def _init_default_regions() -> None:
 
 
 _init_default_regions()
+
+
+# ==================== 数据复制延迟监控 ====================
+
+import asyncio
+
+
+_replication_monitor_running = False
+_replication_monitor_task: asyncio.Task | None = None
+_replication_check_interval = 10.0
+
+
+async def start_replication_monitor(interval: float = 10.0) -> None:
+    """启动跨区域数据复制延迟监控
+
+    定期检查各区域的数据复制延迟，更新 data_replication_lag_ms 字段，
+    并在延迟超过阈值时触发告警。
+
+    Args:
+        interval: 检查间隔（秒），默认 10 秒
+    """
+    global _replication_monitor_running, _replication_monitor_task, _replication_check_interval
+
+    if _replication_monitor_running:
+        return
+
+    _replication_check_interval = interval
+    _replication_monitor_running = True
+    _replication_monitor_task = asyncio.create_task(_replication_monitor_loop())
+    logger.info("跨区域复制延迟监控已启动: interval=%.1fs", interval)
+
+
+async def stop_replication_monitor() -> None:
+    """停止跨区域数据复制延迟监控"""
+    global _replication_monitor_running, _replication_monitor_task
+
+    _replication_monitor_running = False
+    if _replication_monitor_task and not _replication_monitor_task.done():
+        _replication_monitor_task.cancel()
+        try:
+            await _replication_monitor_task
+        except asyncio.CancelledError:
+            pass
+    logger.info("跨区域复制延迟监控已停止")
+
+
+async def _replication_monitor_loop() -> None:
+    """复制延迟监控主循环"""
+    while _replication_monitor_running:
+        try:
+            await _check_all_regions_replication()
+        except Exception as e:
+            logger.error("复制延迟检查失败: %s", e)
+        await asyncio.sleep(_replication_check_interval)
+
+
+async def _check_all_regions_replication() -> None:
+    """检查所有区域的复制延迟"""
+    for region_id, region in _regions.items():
+        if region.status in (RegionStatus.OFFLINE, RegionStatus.MAINTENANCE):
+            continue
+
+        try:
+            lag_ms = await _measure_region_replication_lag(region)
+            old_lag = region.data_replication_lag_ms
+            region.data_replication_lag_ms = lag_ms
+
+            if lag_ms > 5000 and old_lag <= 5000:
+                logger.warning(
+                    "区域复制延迟突增: region=%s lag=%.1fms (was %.1fms)",
+                    region_id, lag_ms, old_lag,
+                )
+        except Exception as e:
+            logger.error("区域复制延迟检查失败: region=%s error=%s", region_id, e)
+
+
+async def _measure_region_replication_lag(region: DeployRegion) -> float:
+    """测量指定区域的数据复制延迟
+
+    通过 HTTP 调用区域 API 的 /health/replication 端点获取复制延迟。
+    如果端点不可用，则基于历史延迟估算。
+
+    Args:
+        region: 部署区域配置
+
+    Returns:
+        复制延迟（毫秒）
+    """
+    try:
+        import httpx
+
+        url = f"{region.api_endpoint}/health/replication"
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                return float(data.get("replication_lag_ms", 0))
+    except Exception:
+        pass
+
+    return region.data_replication_lag_ms
+
+
+def get_replication_summary() -> dict[str, Any]:
+    """获取跨区域数据复制状态摘要
+
+    Returns:
+        包含各区域复制延迟和整体 RPO 评估的字典
+    """
+    regions_data = {}
+    max_lag_ms = 0.0
+    unhealthy_regions: list[str] = []
+
+    for region_id, region in _regions.items():
+        if region.status in (RegionStatus.OFFLINE, RegionStatus.MAINTENANCE):
+            continue
+
+        lag_ms = region.data_replication_lag_ms
+        regions_data[region_id] = {
+            "name": region.name,
+            "role": region.role.value,
+            "status": region.status.value,
+            "replication_lag_ms": round(lag_ms, 2),
+            "health_check_success_rate": round(region.health_check_success_rate, 4),
+        }
+
+        if lag_ms > max_lag_ms:
+            max_lag_ms = lag_ms
+
+        if lag_ms > 5000:
+            unhealthy_regions.append(region_id)
+
+    return {
+        "regions": regions_data,
+        "max_replication_lag_ms": round(max_lag_ms, 2),
+        "estimated_rpo_seconds": round(max_lag_ms / 1000.0, 3),
+        "unhealthy_regions": unhealthy_regions,
+        "total_regions": len(regions_data),
+        "healthy_regions": len(regions_data) - len(unhealthy_regions),
+    }
