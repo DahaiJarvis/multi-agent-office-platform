@@ -64,6 +64,7 @@ frontend/.vite/
 *.ipr
 out/
 inter/
+newInter/
 
 # VS Code
 .vscode/*

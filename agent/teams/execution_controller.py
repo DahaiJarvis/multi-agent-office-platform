@@ -690,6 +690,41 @@ class ExecutionController:
             return None
 
 
+    async def execute_step_with_control(
+        self,
+        team: Any,
+        task: str,
+        session_id: str,
+        user_id: str,
+        step_name: str = "",
+        step_index: int = -1,
+    ) -> tuple[Any, ExecutionResult]:
+        """步骤级执行（带控制）
+
+        与 execute_with_control 逻辑一致，但用于任务编排引擎的步骤级执行。
+        支持单个Agent或Team实例执行，额外参数用于日志标识和故障隔离追踪。
+
+        Args:
+            team: AutoGen Team 实例或单个 Agent 实例
+            task: 任务描述文本
+            session_id: 会话 ID
+            user_id: 用户 ID
+            step_name: 步骤名称（用于日志）
+            step_index: 步骤索引（用于故障隔离追踪，-1表示未指定）
+
+        Returns:
+            元组 (执行结果, ExecutionResult 执行结果元数据)
+        """
+        step_label = step_name or f"step_{step_index}"
+        logger.info("步骤级执行开始: step=%s session=%s", step_label, session_id)
+        result, meta = await self.execute_with_control(team, task, session_id, user_id)
+        logger.info(
+            "步骤级执行完成: step=%s status=%s retries=%d",
+            step_label, meta.status, meta.retries,
+        )
+        return result, meta
+
+
 # 全局执行控制器单例
 # 使用单例模式避免重复创建，确保配置一致性
 _execution_controller: ExecutionController | None = None

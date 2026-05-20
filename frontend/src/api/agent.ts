@@ -14,6 +14,7 @@ export interface ChatResult {
   agent_name: string
   intent?: string
   collaboration_mode?: string
+  execution_id?: string
 }
 
 export interface FeedbackParams {
@@ -31,6 +32,54 @@ export interface FeedbackStats {
   thumbs_down: number
   satisfaction_rate: number
   by_agent?: Record<string, { thumbs_up: number; thumbs_down: number }>
+}
+
+export interface TaskStepStatus {
+  step_index: number
+  step_name: string
+  step_type: string
+  agent_name: string
+  status: string
+  error: string
+  fallback_used: string
+  confirm_id?: string
+  confirm_type?: string
+  confirm_reason?: string
+  options?: ConfirmOption[]
+}
+
+export interface ConfirmOption {
+  label: string
+  value: string
+  description: string
+}
+
+export interface TaskExecutionStatus {
+  execution_id: string
+  session_id: string
+  status: string
+  current_step: number
+  total_steps: number
+  failure_policy: string
+  error: string
+  steps: TaskStepStatus[]
+  created_at: number
+  updated_at: number
+}
+
+export interface PendingConfirm {
+  confirm_id: string
+  execution_id: string
+  step_index: number
+  session_id: string
+  user_id: string
+  confirm_type: string
+  reason: string
+  options: ConfirmOption[]
+  status: string
+  agent_name: string
+  created_at: number
+  expires_at: number
 }
 
 export const agentApi = {
@@ -133,5 +182,64 @@ export const agentApi = {
 
   getAgentFeedbackStats(agentName: string, date?: string) {
     return http.get<FeedbackStats>(`/agent/feedback/stats/${agentName}`, { params: { date } })
+  },
+
+  getTaskStatus(executionId: string) {
+    return http.get<TaskExecutionStatus>(`/agent/task/${executionId}`)
+  },
+
+  getTaskStatusBySession(sessionId: string) {
+    return http.get<TaskExecutionStatus>(`/agent/task/session/${sessionId}`)
+  },
+
+  resumeTask(executionId: string, sessionId: string, userId: string) {
+    return http.post<TaskExecutionStatus>(`/agent/task/resume`, {
+      execution_id: executionId,
+      session_id: sessionId,
+      user_id: userId,
+    })
+  },
+
+  retryStep(executionId: string, stepIndex: number, userId: string, agentName?: string) {
+    return http.post<TaskExecutionStatus>(`/agent/task/retry`, {
+      execution_id: executionId,
+      step_index: stepIndex,
+      user_id: userId,
+      agent_name: agentName,
+    })
+  },
+
+  confirmTask(confirmId: string, decision: string, comment?: string, userId?: string, agentName?: string) {
+    return http.post(`/agent/task/confirm/${confirmId}`, {
+      execution_id: '',
+      step_index: 0,
+      decision,
+      comment: comment || '',
+      user_id: userId || '',
+      agent_name: agentName,
+    })
+  },
+
+  cancelTask(executionId: string, userId: string) {
+    return http.post(`/agent/task/cancel`, {
+      execution_id: executionId,
+      user_id: userId,
+    })
+  },
+
+  getPendingConfirms(userId: string) {
+    return http.get<{ user_id: string; pending_count: number; confirms: PendingConfirm[] }>(
+      `/agent/task/confirms/${userId}`,
+    )
+  },
+
+  subscribeTaskEvents(executionId: string): EventSource | null {
+    const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
+    const token = localStorage.getItem('access_token')
+
+    const eventSource = new EventSource(
+      `${API_BASE}/agent/task/events/${executionId}?token=${token}`,
+    )
+    return eventSource
   },
 }

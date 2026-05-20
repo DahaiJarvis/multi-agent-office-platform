@@ -122,6 +122,7 @@ class SessionState(BaseModel):
     user_id: str
     tenant_id: str = ""
     channel: str = "web"
+    execution_id: str = ""
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     message_history: list[dict[str, Any]] = Field(default_factory=list)

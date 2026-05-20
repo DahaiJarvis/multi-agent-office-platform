@@ -284,6 +284,27 @@ async def route_and_execute(
             "confidence": intent.confidence,
         }
 
+    # 步骤 3.5：SWARM 模式委托给 TaskExecutionEngine
+    # SWARM 模式涉及多Agent协作，使用引擎编排步骤并保存检查点
+    if intent.collaboration_mode == CollaborationMode.SWARM:
+        try:
+            from agent.teams.task_execution_engine import get_task_execution_engine
+            from agent.core.task_checkpoint import FailurePolicy
+
+            engine = get_task_execution_engine()
+            result = await engine.execute(
+                user_message=user_message,
+                session_id=session_id,
+                user_id=user_id,
+                intent=intent,
+                session=session,
+                knowledge_base_id=knowledge_base_id,
+                failure_policy=FailurePolicy.RELAXED,
+            )
+            return result
+        except Exception as e:
+            logger.error("TaskExecutionEngine 执行失败，降级为原有流程: %s", e)
+
     # 步骤 4：创建团队
     # 根据意图的 collaboration_mode 创建对应的 Agent 团队
     try:
@@ -717,6 +738,38 @@ async def route_and_execute_stream(
             "message": f"我不太确定您的意图（置信度: {intent.confidence:.0%}），请更详细地描述您的需求。",
         }
         return
+
+    # 步骤 2.5：SWARM 模式委托给 TaskExecutionEngine（同步执行，流式输出结果）
+    if intent.collaboration_mode == CollaborationMode.SWARM:
+        try:
+            from agent.teams.task_execution_engine import get_task_execution_engine
+            from agent.core.task_checkpoint import FailurePolicy
+
+            engine = get_task_execution_engine()
+            result = await engine.execute(
+                user_message=user_message,
+                session_id=session_id,
+                user_id=user_id,
+                intent=intent,
+                session=session,
+                knowledge_base_id=knowledge_base_id,
+                failure_policy=FailurePolicy.RELAXED,
+            )
+            if result.get("execution_id"):
+                yield {
+                    "type": "execution_id",
+                    "execution_id": result["execution_id"],
+                }
+            yield {
+                "type": "complete",
+                "agent_name": result.get("agent_name", intent.target_agent),
+                "intent": result.get("intent", intent.intent),
+                "mode": intent.collaboration_mode.value,
+                "full_message": result.get("message", ""),
+            }
+            return
+        except Exception as e:
+            logger.error("流式-TaskExecutionEngine 执行失败，降级为原有流程: %s", e)
 
     # 步骤 3：创建团队
     try:

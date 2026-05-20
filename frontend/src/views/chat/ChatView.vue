@@ -42,6 +42,83 @@
 
     <div class="chat-main">
       <div class="chat-messages" ref="messagesContainer">
+        <!-- 任务进度面板 -->
+        <div v-if="chatStore.executionId && chatStore.taskSteps.length > 0" class="task-progress-panel">
+          <div class="task-progress-header">
+            <span class="task-progress-title">任务执行进度</span>
+            <span class="task-status-badge" :class="chatStore.taskStatus">
+              {{ taskStatusLabel }}
+            </span>
+          </div>
+          <div class="task-steps-list">
+            <div
+              v-for="(step, idx) in chatStore.taskSteps"
+              :key="idx"
+              class="task-step-item"
+              :class="step.status"
+            >
+              <div class="step-indicator">
+                <span v-if="step.status === 'completed'" class="step-icon done">
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 010 .708l-7 7a.5.5 0 01-.708 0l-3.5-3.5a.5.5 0 11.708-.708L6.5 10.293l6.646-6.647a.5.5 0 01.708 0z"/></svg>
+                </span>
+                <span v-else-if="step.status === 'failed'" class="step-icon fail">
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.646 4.646a.5.5 0 01.708 0L8 7.293l2.646-2.647a.5.5 0 01.708.708L8.707 8l2.647 2.646a.5.5 0 01-.708.708L8 8.707l-2.646 2.647a.5.5 0 01-.708-.708L7.293 8 4.646 5.354a.5.5 0 010-.708z"/></svg>
+                </span>
+                <span v-else-if="step.status === 'running'" class="step-icon running">
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a.5.5 0 01.5.5v4a.5.5 0 01-.5.5H4.5a.5.5 0 010-1H7V4a.5.5 0 01.5-.5z"/><path d="M8 0a8 8 0 100 16A8 8 0 008 0zm0 15A7 7 0 118 1a7 7 0 010 14z"/></svg>
+                </span>
+                <span v-else-if="step.status === 'waiting_confirm'" class="step-icon confirm">
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 15A7 7 0 118 1a7 7 0 010 14zm0 1A8 8 0 108 0a8 8 0 000 16z"/><path d="M8.93 6.588l-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 11-2 0 1 1 0 012 0z"/></svg>
+                </span>
+                <span v-else-if="step.status === 'skipped'" class="step-icon skip">
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a7 7 0 1014 0A7 7 0 001 8zm15 0A8 8 0 010 8a8 8 0 0116 0zM4.5 7.5a.5.5 0 000 1h5.793l-2.147 2.146a.5.5 0 00.708.708l3-3a.5.5 0 000-.708l-3-3a.5.5 0 00-.708.708L10.293 7.5H4.5z"/></svg>
+                </span>
+                <span v-else class="step-icon pending">{{ idx + 1 }}</span>
+              </div>
+              <div class="step-info">
+                <div class="step-name">{{ step.step_name }}</div>
+                <div v-if="step.agent_name" class="step-agent">{{ step.agent_name }}</div>
+                <div v-if="step.error" class="step-error">{{ step.error }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 人工确认弹窗 -->
+        <div v-if="chatStore.waitingConfirm && chatStore.confirmInfo" class="confirm-dialog-overlay">
+          <div class="confirm-dialog">
+            <div class="confirm-header">
+              <span class="confirm-type-badge" :class="chatStore.confirmInfo.confirmType">
+                {{ confirmTypeLabel }}
+              </span>
+              <h4 class="confirm-title">需要人工确认</h4>
+            </div>
+            <div class="confirm-body">
+              <p class="confirm-reason">{{ chatStore.confirmInfo.confirmReason }}</p>
+              <div class="confirm-options">
+                <button
+                  v-for="opt in (chatStore.confirmInfo.options.length > 0 ? chatStore.confirmInfo.options : defaultConfirmOptions)"
+                  :key="opt.value"
+                  class="confirm-option-btn"
+                  :class="opt.value"
+                  @click="handleConfirm(opt.value)"
+                  :disabled="confirmLoading"
+                >
+                  <span class="option-label">{{ opt.label }}</span>
+                  <span v-if="opt.description" class="option-desc">{{ opt.description }}</span>
+                </button>
+              </div>
+            </div>
+            <div v-if="confirmLoading" class="confirm-loading">处理中...</div>
+          </div>
+        </div>
+
+        <!-- 断线重连提示 -->
+        <div v-if="sseDisconnected" class="reconnect-banner">
+          <span>连接已断开</span>
+          <button class="reconnect-btn" @click="reconnectSSE">重新连接</button>
+        </div>
+
         <div v-if="chatStore.messages.length === 0" class="empty-state">
           <div class="empty-icon">
             <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
@@ -153,13 +230,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, onMounted, watch } from 'vue'
+import { ref, nextTick, onMounted, onUnmounted, watch, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { useAuthStore } from '../../stores/auth'
 import { useChatStore, type Message } from '../../stores/chat'
-import { agentApi } from '../../api/agent'
+import { agentApi, type ConfirmOption } from '../../api/agent'
 import { sessionApi, type SessionInfo } from '../../api/session'
 import { knowledgeApi, type ParseResultItem } from '../../api/knowledge'
 import KbSelector from '../../components/chat/KbSelector.vue'
@@ -174,6 +251,39 @@ const messagesContainer = ref<HTMLDivElement>()
 const selectedKbId = ref('')
 const sessionList = ref<SessionInfo[]>([])
 const historyLoading = ref(false)
+const confirmLoading = ref(false)
+const sseDisconnected = ref(false)
+let sseEventSource: EventSource | null = null
+let sseReconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+const defaultConfirmOptions: ConfirmOption[] = [
+  { label: '继续执行', value: 'continue', description: '跳过当前步骤，继续后续流程' },
+  { label: '重试', value: 'retry', description: '重新执行当前步骤' },
+  { label: '跳过', value: 'skip', description: '标记为跳过，继续执行' },
+  { label: '取消任务', value: 'cancel', description: '终止整个任务执行' },
+]
+
+const taskStatusLabel = computed(() => {
+  const statusMap: Record<string, string> = {
+    running: '执行中',
+    completed: '已完成',
+    paused: '已暂停',
+    interrupted: '已中断',
+    failed: '执行失败',
+    cancelled: '已取消',
+  }
+  return statusMap[chatStore.taskStatus] || chatStore.taskStatus
+})
+
+const confirmTypeLabel = computed(() => {
+  if (!chatStore.confirmInfo) return ''
+  const typeMap: Record<string, string> = {
+    sensitive_action: '敏感操作确认',
+    degradation_decision: '降级决策',
+    partial_failure: '部分失败处理',
+  }
+  return typeMap[chatStore.confirmInfo.confirmType] || '人工确认'
+})
 
 const quickActions = [
   { icon: '📋', text: '帮我查看今天的待办事项' },
@@ -246,6 +356,7 @@ async function handleSend() {
   let agentName = ''
   let intent = ''
   let mode = ''
+  let execId = ''
   console.log("session_id", chatStore)
   agentApi.chatStreamFetch(
     {
@@ -267,11 +378,15 @@ async function handleSend() {
         } catch {
           console.warn('意图数据解析失败', data.data)
         }
+      } else if (data.event === 'execution_id') {
+        execId = data.data
+        chatStore.setExecutionId(execId)
+        subscribeTaskEvents(execId)
       } else if (data.event === 'chunk') {
         chatStore.appendToStreamingMessage(streamingId, data.data)
         scrollToBottom()
       } else if (data.event === 'status' && data.data === 'completed') {
-        chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode })
+        chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode, executionId: execId })
       } else if (data.event === 'error') {
         const errMsg = typeof data.data === 'string' ? data.data : (data.data?.message || data.message || '服务异常')
         chatStore.appendToStreamingMessage(streamingId, `\n\n[错误] ${errMsg}`)
@@ -288,7 +403,7 @@ async function handleSend() {
       chatStore.isStreaming = false
     },
     () => {
-      chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode })
+      chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode, executionId: execId })
       chatStore.isStreaming = false
       refreshSessionList()
     },
@@ -314,6 +429,7 @@ async function submitFeedback(messageId: string, type: 'thumbs_up' | 'thumbs_dow
 }
 
 function startNewChat() {
+  closeSSE()
   chatStore.clearChat()
   inputRef.value?.focus()
 }
@@ -401,9 +517,146 @@ async function handleFileUpload(files: File[]) {
   }
 }
 
-onMounted(() => {
+function subscribeTaskEvents(execId: string) {
+  closeSSE()
+
+  const es = agentApi.subscribeTaskEvents(execId)
+  if (!es) return
+  sseEventSource = es
+  sseDisconnected.value = false
+
+  es.addEventListener('human_confirm_required', (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data)
+      const payload = data.data || data
+      if (payload.confirm_id) {
+        chatStore.setWaitingConfirm(true)
+        chatStore.confirmInfo = {
+          confirmId: payload.confirm_id,
+          confirmType: payload.confirm_type || 'sensitive_action',
+          confirmReason: payload.confirm_reason || '',
+          options: payload.options || [],
+          stepIndex: payload.step_index || 0,
+        }
+      }
+    } catch { /* ignore */ }
+  })
+
+  es.addEventListener('step_completed', (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data)
+      refreshTaskStatus()
+    } catch { /* ignore */ }
+  })
+
+  es.addEventListener('step_failed', (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data)
+      refreshTaskStatus()
+    } catch { /* ignore */ }
+  })
+
+  es.addEventListener('task_completed', (e: MessageEvent) => {
+    chatStore.setTaskStatus('completed')
+    chatStore.setWaitingConfirm(false)
+    closeSSE()
+  })
+
+  es.addEventListener('task_paused', (e: MessageEvent) => {
+    chatStore.setTaskStatus('paused')
+    refreshTaskStatus()
+  })
+
+  es.addEventListener('task_interrupted', (e: MessageEvent) => {
+    chatStore.setTaskStatus('interrupted')
+    sseDisconnected.value = true
+  })
+
+  es.onerror = () => {
+    sseDisconnected.value = true
+    scheduleReconnect()
+  }
+}
+
+function closeSSE() {
+  if (sseEventSource) {
+    sseEventSource.close()
+    sseEventSource = null
+  }
+  if (sseReconnectTimer) {
+    clearTimeout(sseReconnectTimer)
+    sseReconnectTimer = null
+  }
+}
+
+function scheduleReconnect() {
+  if (sseReconnectTimer) return
+  sseReconnectTimer = setTimeout(() => {
+    sseReconnectTimer = null
+    if (chatStore.executionId) {
+      subscribeTaskEvents(chatStore.executionId)
+    }
+  }, 5000)
+}
+
+function reconnectSSE() {
+  sseDisconnected.value = false
+  if (chatStore.executionId) {
+    subscribeTaskEvents(chatStore.executionId)
+  }
+}
+
+async function refreshTaskStatus() {
+  if (!chatStore.executionId) return
+  try {
+    const status = await agentApi.getTaskStatus(chatStore.executionId)
+    if (status) {
+      chatStore.updateTaskSteps(status.steps || [])
+      chatStore.setTaskStatus(status.status || '')
+    }
+  } catch { /* ignore */ }
+}
+
+async function handleConfirm(decision: string) {
+  if (!chatStore.confirmInfo) return
+  confirmLoading.value = true
+
+  try {
+    await agentApi.confirmTask(
+      chatStore.confirmInfo.confirmId,
+      decision,
+      '',
+      authStore.userId,
+      decision === 'retry' ? chatStore.confirmInfo.options?.[0]?.value : undefined,
+    )
+    chatStore.setWaitingConfirm(false)
+    ElMessage.success('确认已提交')
+    // 刷新任务状态
+    await refreshTaskStatus()
+    // 重新订阅SSE
+    if (chatStore.executionId) {
+      subscribeTaskEvents(chatStore.executionId)
+    }
+  } catch {
+    ElMessage.error('确认提交失败')
+  } finally {
+    confirmLoading.value = false
+  }
+}
+
+onMounted(async () => {
   inputRef.value?.focus()
   refreshSessionList()
+
+  // 恢复任务状态
+  const recovered = await chatStore.recoverTaskStatus()
+  if (recovered && chatStore.executionId) {
+    subscribeTaskEvents(chatStore.executionId)
+  }
+})
+
+onUnmounted(() => {
+  closeSSE()
 })
 </script>
 
@@ -677,6 +930,315 @@ onMounted(() => {
 
 .msg-bubble.streaming {
   border-color: var(--color-primary-light);
+}
+
+/* 任务进度面板 */
+.task-progress-panel {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.task-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.task-progress-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.task-status-badge {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: var(--radius-full);
+  font-weight: 500;
+}
+
+.task-status-badge.running {
+  background: #e6f7ff;
+  color: #1890ff;
+}
+
+.task-status-badge.completed {
+  background: #f6ffed;
+  color: #52c41a;
+}
+
+.task-status-badge.paused {
+  background: #fff7e6;
+  color: #fa8c16;
+}
+
+.task-status-badge.interrupted {
+  background: #fff1f0;
+  color: #f5222d;
+}
+
+.task-status-badge.failed {
+  background: #fff1f0;
+  color: #f5222d;
+}
+
+.task-status-badge.cancelled {
+  background: #f5f5f5;
+  color: #999;
+}
+
+.task-steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-step-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  transition: background var(--transition-fast);
+}
+
+.task-step-item.running {
+  background: #e6f7ff;
+}
+
+.task-step-item.failed {
+  background: #fff1f0;
+}
+
+.task-step-item.waiting_confirm {
+  background: #fff7e6;
+}
+
+.step-indicator {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.step-icon.done {
+  color: #52c41a;
+}
+
+.step-icon.fail {
+  color: #f5222d;
+}
+
+.step-icon.running {
+  color: #1890ff;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.step-icon.confirm {
+  color: #fa8c16;
+}
+
+.step-icon.skip {
+  color: #999;
+}
+
+.step-icon.pending {
+  color: var(--color-text-tertiary);
+}
+
+.step-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.step-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.step-agent {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+
+.step-error {
+  font-size: 12px;
+  color: #f5222d;
+  margin-top: 4px;
+}
+
+/* 人工确认弹窗 */
+.confirm-dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.confirm-dialog {
+  background: white;
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  width: 420px;
+  max-width: 90vw;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+.confirm-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.confirm-type-badge {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: var(--radius-full);
+  font-weight: 500;
+}
+
+.confirm-type-badge.sensitive_action {
+  background: #fff1f0;
+  color: #f5222d;
+}
+
+.confirm-type-badge.degradation_decision {
+  background: #fff7e6;
+  color: #fa8c16;
+}
+
+.confirm-type-badge.partial_failure {
+  background: #e6f7ff;
+  color: #1890ff;
+}
+
+.confirm-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0;
+}
+
+.confirm-body {
+  margin-bottom: 16px;
+}
+
+.confirm-reason {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin: 0 0 16px;
+}
+
+.confirm-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.confirm-option-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: white;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-align: left;
+}
+
+.confirm-option-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  background: var(--color-primary-bg);
+}
+
+.confirm-option-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.confirm-option-btn.cancel {
+  border-color: #ffccc7;
+}
+
+.confirm-option-btn.cancel:hover:not(:disabled) {
+  background: #fff1f0;
+  border-color: #f5222d;
+}
+
+.option-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.option-desc {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+
+.confirm-loading {
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  padding: 8px 0;
+}
+
+/* 断线重连提示 */
+.reconnect-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #fff7e6;
+  border: 1px solid #ffe58f;
+  border-radius: var(--radius-md);
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: #ad6800;
+}
+
+.reconnect-btn {
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  background: #fa8c16;
+  color: white;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.reconnect-btn:hover {
+  background: #d46b08;
 }
 
 .msg-text :deep(code) {

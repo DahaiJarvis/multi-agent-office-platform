@@ -38,6 +38,19 @@ class EventType(str, Enum):
     INTENT_CLASSIFIED = "intent_classified"
     RETRY = "retry"
     ERROR = "error"
+    TASK_STARTED = "task_started"
+    TASK_COMPLETED = "task_completed"
+    TASK_PAUSED = "task_paused"
+    TASK_RESUMED = "task_resumed"
+    TASK_INTERRUPTED = "task_interrupted"
+    STEP_COMPLETED = "step_completed"
+    STEP_FAILED = "step_failed"
+    AGENT_RETRY = "agent_retry"
+    AGENT_FALLBACK = "agent_fallback"
+    EXECUTION_DEGRADED = "execution_degraded"
+    HUMAN_CONFIRM_REQUIRED = "human_confirm_required"
+    TASK_STEP_START = "task_step_start"
+    TASK_STEP_COMPLETE = "task_step_complete"
 
 
 class Event:

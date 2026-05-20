@@ -76,3 +76,41 @@ class QAAskRequest(BaseModel):
     session_id: str | None = Field(default=None, description="会话ID，用于多轮对话")
     top_k: int = Field(default=5, ge=1, le=20, description="返回结果数量")
     threshold: float = Field(default=0.7, ge=0.0, le=1.0, description="相似度阈值")
+
+
+# ==================== 任务管理请求模型 ====================
+
+
+class TaskResumeRequest(BaseModel):
+    """任务恢复请求"""
+
+    execution_id: str = Field(..., description="执行记录ID")
+    session_id: str = Field(..., description="会话ID")
+    user_id: str = Field(..., description="用户ID")
+
+
+class TaskStepRetryRequest(BaseModel):
+    """步骤重试请求"""
+
+    execution_id: str = Field(..., description="执行记录ID")
+    step_index: int = Field(..., ge=1, description="步骤索引（从1开始，0为意图分类）")
+    user_id: str = Field(..., description="用户ID")
+    agent_name: str | None = Field(default=None, description="指定重试使用的Agent名称，为空则使用原Agent")
+
+
+class TaskConfirmRequest(BaseModel):
+    """人工确认请求"""
+
+    execution_id: str = Field(..., description="执行记录ID")
+    step_index: int = Field(..., ge=1, description="步骤索引（从1开始，0为意图分类）")
+    decision: str = Field(..., description="决策: continue/skip/cancel/retry")
+    comment: str = Field(default="", description="备注")
+    user_id: str = Field(..., description="用户ID")
+    agent_name: str | None = Field(default=None, description="重试时指定Agent名称，仅decision=retry时有效")
+
+
+class TaskCancelRequest(BaseModel):
+    """任务取消请求"""
+
+    execution_id: str = Field(..., description="执行记录ID")
+    user_id: str = Field(..., description="用户ID")
