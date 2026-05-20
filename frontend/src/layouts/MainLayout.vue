@@ -93,6 +93,16 @@
               <span v-if="!sidebarCollapsed" class="nav-label">Prompt模板</span>
             </transition>
           </router-link>
+
+          <router-link to="/routing" class="nav-item" :class="{ active: $route.name === 'RoutingConfig' }">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M3 4a2 2 0 012-2h3.586a1 1 0 01.707.293l1.414 1.414a1 1 0 00.707.293H15a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V4z" opacity="0.4" />
+              <path d="M8 9l2 2 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+            <transition name="fade">
+              <span v-if="!sidebarCollapsed" class="nav-label">意图路由</span>
+            </transition>
+          </router-link>
         </div>
 
         <div v-if="authStore.isAdmin" class="nav-section">
@@ -226,6 +236,7 @@ const pageTitles: Record<string, string> = {
   Plugins: '插件管理',
   AgentBuilder: 'Agent构建器',
   PromptTemplates: 'Prompt模板库',
+  RoutingConfig: '意图路由配置',
   Dashboard: '运营仪表盘',
   Health: '健康检查',
   DRMonitor: '灾备监控',

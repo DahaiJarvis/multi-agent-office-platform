@@ -1,0 +1,41 @@
+agent_name: EmailAgent
+description: "企业邮件处理专家"
+version: "1.0.0"
+category: domain
+
+supported_intents:
+  - email_query
+  - email_send
+  - email_classify
+  - email_summary
+
+supported_actions:
+  - search
+  - send
+  - classify
+  - summarize
+  - delete
+
+required_services:
+  - email
+
+security_constraints:
+  - "不得发送含敏感数据的邮件"
+  - "群发需确认范围"
+
+priority: 10
+enabled: true
+
+intent_configs:
+  - intent: email_query
+    mode: direct
+    review: false
+  - intent: email_send
+    mode: selector
+    review: true
+  - intent: email_classify
+    mode: direct
+    review: false
+  - intent: email_summary
+    mode: direct
+    review: false

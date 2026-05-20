@@ -1,0 +1,39 @@
+agent_name: OfficeAssistant
+description: "通用办公助手，处理网络搜索、图片分析、跨系统操作等通用任务"
+version: "1.0.0"
+category: domain
+
+supported_intents:
+  - web_search
+  - image_analyze
+  - cross_system
+  - complex_task
+  - general
+
+supported_actions:
+  - search_web
+  - analyze_image
+  - coordinate
+  - chat
+
+required_services: []
+
+priority: 5
+enabled: true
+
+intent_configs:
+  - intent: web_search
+    mode: direct
+    review: false
+  - intent: image_analyze
+    mode: direct
+    review: false
+  - intent: cross_system
+    mode: swarm
+    review: true
+  - intent: complex_task
+    mode: swarm
+    review: true
+  - intent: general
+    mode: direct
+    review: false

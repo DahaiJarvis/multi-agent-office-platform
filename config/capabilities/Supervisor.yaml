@@ -1,0 +1,30 @@
+agent_name: Supervisor
+description: "总控 Agent，负责意图识别和任务路由"
+version: "1.0.0"
+category: supervisor
+
+supported_intents:
+  - greeting
+  - general_query
+  - help
+
+supported_actions:
+  - route
+  - classify
+  - summarize
+
+required_services: []
+
+priority: 0
+enabled: true
+
+intent_configs:
+  - intent: greeting
+    mode: direct
+    review: false
+  - intent: general_query
+    mode: direct
+    review: false
+  - intent: help
+    mode: direct
+    review: false

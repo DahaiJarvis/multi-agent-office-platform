@@ -12,8 +12,10 @@
    - 熔断器打开时跳过此策略
 
 2. Agent替换（Fallback Table）
-   - 查找替换表，用备用Agent执行
-   - 注入降级提示词，告知Agent正在替代执行
+   - 前提条件1：故障层级为LLM层（MCP层故障时替换Agent也调不通，跳过替换）
+   - 前提条件2：当前意图类型的任务适合替换（操作类任务替换成功率低，跳过替换）
+   - 替换时继承原Agent的专业Prompt，使替换Agent获得专业能力
+   - 如果无法获取原Agent的Prompt，降级使用通用降级提示词
 
 3. 降级执行（简化任务描述）
    - 基于已有数据简化任务
@@ -25,6 +27,22 @@
    - MANUAL: 暂停任务，推送通知让用户选择
 
 ================================================================================
+故障层级分类
+================================================================================
+
+通过 _classify_fault() 方法判断故障层级：
+- llm_failure: LLM调用失败（如API限流、模型返回错误），Agent替换可能有效
+- mcp_failure: MCP工具调用失败（如服务宕机、连接超时），Agent替换无效
+
+================================================================================
+替换可行性评估
+================================================================================
+
+通过 FALLBACK_FEASIBILITY 和 _should_attempt_fallback() 方法判断：
+- 查询类任务（_query）替换成功率高，允许替换
+- 操作类任务（_action/_send/_create）替换成功率低，跳过替换
+
+================================================================================
 与其他模块的关系
 ================================================================================
 
@@ -33,6 +51,8 @@
 - execution_controller.py: 执行步骤级重试
 - event_bus.py: 发布故障隔离事件
 - team_factory.py: 创建替换Agent
+- domain.py: 获取原Agent的专业Prompt（AGENT_PROMPTS）
+- prompt_registry.py: 获取外置版本管理的Prompt
 """
 
 import asyncio
@@ -91,6 +111,37 @@ MAX_SAME_AGENT_RETRIES = 2
 # 重试退避基数（秒）
 RETRY_BACKOFF_BASE = 1.0
 
+# MCP层故障关键词：用于判断故障是否来自MCP工具调用层
+MCP_FAULT_KEYWORDS = [
+    "mcp", "sse", "tool_call", "connection refused",
+    "timeout", "tool execution", "tool server",
+]
+
+# Agent替换可行性评估：按意图类型判断替换是否可行
+# 查询类任务（_query）替换成功率高，操作类任务（_action/_send/_create）替换成功率低
+FALLBACK_FEASIBILITY: dict[str, bool] = {
+    "approval_query": True,
+    "approval_action": False,
+    "email_query": True,
+    "email_send": False,
+    "calendar_query": True,
+    "calendar_create": False,
+    "crm_query": True,
+    "hr_query": True,
+    "hr_action": False,
+    "finance_query": True,
+    "finance_action": False,
+    "knowledge_query": True,
+    "document_parse": True,
+    "document_summary": True,
+    "document_compare": True,
+    "report_generate": False,
+    "web_search": True,
+    "image_analyze": True,
+    "kb_manage": False,
+    "general": True,
+}
+
 
 class FaultIsolationPolicy:
     """故障隔离策略执行器
@@ -147,15 +198,35 @@ class FaultIsolationPolicy:
             execution, step_index, agent_name, "step_failed", str(error),
         )
 
+        # 判断故障层级：LLM层故障 vs MCP层故障
+        fault_level = self._classify_fault(error)
+
         # 策略1: 同Agent重试
         retry_result = await self._retry_same_agent(execution, step_index)
         if retry_result is not None:
             return retry_result
 
-        # 策略2: Agent替换
-        fallback_result = await self._fallback_agent(execution, step_index)
-        if fallback_result is not None:
-            return fallback_result
+        # 策略2: Agent替换（需满足两个前提条件）
+        # 条件1: 故障层级为LLM层（MCP层故障时替换Agent也调不通，跳过替换）
+        # 条件2: 当前意图类型的任务适合替换（操作类任务替换成功率低，跳过替换）
+        should_fallback = (
+            fault_level == "llm_failure"
+            and self._should_attempt_fallback(execution)
+        )
+        if should_fallback:
+            fallback_result = await self._fallback_agent(execution, step_index)
+            if fallback_result is not None:
+                return fallback_result
+        else:
+            skip_reason = "MCP层故障" if fault_level == "mcp_failure" else "任务类型不适合替换"
+            logger.info(
+                "策略2跳过-%s: execution=%s step=%d agent=%s",
+                skip_reason, execution.execution_id, step_index, agent_name,
+            )
+            await self._publish_fault_event(
+                execution, step_index, agent_name,
+                "fallback_skipped", f"跳过Agent替换: {skip_reason}",
+            )
 
         # 策略3: 降级执行
         degrade_result = await self._degrade_execution(execution, step_index)
@@ -263,10 +334,11 @@ class FaultIsolationPolicy:
         execution: TaskExecution,
         step_index: int,
     ) -> StepCheckpoint | None:
-        """策略2: 替换为Fallback Agent，注入降级提示词
+        """策略2: 替换为Fallback Agent，继承原Agent的专业Prompt
 
         从AGENT_FALLBACK_TABLE中查找可替换的Agent，
-        使用降级提示词模板告知替换Agent正在替代执行。
+        将原Agent的专业Prompt注入给替换Agent，使其获得专业能力，
+        同时告知替换Agent正在替代执行，工具集可能不同。
 
         Args:
             execution: 任务执行记录
@@ -289,6 +361,9 @@ class FaultIsolationPolicy:
             )
             return None
 
+        # 获取原Agent的专业Prompt
+        original_prompt = self._get_original_agent_prompt(original_agent)
+
         # 依次尝试替换Agent
         for fallback_name in fallback_agents:
             # 检查替换Agent的熔断器
@@ -309,13 +384,22 @@ class FaultIsolationPolicy:
                 "agent_fallback", f"替换为{fallback_name}",
             )
 
-            # 构建降级任务描述
+            # 构建降级任务描述：继承原Agent的专业Prompt
             original_task = self._build_step_task(execution, step)
-            degraded_task = FALLBACK_PROMPT_TEMPLATE.format(
-                original_agent=original_agent,
-                fallback_agent=fallback_name,
-                task=original_task,
-            )
+            if original_prompt:
+                degraded_task = (
+                    f"你正在临时替代 {original_agent} 执行任务。\n\n"
+                    f"{original_prompt}\n\n"
+                    f"注意：你使用的是 {fallback_name} 的工具集，"
+                    f"如果工具不足以完成任务，请明确说明哪些部分无法处理。\n\n"
+                    f"原始任务：{original_task}"
+                )
+            else:
+                degraded_task = FALLBACK_PROMPT_TEMPLATE.format(
+                    original_agent=original_agent,
+                    fallback_agent=fallback_name,
+                    task=original_task,
+                )
 
             # 使用替换Agent执行
             result = await self._execute_step_with_agent(
@@ -594,7 +678,7 @@ class FaultIsolationPolicy:
         return None
 
     def _is_circuit_open(self, agent_name: str) -> bool:
-        """检查Agent的熔断器是否打开
+        """检查Agent的熔断器是否已打开
 
         Args:
             agent_name: Agent名称
@@ -608,6 +692,66 @@ class FaultIsolationPolicy:
             return cb.state.value == "open"
         except Exception:
             return False
+
+    def _classify_fault(self, error: Exception) -> str:
+        """根据错误信息判断故障层级
+
+        区分LLM层故障和MCP工具层故障：
+        - llm_failure: LLM调用失败（如API限流、模型返回错误），Agent替换可能有效
+        - mcp_failure: MCP工具调用失败（如服务宕机、连接超时），Agent替换无效
+
+        Args:
+            error: 步骤失败的异常
+
+        Returns:
+            故障层级: "llm_failure" 或 "mcp_failure"
+        """
+        error_msg = str(error).lower()
+        if any(kw in error_msg for kw in MCP_FAULT_KEYWORDS):
+            return "mcp_failure"
+        return "llm_failure"
+
+    def _should_attempt_fallback(self, execution: TaskExecution) -> bool:
+        """判断当前意图类型的任务是否适合Agent替换
+
+        查询类任务替换成功率高（通用助手也能完成简单查询），
+        操作类任务替换成功率低（需要专业Prompt中的操作规范和安全规则）。
+
+        Args:
+            execution: 任务执行记录
+
+        Returns:
+            True表示适合尝试Agent替换
+        """
+        intent = execution.intent_result.get("intent", "")
+        return FALLBACK_FEASIBILITY.get(intent, False)
+
+    def _get_original_agent_prompt(self, agent_name: str) -> str | None:
+        """获取原Agent的专业Prompt
+
+        优先从Prompt Registry获取外置版本管理的Prompt，
+        降级到代码内嵌的AGENT_PROMPTS默认值。
+
+        Args:
+            agent_name: Agent名称
+
+        Returns:
+            Agent的专业Prompt，不存在则返回None
+        """
+        try:
+            from agent.core.prompt_registry import get_prompt_registry
+            registry = get_prompt_registry()
+            prompt = registry.get_prompt(agent_name)
+            if prompt:
+                return prompt
+        except Exception:
+            pass
+
+        try:
+            from agent.agents.domain import AGENT_PROMPTS
+            return AGENT_PROMPTS.get(agent_name)
+        except Exception:
+            return None
 
     def _build_step_task(self, execution: TaskExecution, step: dict[str, Any]) -> str:
         """构建步骤任务描述

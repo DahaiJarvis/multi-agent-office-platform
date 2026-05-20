@@ -1,0 +1,30 @@
+agent_name: Reviewer
+description: "质量审核 Agent，负责结果审核和合规检查"
+version: "1.0.0"
+category: utility
+
+supported_intents:
+  - review
+  - compliance_check
+
+supported_actions:
+  - review
+  - check
+  - validate
+
+required_services:
+  - oa
+  - approval
+  - hr
+  - finance
+
+priority: 5
+enabled: true
+
+intent_configs:
+  - intent: review
+    mode: direct
+    review: false
+  - intent: compliance_check
+    mode: direct
+    review: false

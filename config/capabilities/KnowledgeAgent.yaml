@@ -1,0 +1,46 @@
+agent_name: KnowledgeAgent
+description: "知识库检索专家"
+version: "1.0.0"
+category: domain
+
+supported_intents:
+  - knowledge_query
+  - document_parse
+  - document_summary
+  - document_compare
+  - report_generate
+  - kb_manage
+
+supported_actions:
+  - search
+  - qa
+  - summarize
+  - parse
+  - compare
+  - generate_report
+
+required_services:
+  - knowledge
+
+priority: 10
+enabled: true
+
+intent_configs:
+  - intent: knowledge_query
+    mode: direct
+    review: false
+  - intent: document_parse
+    mode: direct
+    review: false
+  - intent: document_summary
+    mode: direct
+    review: false
+  - intent: document_compare
+    mode: direct
+    review: false
+  - intent: report_generate
+    mode: selector
+    review: true
+  - intent: kb_manage
+    mode: selector
+    review: true

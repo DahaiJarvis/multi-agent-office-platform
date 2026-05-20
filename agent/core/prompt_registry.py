@@ -52,6 +52,22 @@ class PromptEntry(BaseModel):
     canary_version: str = Field(default="", description="灰度版本号")
 
 
+class IntentDefinition(BaseModel):
+    """意图标签定义"""
+
+    name: str = Field(..., description="意图标签名称")
+    label: str = Field(default="", description="中文标签")
+    description: str = Field(default="", description="意图说明")
+
+
+class IntentExample(BaseModel):
+    """意图分类示例"""
+
+    input: str = Field(..., description="用户输入")
+    output: str = Field(..., description="期望意图标签")
+    reason: str = Field(default="", description="分类原因")
+
+
 class PromptRegistry:
     """Prompt 注册中心
 
@@ -62,6 +78,8 @@ class PromptRegistry:
     def __init__(self, prompts_dir: Path | str | None = None) -> None:
         self._prompts_dir = Path(prompts_dir) if prompts_dir else PROMPTS_DIR
         self._entries: dict[str, PromptEntry] = {}
+        self._intents: list[IntentDefinition] = []
+        self._intent_examples: list[IntentExample] = []
         self._loaded: bool = False
 
     def _ensure_loaded(self) -> None:
@@ -70,6 +88,44 @@ class PromptRegistry:
             return
         self._load_from_files()
         self._loaded = True
+        self._validate_intents()
+
+    def _validate_intents(self) -> None:
+        """校验意图标签配置的完整性和一致性
+
+        校验项：
+          1. 意图标签名称不能重复
+          2. 分类示例中引用的意图标签必须存在于意图列表中
+          3. Prompt 模板渲染后不应残留未替换的占位符
+        """
+        if not self._intents:
+            logger.warning("Schema校验: 未加载到任何意图标签，意图分类功能将不可用")
+            return
+
+        # 校验1：意图标签名称不能重复
+        seen_names: set[str] = set()
+        for intent in self._intents:
+            if intent.name in seen_names:
+                logger.error("Schema校验[ERROR]: 意图标签名称重复 - %s", intent.name)
+            seen_names.add(intent.name)
+
+        # 校验2：分类示例中引用的意图标签必须存在于意图列表中
+        intent_names = {i.name for i in self._intents}
+        for example in self._intent_examples:
+            if example.output not in intent_names:
+                logger.error(
+                    "Schema校验[ERROR]: 分类示例引用了不存在的意图标签 - 示例'%s' -> '%s'",
+                    example.input, example.output,
+                )
+
+        # 校验3：Prompt 模板渲染后不应残留未替换的占位符
+        entry = self._entries.get("IntentClassifier")
+        if entry and entry.versions:
+            latest_content = entry.versions[-1].content
+            if "{{ " in latest_content and "}}" in latest_content:
+                logger.error("Schema校验[ERROR]: IntentClassifier Prompt 模板渲染不完整，存在未替换的占位符")
+
+        logger.info("Schema校验: 意图标签校验完成, 共 %d 个意图标签, %d 个分类示例", len(self._intents), len(self._intent_examples))
 
     def _load_from_files(self) -> None:
         """从 YAML 文件加载所有 Prompt"""
@@ -98,6 +154,14 @@ class PromptRegistry:
                 canary_percent = data.get("canary_percent", 0.0)
                 canary_version = data.get("canary_version", "")
 
+                # 解析结构化的意图标签和示例（仅 IntentClassifier）
+                if agent_name == "IntentClassifier":
+                    self._load_intent_definitions(data)
+
+                # 渲染 Prompt 模板中的占位符
+                if content and "{{" in content:
+                    content = self._render_prompt_template(content)
+
                 if not content:
                     logger.warning("Prompt 文件 %s 内容为空，跳过", yaml_file.name)
                     continue
@@ -125,6 +189,95 @@ class PromptRegistry:
         if not self._entries:
             logger.warning("未从文件加载到任何 Prompt，使用代码内嵌默认值")
             self._load_defaults()
+
+    def _load_intent_definitions(self, data: dict[str, Any]) -> None:
+        """从 YAML 数据中加载结构化的意图标签和示例
+
+        Args:
+            data: YAML 文件解析后的字典
+        """
+        intents_data = data.get("intents", [])
+        if intents_data and isinstance(intents_data, list):
+            self._intents = [
+                IntentDefinition(
+                    name=item.get("name", ""),
+                    label=item.get("label", ""),
+                    description=item.get("description", ""),
+                )
+                for item in intents_data
+                if item.get("name")
+            ]
+            logger.info("加载意图标签: %d 个", len(self._intents))
+
+        examples_data = data.get("examples", [])
+        if examples_data and isinstance(examples_data, list):
+            self._intent_examples = [
+                IntentExample(
+                    input=item.get("input", ""),
+                    output=item.get("output", ""),
+                    reason=item.get("reason", ""),
+                )
+                for item in examples_data
+                if item.get("input") and item.get("output")
+            ]
+            logger.info("加载意图示例: %d 个", len(self._intent_examples))
+
+    def _render_prompt_template(self, template: str) -> str:
+        """渲染 Prompt 模板中的占位符
+
+        支持的占位符：
+        - {{ intents }}: 渲染意图标签列表
+        - {{ examples }}: 渲染分类示例
+
+        Args:
+            template: 包含占位符的 Prompt 模板
+
+        Returns:
+            渲染后的 Prompt 文本
+        """
+        result = template
+
+        if "{{ intents }}" in result:
+            if self._intents:
+                intent_lines = [
+                    f"- {item.name}: {item.description}"
+                    for item in self._intents
+                ]
+                result = result.replace("{{ intents }}", "\n".join(intent_lines))
+            else:
+                result = result.replace("{{ intents }}", "（未配置意图标签）")
+
+        if "{{ examples }}" in result:
+            if self._intent_examples:
+                example_lines = []
+                for ex in self._intent_examples:
+                    line = f'- "{ex.input}" -> {ex.output}'
+                    if ex.reason:
+                        line += f"({ex.reason})"
+                    example_lines.append(line)
+                result = result.replace("{{ examples }}", "\n".join(example_lines))
+            else:
+                result = result.replace("{{ examples }}", "（未配置分类示例）")
+
+        return result
+
+    def get_intents(self) -> list[IntentDefinition]:
+        """获取所有意图标签定义
+
+        Returns:
+            意图标签列表
+        """
+        self._ensure_loaded()
+        return list(self._intents)
+
+    def get_intent_examples(self) -> list[IntentExample]:
+        """获取所有意图分类示例
+
+        Returns:
+            分类示例列表
+        """
+        self._ensure_loaded()
+        return list(self._intent_examples)
 
     def _load_defaults(self) -> None:
         """加载代码内嵌的默认 Prompt（作为降级方案）"""

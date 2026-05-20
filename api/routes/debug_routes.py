@@ -1,6 +1,6 @@
 """调试路由
 
-提供执行轨迹查询和 Agent 运行统计接口，用于开发调试。
+提供执行轨迹查询、Agent 运行统计、意图标签和路由配置查询接口，用于开发调试。
 """
 
 import logging
@@ -45,6 +45,69 @@ class AgentStatsResponse(BaseModel):
     error_count: int = 0
     avg_duration_ms: float = 0
     success_rate: float = 0
+
+
+class IntentDefinitionResponse(BaseModel):
+    """意图标签定义响应"""
+
+    name: str = Field(..., description="意图标签名称")
+    label: str = Field(default="", description="中文标签")
+    description: str = Field(default="", description="意图说明")
+
+
+class IntentExampleResponse(BaseModel):
+    """意图分类示例响应"""
+
+    input: str = Field(..., description="用户输入")
+    output: str = Field(..., description="期望意图标签")
+    reason: str = Field(default="", description="分类原因")
+
+
+class IntentListResponse(BaseModel):
+    """意图标签列表响应"""
+
+    intents: list[IntentDefinitionResponse] = Field(default_factory=list)
+    examples: list[IntentExampleResponse] = Field(default_factory=list)
+    total: int = 0
+
+
+class IntentConfigResponse(BaseModel):
+    """意图级路由配置响应"""
+
+    intent: str = Field(..., description="意图标签名称")
+    mode: str = Field(default="direct", description="协作模式")
+    review: bool = Field(default=False, description="是否需要审核")
+
+
+class CapabilityCardResponse(BaseModel):
+    """能力卡片响应"""
+
+    agent_name: str = Field(..., description="Agent 名称")
+    description: str = Field(default="", description="Agent 描述")
+    version: str = Field(default="1.0.0", description="版本号")
+    category: str = Field(default="domain", description="分类")
+    supported_intents: list[str] = Field(default_factory=list, description="支持的意图列表")
+    intent_configs: list[IntentConfigResponse] = Field(default_factory=list, description="意图级路由配置")
+    required_services: list[str] = Field(default_factory=list, description="依赖的MCP服务")
+    security_constraints: list[str] = Field(default_factory=list, description="安全约束")
+    priority: int = Field(default=0, description="优先级")
+    enabled: bool = Field(default=True, description="是否启用")
+
+
+class RoutingEntryResponse(BaseModel):
+    """路由条目响应"""
+
+    intent: str = Field(..., description="意图标签")
+    agent: str = Field(..., description="目标 Agent")
+    mode: str = Field(default="direct", description="协作模式")
+    review: bool = Field(default=False, description="是否需要审核")
+
+
+class RoutingTableResponse(BaseModel):
+    """路由表响应"""
+
+    routes: list[RoutingEntryResponse] = Field(default_factory=list)
+    total: int = 0
 
 
 @router.get("/trace/{session_id}", response_model=TraceResponse, summary="查询会话追踪")
@@ -139,3 +202,89 @@ async def get_agent_stats(agent_name: str) -> AgentStatsResponse:
         avg_duration_ms=avg_duration,
         success_rate=success_rate,
     )
+
+
+@router.get("/intents", response_model=IntentListResponse, summary="查询意图标签列表")
+async def get_intent_list() -> IntentListResponse:
+    """获取所有意图标签定义和分类示例
+
+    从 IntentClassifier.yaml 中加载结构化的意图标签列表，
+    支持前端动态展示意图分类配置。
+    """
+    from agent.core.prompt_registry import get_prompt_registry
+
+    registry = get_prompt_registry()
+    intents = registry.get_intents()
+    examples = registry.get_intent_examples()
+
+    return IntentListResponse(
+        intents=[
+            IntentDefinitionResponse(name=i.name, label=i.label, description=i.description)
+            for i in intents
+        ],
+        examples=[
+            IntentExampleResponse(input=e.input, output=e.output, reason=e.reason)
+            for e in examples
+        ],
+        total=len(intents),
+    )
+
+
+@router.get("/capabilities", response_model=list[CapabilityCardResponse], summary="查询能力卡片列表")
+async def get_capability_cards() -> list[CapabilityCardResponse]:
+    """获取所有 Agent 的能力卡片
+
+    从 config/capabilities/ 目录加载 YAML 配置，
+    返回每个 Agent 的能力声明和意图级路由配置。
+    """
+    from agent.core.capability_card import get_capability_registry
+
+    registry = get_capability_registry()
+    cards = registry.list_all()
+
+    return [
+        CapabilityCardResponse(
+            agent_name=card.agent_name,
+            description=card.description,
+            version=card.version,
+            category=card.category,
+            supported_intents=card.supported_intents,
+            intent_configs=[
+                IntentConfigResponse(intent=cfg.intent, mode=cfg.mode, review=cfg.review)
+                for cfg in card.intent_configs
+            ],
+            required_services=card.required_services,
+            security_constraints=card.security_constraints,
+            priority=card.priority,
+            enabled=card.enabled,
+        )
+        for card in cards
+    ]
+
+
+@router.get("/routing", response_model=RoutingTableResponse, summary="查询路由表")
+async def get_routing_table() -> RoutingTableResponse:
+    """获取完整的意图路由表
+
+    基于 CapabilityRegistry 动态生成路由表，
+    展示每个意图对应的 Agent、协作模式和审核要求。
+    """
+    from agent.core.capability_card import get_capability_registry
+    from agent.core.prompt_registry import get_prompt_registry
+
+    cap_registry = get_capability_registry()
+    prompt_registry = get_prompt_registry()
+    intents = prompt_registry.get_intents()
+
+    routes = []
+    for intent_def in intents:
+        routing = cap_registry.get_routing_for_intent(intent_def.name)
+        if routing:
+            routes.append(RoutingEntryResponse(
+                intent=intent_def.name,
+                agent=routing["agent"],
+                mode=routing["mode"],
+                review=routing["review"],
+            ))
+
+    return RoutingTableResponse(routes=routes, total=len(routes))

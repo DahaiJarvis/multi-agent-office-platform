@@ -1,0 +1,31 @@
+agent_name: CRMAgent
+description: "CRM 客户管理专家"
+version: "1.0.0"
+category: domain
+
+supported_intents:
+  - crm_query
+  - crm_update
+  - crm_analysis
+
+supported_actions:
+  - query_customer
+  - update_customer
+  - analyze
+
+required_services:
+  - crm
+
+priority: 10
+enabled: true
+
+intent_configs:
+  - intent: crm_query
+    mode: direct
+    review: false
+  - intent: crm_update
+    mode: selector
+    review: true
+  - intent: crm_analysis
+    mode: direct
+    review: false

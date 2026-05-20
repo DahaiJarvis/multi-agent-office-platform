@@ -1,0 +1,34 @@
+agent_name: HRAgent
+description: "HR 人事管理专家"
+version: "1.0.0"
+category: domain
+
+supported_intents:
+  - hr_query
+  - hr_action
+  - hr_attendance
+
+supported_actions:
+  - query_info
+  - apply_leave
+  - check_attendance
+
+required_services:
+  - hr
+
+security_constraints:
+  - "仅查看本人人事信息"
+
+priority: 10
+enabled: true
+
+intent_configs:
+  - intent: hr_query
+    mode: direct
+    review: false
+  - intent: hr_action
+    mode: selector
+    review: true
+  - intent: hr_attendance
+    mode: direct
+    review: false

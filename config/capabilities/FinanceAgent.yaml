@@ -1,0 +1,34 @@
+agent_name: FinanceAgent
+description: "财务管理专家"
+version: "1.0.0"
+category: domain
+
+supported_intents:
+  - finance_query
+  - finance_action
+  - finance_budget
+
+supported_actions:
+  - query
+  - reimburse
+  - budget_check
+
+required_services:
+  - finance
+
+security_constraints:
+  - "报销需确认金额和凭证"
+
+priority: 10
+enabled: true
+
+intent_configs:
+  - intent: finance_query
+    mode: direct
+    review: false
+  - intent: finance_action
+    mode: selector
+    review: true
+  - intent: finance_budget
+    mode: direct
+    review: false

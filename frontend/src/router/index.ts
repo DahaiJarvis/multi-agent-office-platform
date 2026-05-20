@@ -28,6 +28,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'plugins', name: 'Plugins', component: () => import('../views/plugin/PluginView.vue') },
       { path: 'agent-builder', name: 'AgentBuilder', component: () => import('../views/agent-builder/AgentBuilderView.vue') },
       { path: 'prompt-templates', name: 'PromptTemplates', component: () => import('../views/prompt-template/PromptTemplateView.vue') },
+      { path: 'routing', name: 'RoutingConfig', component: () => import('../views/routing/RoutingConfigView.vue') },
     ],
   },
 ]

@@ -294,8 +294,8 @@ async def classify_intent(user_message: str) -> IntentResult:
 
     步骤 4：路由解析
       - 调用 _resolve_routing() 根据意图查找路由信息
-      - 优先从 Capability Card Registry 动态查找
-      - 降级到硬编码的 INTENT_ROUTING_TABLE
+      - 从 Capability Card Registry 动态查找（YAML 配置外置化）
+      - 未匹配时降级到通用 OfficeAssistant
 
     步骤 5：缓存结果
       - 写入 L1 精确缓存（TTL 5 分钟）
@@ -504,15 +504,12 @@ def _resolve_routing(intent: str) -> dict[str, Any]:
 
     路由解析策略：
     -------------------------------------------------------------------------
-    策略 1：从 Capability Card Registry 动态查找
+    从 Capability Card Registry 动态查找（唯一来源）
       - Capability Card 是 Agent 能力的元数据注册表
-      - 支持动态注册和发现 Agent
+      - 支持从 YAML 文件动态加载，实现配置外置化
       - 根据意图匹配最合适的 Agent
-
-    策略 2：降级到硬编码路由表
-      - INTENT_ROUTING_TABLE 是静态路由表
-      - 作为兜底方案，确保路由始终可用
-    -------------------------------------------------------------------------
+      - 优先使用 intent_configs 中的精确配置
+      - 未配置时根据意图名称和安全约束推断
 
     路由信息包含：
       - agent: 目标 Agent 名称
@@ -525,38 +522,13 @@ def _resolve_routing(intent: str) -> dict[str, Any]:
     Returns:
         路由信息字典 {"agent": ..., "mode": ..., "review": ...}
     """
-    try:
-        from agent.core.capability_card import get_capability_registry
-        registry = get_capability_registry()
-        matched_cards = registry.find_by_intent(intent)
+    from agent.core.capability_card import get_capability_registry
+    registry = get_capability_registry()
+    routing = registry.get_routing_for_intent(intent)
 
-        if matched_cards:
-            best_card = matched_cards[0]
-            # 查询类意图不需要审核，即使 Agent 有安全约束
-            is_query_intent = intent.endswith("_query") or intent in (
-                "knowledge_search", "knowledge_qa", "document_query",
-                "email_classify", "email_summary",
-            )
-            # 根据安全约束判断是否需要审核（查询类意图除外）
-            review_required = (not is_query_intent) and (
-                bool(best_card.security_constraints) or intent in {
-                    "approval_action", "email_send", "hr_action",
-                    "finance_action", "kb_manage", "report_generate",
-                    "cross_system", "complex_task",
-                }
-            )
-            # 根据意图类型推断协作模式
-            mode = "selector" if review_required else "direct"
-            if intent in ("cross_system", "complex_task"):
-                mode = "swarm"
+    if routing:
+        return routing
 
-            return {
-                "agent": best_card.agent_name,
-                "mode": mode,
-                "review": review_required,
-            }
-    except Exception:
-        pass
-
-    # 降级到硬编码路由表
-    return INTENT_ROUTING_TABLE.get(intent, INTENT_ROUTING_TABLE["general"])
+    # 未找到匹配的 Agent，返回通用降级配置
+    logger.warning("意图 %s 未匹配到任何 Agent，使用通用降级配置", intent)
+    return {"agent": "OfficeAssistant", "mode": "direct", "review": False}

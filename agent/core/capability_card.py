@@ -3,11 +3,15 @@
 每个 Agent 注册时声明自己的能力卡片，包含：
   - 基本信息：名称、描述、版本
   - 能力声明：支持的意图、输入输出格式
+  - 意图级配置：每个意图的协作模式和审核规则
   - 依赖声明：所需的 MCP 服务和工具
   - 性能指标：平均响应时间、成功率
   - 限制说明：不支持的场景、安全约束
 
 Supervisor 根据能力卡片进行智能路由，而非硬编码的意图映射。
+
+支持从 YAML 文件加载能力卡片，实现配置外置化。
+YAML 文件位于 config/capabilities/ 目录下，每个 Agent 一个文件。
 
 使用方式：
     from agent.core.capability_card import CapabilityCard, get_capability_registry
@@ -17,6 +21,10 @@ Supervisor 根据能力卡片进行智能路由，而非硬编码的意图映射
         agent_name="EmailAgent",
         description="企业邮件处理专家",
         supported_intents=["email_query", "email_send", "email_classify"],
+        intent_configs=[
+            IntentConfig(intent="email_query", mode="direct", review=False),
+            IntentConfig(intent="email_send", mode="selector", review=True),
+        ],
         required_services=["email"],
     )
     registry = get_capability_registry()
@@ -24,14 +32,30 @@ Supervisor 根据能力卡片进行智能路由，而非硬编码的意图映射
 
     # 查询匹配的 Agent
     agents = registry.find_by_intent("email_send")
+
+    # 查询意图的路由配置
+    routing = registry.get_routing_for_intent("email_send")
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+CAPABILITIES_DIR = Path(__file__).parent.parent.parent / "config" / "capabilities"
+
+
+class IntentConfig(BaseModel):
+    """意图级路由配置"""
+
+    intent: str = Field(..., description="意图标签名称")
+    mode: str = Field(default="direct", description="协作模式: direct/selector/swarm")
+    review: bool = Field(default=False, description="是否需要审核")
 
 
 class CapabilityCard(BaseModel):
@@ -44,6 +68,8 @@ class CapabilityCard(BaseModel):
 
     supported_intents: list[str] = Field(default_factory=list, description="支持的意图列表")
     supported_actions: list[str] = Field(default_factory=list, description="支持的操作列表")
+
+    intent_configs: list[IntentConfig] = Field(default_factory=list, description="意图级路由配置")
 
     required_services: list[str] = Field(default_factory=list, description="依赖的 MCP 服务")
     required_tools: list[str] = Field(default_factory=list, description="依赖的工具列表")
@@ -66,10 +92,12 @@ class CapabilityRegistry:
     """能力注册中心
 
     管理所有 Agent 的能力卡片，支持按意图、服务、分类查询。
+    支持从 YAML 文件加载能力卡片，优先使用 YAML 配置，降级到代码内嵌默认值。
     """
 
     def __init__(self) -> None:
         self._cards: dict[str, CapabilityCard] = {}
+        self._loaded: bool = False
 
     def register(self, card: CapabilityCard) -> None:
         """注册能力卡片"""
@@ -165,17 +193,217 @@ class CapabilityRegistry:
 
         return issues
 
+    def get_routing_for_intent(self, intent: str) -> dict[str, Any] | None:
+        """根据意图获取路由配置
+
+        优先从 CapabilityCard 的 intent_configs 中查找精确配置，
+        如果未配置则根据意图名称推断（_query 后缀用 direct，其他用 selector）。
+
+        Args:
+            intent: 意图标签
+
+        Returns:
+            路由配置字典 {"agent": ..., "mode": ..., "review": ...}，未找到返回 None
+        """
+        self._ensure_loaded()
+
+        matched = self.find_by_intent(intent)
+        if not matched:
+            return None
+
+        best_card = matched[0]
+
+        # 优先从 intent_configs 查找精确配置
+        for cfg in best_card.intent_configs:
+            if cfg.intent == intent:
+                return {
+                    "agent": best_card.agent_name,
+                    "mode": cfg.mode,
+                    "review": cfg.review,
+                }
+
+        # 降级：根据意图名称推断
+        is_query_intent = intent.endswith("_query") or intent in (
+            "knowledge_search", "knowledge_qa", "document_query",
+            "email_classify", "email_summary",
+        )
+        review_required = (not is_query_intent) and (
+            bool(best_card.security_constraints) or intent in {
+                "approval_action", "email_send", "hr_action",
+                "finance_action", "kb_manage", "report_generate",
+                "cross_system", "complex_task",
+            }
+        )
+        mode = "selector" if review_required else "direct"
+        if intent in ("cross_system", "complex_task"):
+            mode = "swarm"
+
+        return {
+            "agent": best_card.agent_name,
+            "mode": mode,
+            "review": review_required,
+        }
+
+    def _ensure_loaded(self) -> None:
+        """确保能力卡片已加载"""
+        if self._loaded:
+            return
+        self._load_from_files()
+        if not self._cards:
+            _register_default_cards(self)
+        self._loaded = True
+        self._validate_cards()
+
+    def _validate_cards(self) -> None:
+        """校验能力卡片配置的完整性和一致性
+
+        校验项：
+          1. intent_configs 中的意图必须在 supported_intents 中声明
+          2. intent_configs 中的 mode 值必须是合法的协作模式
+          3. 意图标签列表中的每个意图至少有一个 Agent 支持
+          4. 同一意图不应被多个已启用 Agent 以相同优先级声明
+        """
+        if not self._cards:
+            logger.warning("Schema校验: 未加载到任何能力卡片，路由功能将不可用")
+            return
+
+        valid_modes = {"direct", "selector", "swarm"}
+        error_count = 0
+        covered_intents: set[str] = set()
+
+        # 校验1 & 2：逐卡片校验 intent_configs
+        for card in self._cards.values():
+            config_intents = {cfg.intent for cfg in card.intent_configs}
+            declared_intents = set(card.supported_intents)
+
+            # intent_configs 中的意图必须在 supported_intents 中
+            undeclared = config_intents - declared_intents
+            if undeclared:
+                logger.error(
+                    "Schema校验[ERROR]: %s 的 intent_configs 包含未在 supported_intents 中声明的意图: %s",
+                    card.agent_name, undeclared,
+                )
+                error_count += 1
+
+            # mode 值必须合法
+            for cfg in card.intent_configs:
+                if cfg.mode not in valid_modes:
+                    logger.error(
+                        "Schema校验[ERROR]: %s 的 intent_configs 中意图 %s 的 mode 值非法: '%s'，合法值: %s",
+                        card.agent_name, cfg.intent, cfg.mode, valid_modes,
+                    )
+                    error_count += 1
+
+        # 校验3：每个意图标签至少有一个 Agent 支持
+        from agent.core.prompt_registry import get_prompt_registry
+        try:
+            prompt_registry = get_prompt_registry()
+            intent_names = {i.name for i in prompt_registry.get_intents()}
+            for card in self._cards.values():
+                if card.enabled:
+                    covered_intents.update(card.supported_intents)
+
+            uncovered = intent_names - covered_intents
+            if uncovered:
+                logger.error(
+                    "Schema校验[ERROR]: 以下意图标签没有任何 Agent 支持: %s",
+                    uncovered,
+                )
+                error_count += 1
+        except Exception:
+            logger.warning("Schema校验: 无法获取意图标签列表，跳过意图覆盖校验")
+
+        # 校验4：同一意图不应被多个已启用 Agent 以相同优先级声明
+        intent_agents: dict[str, list[tuple[str, int]]] = {}
+        for card in self._cards.values():
+            if not card.enabled:
+                continue
+            for intent in card.supported_intents:
+                if intent not in intent_agents:
+                    intent_agents[intent] = []
+                intent_agents[intent].append((card.agent_name, card.priority))
+
+        for intent, agents in intent_agents.items():
+            if len(agents) <= 1:
+                continue
+            priorities = [p for _, p in agents]
+            if len(priorities) != len(set(priorities)):
+                agent_names = [a for a, _ in agents]
+                logger.warning(
+                    "Schema校验[WARN]: 意图 %s 被多个 Agent 以相同优先级声明: %s，路由结果可能不确定",
+                    intent, agent_names,
+                )
+
+        if error_count == 0:
+            logger.info(
+                "Schema校验: 能力卡片校验通过, 共 %d 个 Agent, 覆盖 %d 个意图",
+                len(self._cards), len(covered_intents),
+            )
+        else:
+            logger.error("Schema校验: 能力卡片校验发现 %d 个错误", error_count)
+
+    def _load_from_files(self) -> None:
+        """从 YAML 文件加载能力卡片"""
+        if not CAPABILITIES_DIR.exists():
+            logger.info("能力卡片配置目录不存在: %s，使用代码内嵌默认值", CAPABILITIES_DIR)
+            return
+
+        yaml_files = list(CAPABILITIES_DIR.glob("*.yaml")) + list(CAPABILITIES_DIR.glob("*.yml"))
+        if not yaml_files:
+            logger.info("能力卡片配置目录为空: %s，使用代码内嵌默认值", CAPABILITIES_DIR)
+            return
+
+        for yaml_file in yaml_files:
+            try:
+                with open(yaml_file, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+                if not data or not isinstance(data, dict):
+                    continue
+
+                intent_configs = []
+                for cfg_data in data.get("intent_configs", []):
+                    intent_configs.append(IntentConfig(
+                        intent=cfg_data.get("intent", ""),
+                        mode=cfg_data.get("mode", "direct"),
+                        review=cfg_data.get("review", False),
+                    ))
+
+                card = CapabilityCard(
+                    agent_name=data.get("agent_name", yaml_file.stem),
+                    description=data.get("description", ""),
+                    version=data.get("version", "1.0.0"),
+                    category=data.get("category", "domain"),
+                    supported_intents=data.get("supported_intents", []),
+                    supported_actions=data.get("supported_actions", []),
+                    intent_configs=intent_configs,
+                    required_services=data.get("required_services", []),
+                    required_tools=data.get("required_tools", []),
+                    security_constraints=data.get("security_constraints", []),
+                    limitations=data.get("limitations", []),
+                    priority=data.get("priority", 0),
+                    enabled=data.get("enabled", True),
+                )
+                self._cards[card.agent_name] = card
+                logger.info("从YAML加载能力卡片: %s (intents=%s)", card.agent_name, card.supported_intents)
+
+            except Exception as e:
+                logger.error("加载能力卡片文件 %s 失败: %s", yaml_file.name, e)
+
 
 # 全局能力注册中心实例
 _registry: CapabilityRegistry | None = None
 
 
 def get_capability_registry() -> CapabilityRegistry:
-    """获取全局能力注册中心实例"""
+    """获取全局能力注册中心实例
+
+    优先从 config/capabilities/ 目录加载 YAML 配置，
+    如果目录不存在或为空，则降级到代码内嵌默认值。
+    """
     global _registry
     if _registry is None:
         _registry = CapabilityRegistry()
-        _register_default_cards(_registry)
+        _registry._ensure_loaded()
     return _registry
 
 

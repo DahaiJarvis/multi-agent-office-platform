@@ -1,0 +1,37 @@
+agent_name: ApprovalAgent
+description: "企业审批处理专家"
+version: "1.0.0"
+category: domain
+
+supported_intents:
+  - approval_query
+  - approval_action
+  - approval_track
+
+supported_actions:
+  - query_list
+  - approve
+  - reject
+  - transfer
+
+required_services:
+  - oa
+  - approval
+
+security_constraints:
+  - "仅处理本人权限范围内的审批"
+  - "超过5000元需特别确认"
+
+priority: 10
+enabled: true
+
+intent_configs:
+  - intent: approval_query
+    mode: direct
+    review: false
+  - intent: approval_action
+    mode: selector
+    review: true
+  - intent: approval_track
+    mode: direct
+    review: false
