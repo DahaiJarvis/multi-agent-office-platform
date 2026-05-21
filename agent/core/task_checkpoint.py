@@ -43,6 +43,9 @@ class StepType(str, Enum):
     AGGREGATE = "aggregate"
     HUMAN_CONFIRM = "human_confirm"
     TOOL_CALL = "tool_call"
+    PARALLEL_EXEC = "parallel_exec"
+    DEBATE_ROUND = "debate_round"
+    VOTE_EXEC = "vote_exec"
 
 
 class StepStatus(str, Enum):
@@ -152,6 +155,7 @@ class TaskExecution(BaseModel):
     status: TaskStatus = TaskStatus.PENDING
     error: str = ""
     result: dict[str, Any] | None = None
+    supplementary_messages: list[str] = Field(default_factory=list)
     heartbeat_at: float = Field(default_factory=time.time)
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)

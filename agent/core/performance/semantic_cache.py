@@ -70,9 +70,8 @@ class SemanticCache:
     async def get(self, query: str, agent_name: str = "") -> Any | None:
         """从语义缓存获取结果
 
-        1. 先尝试精确匹配（O(1)）
-        2. 再尝试语义匹配（O(n) 向量搜索）
-        3. 检查 TTL 是否过期
+        仅执行语义匹配（O(n) 向量搜索），精确匹配由 L1 缓存负责。
+        检查 TTL 是否过期。
 
         Args:
             query: 用户查询文本
@@ -81,16 +80,6 @@ class SemanticCache:
         Returns:
             缓存的响应，未命中返回 None
         """
-        # 精确匹配
-        query_hash = self._hash_query(query)
-        entry = self._entries.get(query_hash)
-        if entry and not self._is_expired(entry):
-            if not agent_name or entry.agent_name == agent_name:
-                entry.access_count += 1
-                logger.debug("语义缓存精确命中: %s", query[:30])
-                return entry.response
-
-        # 语义匹配
         if self._config.enable_embedding and self._embeddings:
             try:
                 query_embedding = await self._get_embedding(query)

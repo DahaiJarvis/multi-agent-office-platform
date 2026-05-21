@@ -87,6 +87,7 @@ class TaskResumeRequest(BaseModel):
     execution_id: str = Field(..., description="执行记录ID")
     session_id: str = Field(..., description="会话ID")
     user_id: str = Field(..., description="用户ID")
+    supplementary_message: str | None = Field(default=None, description="补充需求，恢复时追加到原始请求上下文中")
 
 
 class TaskStepRetryRequest(BaseModel):
@@ -114,3 +115,4 @@ class TaskCancelRequest(BaseModel):
 
     execution_id: str = Field(..., description="执行记录ID")
     user_id: str = Field(..., description="用户ID")
+    force: bool = Field(default=False, description="True=放弃任务(CANCELLED)，False=暂停任务(INTERRUPTED)")

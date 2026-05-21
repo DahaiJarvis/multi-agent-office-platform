@@ -122,7 +122,7 @@
         </div>
 
         <!-- 任务进度面板 - 跟在消息后面 -->
-        <div v-if="chatStore.executionId && chatStore.taskSteps.length > 0" class="message-row assistant">
+        <div v-if="showTaskProgress" class="message-row assistant">
           <div class="msg-avatar assistant">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
               <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM5.5 7a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2zm-5.13 2.84a.5.5 0 01.76-.66A3.5 3.5 0 008 10.5a3.5 3.5 0 002.87-1.32.5.5 0 01.76.66A4.5 4.5 0 018 11.5a4.5 4.5 0 01-3.63-1.66z" />
@@ -132,14 +132,32 @@
             <div class="msg-bubble assistant task-progress-panel">
               <div class="task-progress-header">
                 <span class="task-progress-title">任务执行进度</span>
-                <span class="task-progress-summary">{{ completedStepCount }}/{{ chatStore.totalSteps || chatStore.taskSteps.length }} 已完成</span>
-                <span class="task-status-badge" :class="chatStore.taskStatus">
-                  {{ taskStatusLabel }}
+                <span class="task-status-badge" :class="chatStore.taskStatus || 'running'">
+                  {{ activityStatusLabel }}
                 </span>
               </div>
-              <div class="task-steps-list">
+
+              <!-- 实时活动流 -->
+              <div v-if="sortedActivities.length > 0" class="activity-stream">
                 <div
-                  v-for="(step, idx) in chatStore.taskSteps"
+                  v-for="act in sortedActivities"
+                  :key="act.id"
+                  class="activity-item"
+                  :class="getActivityClass(act)"
+                >
+                  <span class="activity-icon">{{ getActivityIcon(act) }}</span>
+                  <span class="activity-content">
+                    <span v-if="act.agentName && act.type !== 'intent'" class="activity-agent">{{ act.agentName }}</span>
+                    <span class="activity-text">{{ act.content }}</span>
+                    <span v-if="act.detail" class="activity-detail">{{ act.detail }}</span>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 任务步骤列表（来自任务引擎，补充活动流未覆盖的信息） -->
+              <div v-if="sortedTaskSteps.length > 0" class="task-steps-list">
+                <div
+                  v-for="(step, idx) in sortedTaskSteps"
                   :key="idx"
                   class="task-step-item"
                   :class="getStepDisplayClass(step)"
@@ -148,10 +166,38 @@
                     {{ getStepStatusTag(step) }}
                   </span>
                   <span class="step-name-text">{{ step.step_name }}</span>
-                  <span v-if="step.agent_name && step.step_type === 'agent_call'" class="step-agent-tag">{{ step.agent_name }}</span>
+                  <span v-if="step.agent_name" class="step-agent-tag">{{ step.agent_name }}</span>
                   <div v-if="step.error" class="step-error-inline">{{ step.error }}</div>
+                  <!-- 暂停步骤的内联提示 -->
+                  <div v-if="isStepInterrupted(step)" class="step-interrupted-hint">
+                    任务已暂停 - 可补充需求后继续
+                  </div>
                 </div>
               </div>
+
+              <!-- 空状态 -->
+              <div v-if="sortedActivities.length === 0 && sortedTaskSteps.length === 0" class="task-empty-state">
+                <span class="empty-spinner"></span>
+                <span>正在处理中...</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 任务最终结果 - 显示在任务看板下方 -->
+        <div v-if="taskFinalResult" class="message-row assistant">
+          <div class="msg-avatar assistant">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM5.5 7a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2zm-5.13 2.84a.5.5 0 01.76-.66A3.5 3.5 0 008 10.5a3.5 3.5 0 002.87-1.32.5.5 0 01.76.66A4.5 4.5 0 018 11.5a4.5 4.5 0 01-3.63-1.66z" />
+            </svg>
+          </div>
+          <div class="msg-content">
+            <div class="msg-bubble assistant task-result-bubble">
+              <div class="task-result-header">
+                <span class="task-result-title">执行结果</span>
+                <span v-if="taskFinalResult.agentName" class="task-result-agent">{{ taskFinalResult.agentName }}</span>
+              </div>
+              <div class="task-result-content" v-html="renderMarkdown(taskFinalResult.content)" />
             </div>
           </div>
         </div>
@@ -194,6 +240,19 @@
       </div>
 
       <div class="chat-input-area">
+        <!-- 任务暂停操作栏 -->
+        <div v-if="isTaskInterrupted" class="task-action-bar">
+          <span class="task-action-hint">任务已暂停 - 可补充需求后继续，或放弃任务</span>
+          <div class="task-action-buttons">
+            <button class="btn-task-action btn-resume" @click="handleResumeTask">
+              继续执行
+            </button>
+            <button class="btn-task-action btn-abandon" @click="handleAbandonTask">
+              放弃任务
+            </button>
+          </div>
+        </div>
+
         <div class="input-toolbar">
           <KbSelector @select="handleKbSelect" />
           <FileUploader @upload="handleFileUpload" />
@@ -203,15 +262,36 @@
             ref="inputRef"
             v-model="inputText"
             class="chat-textarea"
-            placeholder="输入消息，按 Enter 发送..."
+            :placeholder="isTaskInterrupted ? '输入补充需求（可选），按 Enter 继续...' : '输入消息，按 Enter 发送...'"
             rows="1"
-            :disabled="chatStore.isStreaming"
-            @keydown.enter.exact.prevent="handleSend"
+            :disabled="chatStore.isStreaming && !isTaskInterrupted"
+            @keydown.enter.exact.prevent="handleInputEnter"
             @input="autoResize"
           />
+          <!-- 执行中：停止按钮 -->
           <button
+            v-if="chatStore.isStreaming && !isTaskInterrupted"
+            class="btn-stop"
+            @click="handleStopTask"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <rect x="3" y="3" width="10" height="10" rx="1" />
+            </svg>
+          </button>
+          <!-- 暂停状态：继续按钮 -->
+          <button
+            v-else-if="isTaskInterrupted"
+            class="btn-resume-send"
+            :disabled="false"
+            @click="handleResumeTask"
+          >
+            继续
+          </button>
+          <!-- 正常状态：发送按钮 -->
+          <button
+            v-else
             class="btn-send"
-            :disabled="!inputText.trim() || chatStore.isStreaming"
+            :disabled="!inputText.trim()"
             @click="handleSend"
           >
             <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor">
@@ -235,7 +315,7 @@ import { ElMessage } from 'element-plus'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { useAuthStore } from '../../stores/auth'
-import { useChatStore, type Message } from '../../stores/chat'
+import { useChatStore, type Message, type TaskActivity } from '../../stores/chat'
 import { agentApi, type ConfirmOption, type TaskStepStatus } from '../../api/agent'
 import { sessionApi, type SessionInfo } from '../../api/session'
 import { knowledgeApi, type ParseResultItem } from '../../api/knowledge'
@@ -253,6 +333,8 @@ const sessionList = ref<SessionInfo[]>([])
 const historyLoading = ref(false)
 const confirmLoading = ref(false)
 const sseDisconnected = ref(false)
+const runningStepInfo = ref<{ step_index: number; step_name: string; agent_name: string; total_steps: number } | null>(null)
+const taskFinalResult = ref<{ content: string; agentName: string } | null>(null)
 let sseEventSource: EventSource | null = null
 let sseReconnectTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -263,27 +345,97 @@ const defaultConfirmOptions: ConfirmOption[] = [
   { label: '取消任务', value: 'cancel', description: '终止整个任务执行' },
 ]
 
-const taskStatusLabel = computed(() => {
-  const statusMap: Record<string, string> = {
-    running: '执行中',
-    completed: '已完成',
-    paused: '已暂停',
-    interrupted: '已中断',
-    failed: '执行失败',
-    cancelled: '已取消',
-  }
-  return statusMap[chatStore.taskStatus] || chatStore.taskStatus
+const showTaskProgress = computed(() => {
+  return chatStore.isStreaming || chatStore.taskActivities.length > 0 || (chatStore.executionId && chatStore.taskSteps.length > 0) || runningStepInfo.value !== null
 })
 
-const completedStepCount = computed(() => {
-  return chatStore.taskSteps.filter(
-    (s) => s.status === 'completed' || s.status === 'skipped',
-  ).length
+const isTaskInterrupted = computed(() => {
+  return chatStore.taskStatus === 'interrupted'
 })
+
+const sortedActivities = computed(() => {
+  return chatStore.taskActivities.filter(
+    (a) => a.type !== 'step_start' && a.type !== 'step_done',
+  )
+})
+
+const sortedTaskSteps = computed(() => {
+  const steps = [...chatStore.taskSteps]
+  if (runningStepInfo.value) {
+    const runningIdx = runningStepInfo.value.step_index
+    const alreadyExists = steps.some((s) => s.step_index === runningIdx)
+    if (!alreadyExists) {
+      steps.push({
+        step_index: runningIdx,
+        step_name: runningStepInfo.value.step_name,
+        step_type: 'agent_call',
+        agent_name: runningStepInfo.value.agent_name,
+        status: 'running',
+        error: '',
+        fallback_used: '',
+      })
+    }
+  }
+  const statusOrder: Record<string, number> = {
+    completed: 0,
+    skipped: 0,
+    failed: 0,
+    degraded: 0,
+    waiting_confirm: 1,
+    running: 2,
+    pending: 3,
+  }
+  return steps.sort((a, b) => {
+    const orderA = statusOrder[a.status] ?? 1
+    const orderB = statusOrder[b.status] ?? 1
+    if (orderA !== orderB) return orderA - orderB
+    return a.step_index - b.step_index
+  })
+})
+
+const activityStatusLabel = computed(() => {
+  if (chatStore.taskStatus === 'completed') return '已完成'
+  if (chatStore.taskStatus === 'failed') return '执行失败'
+  if (chatStore.taskStatus === 'paused') return '已暂停'
+  if (chatStore.taskStatus === 'interrupted') return '已中断'
+  if (chatStore.isStreaming || chatStore.taskActivities.length > 0) return '执行中'
+  return chatStore.taskStatus || '执行中'
+})
+
+function getActivityIcon(act: TaskActivity): string {
+  if (act.type === 'step_start') {
+    if (act.status === 'completed') return '\u2705'
+    if (act.status === 'failed') return '\u274C'
+    if (act.status === 'waiting_confirm') return '\u23F8'
+    return '\u25B6'
+  }
+  const iconMap: Record<string, string> = {
+    intent: '\u{1F3AF}',
+    thought: '\u{1F4AD}',
+    tool_call: '\u{1F527}',
+    tool_result: '\u{1F4CB}',
+    step_done: '\u2705',
+    handoff: '\u{1F504}',
+    result: '\u{1F4DD}',
+  }
+  return iconMap[act.type] || '\u{1F4E1}'
+}
+
+function getActivityClass(act: TaskActivity): string {
+  if (act.status === 'running') return 'activity-running'
+  if (act.status === 'failed') return 'activity-failed'
+  if (act.status === 'waiting_confirm') return 'activity-waiting'
+  return 'activity-completed'
+}
+
+function isStepInterrupted(step: TaskStepStatus): boolean {
+  return isTaskInterrupted.value && (step.status === 'running' || step.status === 'pending')
+}
 
 function getStepDisplayClass(step: TaskStepStatus): string {
   if (step.status === 'completed') return 'completed'
   if (step.status === 'skipped') return 'skipped'
+  if (isStepInterrupted(step)) return 'interrupted'
   if (step.status === 'running') return 'running'
   if (step.status === 'waiting_confirm') return 'waiting_confirm'
   if (step.status === 'failed') return 'failed'
@@ -294,6 +446,7 @@ function getStepDisplayClass(step: TaskStepStatus): string {
 function getStepStatusTag(step: TaskStepStatus): string {
   if (step.status === 'completed') return '已完成'
   if (step.status === 'skipped') return '已跳过'
+  if (isStepInterrupted(step)) return '已暂停'
   if (step.status === 'running') return '进行中'
   if (step.status === 'waiting_confirm') return '待确认'
   if (step.status === 'failed') return '已失败'
@@ -358,6 +511,7 @@ function scrollToBottom() {
 
 watch(() => chatStore.messages.length, scrollToBottom)
 watch(() => chatStore.messages[chatStore.messages.length - 1]?.content, scrollToBottom)
+watch(() => chatStore.taskActivities.length, scrollToBottom)
 // 确认卡片和任务进度面板出现时也自动滚动到底部
 watch(() => chatStore.waitingConfirm, scrollToBottom)
 watch(() => chatStore.taskSteps.length, scrollToBottom)
@@ -378,6 +532,10 @@ async function handleSend() {
 
   chatStore.addUserMessage(text)
   chatStore.isStreaming = true
+  taskFinalResult.value = null
+  chatStore.clearTaskActivities()
+  chatStore.setTaskStatus('running')
+  chatStore.executionId = ''
 
   const streamingId = chatStore.addStreamingMessage()
   scrollToBottom()
@@ -404,6 +562,12 @@ async function handleSend() {
           agentName = intentData.agent || ''
           intent = intentData.intent || ''
           mode = intentData.mode || ''
+          chatStore.addTaskActivity({
+            type: 'intent',
+            agentName: agentName,
+            content: `${intentData.intent || '分析中'} (置信度: ${(intentData.confidence * 100).toFixed(0)}%)`,
+            status: 'completed',
+          })
         } catch {
           console.warn('意图数据解析失败', data.data)
         }
@@ -422,6 +586,12 @@ async function handleSend() {
           if (toolData.tools && toolData.tools.length > 0) {
             const toolNames = toolData.tools.join(', ')
             chatStore.appendToStreamingMessage(streamingId, `\n> 正在调用工具: ${toolNames}...\n`)
+            chatStore.addTaskActivity({
+              type: 'tool_call',
+              agentName: toolData.agent_name || agentName,
+              content: `调用工具: ${toolNames}`,
+              status: 'running',
+            })
             scrollToBottom()
           }
         } catch { /* ignore */ }
@@ -432,6 +602,13 @@ async function handleSend() {
           if (resultData.is_error) {
             chatStore.appendToStreamingMessage(streamingId, `\n> 工具执行失败\n`)
           }
+          chatStore.addTaskActivity({
+            type: 'tool_result',
+            agentName: resultData.agent_name || agentName,
+            content: resultData.is_error ? '工具执行失败' : `${resultData.tool_name || '工具'} 执行完成`,
+            status: resultData.is_error ? 'failed' : 'completed',
+            detail: resultData.is_error ? undefined : (resultData.content ? resultData.content.substring(0, 150) : undefined),
+          })
         } catch { /* ignore */ }
       } else if (data.event === 'handoff') {
         // Agent切换事件
@@ -440,7 +617,26 @@ async function handleSend() {
           if (handoffData.to_agent) {
             agentName = handoffData.to_agent
             chatStore.appendToStreamingMessage(streamingId, `\n> 切换到 ${handoffData.to_agent}\n`)
+            chatStore.addTaskActivity({
+              type: 'handoff',
+              agentName: handoffData.to_agent,
+              content: `从 ${handoffData.from_agent || '系统'} 切换到 ${handoffData.to_agent}`,
+              status: 'completed',
+            })
             scrollToBottom()
+          }
+        } catch { /* ignore */ }
+      } else if (data.event === 'thought') {
+        // Agent 思考事件
+        try {
+          const thoughtData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
+          if (thoughtData.content) {
+            chatStore.addTaskActivity({
+              type: 'thought',
+              agentName: thoughtData.agent_name || agentName,
+              content: thoughtData.content.substring(0, 100),
+              status: 'completed',
+            })
           }
         } catch { /* ignore */ }
       } else if (data.event === 'bus_event') {
@@ -452,23 +648,27 @@ async function handleSend() {
           }
         } catch { /* ignore */ }
       } else if (data.event === 'step_start') {
-        // 步骤开始：在消息中展示进度
         try {
           const stepData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
           if (stepData.step_name) {
             const agentInfo = stepData.agent_name ? ` (${stepData.agent_name})` : ''
             chatStore.appendToStreamingMessage(streamingId, `\n> **步骤 ${stepData.step_index}/${stepData.total_steps}**: ${stepData.step_name}${agentInfo} - 执行中...\n`)
+            runningStepInfo.value = {
+              step_index: stepData.step_index || 0,
+              step_name: stepData.step_name,
+              agent_name: stepData.agent_name || '',
+              total_steps: stepData.total_steps || 0,
+            }
             scrollToBottom()
           }
         } catch { /* ignore */ }
       } else if (data.event === 'step_done') {
-        // 步骤完成：更新进度状态，展示步骤结果
         try {
           const stepData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
           if (stepData.step_name) {
-            const statusIcon = stepData.status === 'completed' ? '[完成]' : stepData.status === 'failed' ? '[失败]' : stepData.status === 'waiting_confirm' ? '[待确认]' : '[完成]'
+            const isWaitingConfirm = stepData.status === 'waiting_confirm'
+            const statusIcon = stepData.status === 'completed' ? '[完成]' : stepData.status === 'failed' ? '[失败]' : isWaitingConfirm ? '[待确认]' : '[完成]'
             let stepMsg = `\n> **步骤 ${stepData.step_index}/${stepData.total_steps}**: ${stepData.step_name} ${statusIcon}`
-            // 展示步骤的输出结果
             if (stepData.message) {
               stepMsg += `\n> ${stepData.message.substring(0, 200)}${stepData.message.length > 200 ? '...' : ''}`
             }
@@ -476,14 +676,46 @@ async function handleSend() {
               stepMsg += `\n> [错误] ${stepData.error}`
             }
             chatStore.appendToStreamingMessage(streamingId, stepMsg + '\n')
+            runningStepInfo.value = null
+
+            // 关键步骤（裁判裁决、汇总等）完成时，将结果存储到 taskFinalResult，在任务看板下方独立展示
+            if (stepData.message && stepData.status === 'completed') {
+              const isAggregateStep = stepData.step_type === 'aggregate' || stepData.step_name?.includes('裁决') || stepData.step_name?.includes('汇总') || stepData.step_name?.includes('总结')
+              const isLastStep = stepData.step_index === stepData.total_steps
+              if (isAggregateStep || isLastStep) {
+                taskFinalResult.value = {
+                  content: stepData.message,
+                  agentName: stepData.agent_name || agentName,
+                }
+              }
+            }
+
+            if (isWaitingConfirm) {
+              chatStore.setTaskStatus('paused')
+            }
+
             scrollToBottom()
-            // 刷新任务步骤列表
             refreshTaskStatus()
           }
         } catch { /* ignore */ }
       } else if (data.event === 'status' && data.data === 'completed') {
+        if (chatStore.taskStatus !== 'paused') {
+          chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode, executionId: execId })
+          chatStore.setTaskStatus('completed')
+          runningStepInfo.value = null
+          chatStore.addTaskActivity({
+            type: 'handoff',
+            agentName: agentName,
+            content: '任务执行完成',
+            status: 'completed',
+          })
+        }
+      } else if (data.event === 'status' && data.data === 'paused') {
         chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode, executionId: execId })
-        chatStore.setTaskStatus('completed')
+        chatStore.setTaskStatus('paused')
+        if (execId) {
+          refreshTaskStatus()
+        }
       } else if (data.event === 'error') {
         const errMsg = typeof data.data === 'string' ? data.data : (data.data?.message || data.message || '服务异常')
         chatStore.appendToStreamingMessage(streamingId, `\n\n[错误] ${errMsg}`)
@@ -506,10 +738,79 @@ async function handleSend() {
         chatStore.appendToStreamingMessage(streamingId, '任务已执行完成，请查看上方任务进度面板了解详细结果。')
       }
       chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode, executionId: execId })
-      chatStore.isStreaming = false
+      // 有 executionId 说明是多Agent任务，isStreaming 由 SSE 事件（task_completed/task_interrupted）控制
+      if (!execId) {
+        chatStore.isStreaming = false
+      }
+      if (chatStore.taskStatus !== 'completed' && chatStore.taskStatus !== 'failed' && chatStore.taskStatus !== 'paused' && chatStore.taskStatus !== 'interrupted') {
+        if (!execId) {
+          chatStore.setTaskStatus('completed')
+        }
+      }
+      if (chatStore.executionId) {
+        refreshTaskStatus()
+      }
       refreshSessionList()
     },
   )
+}
+
+function handleInputEnter() {
+  if (isTaskInterrupted.value) {
+    handleResumeTask()
+  } else {
+    handleSend()
+  }
+}
+
+async function handleStopTask() {
+  if (!chatStore.executionId) return
+  try {
+    await agentApi.cancelTask(chatStore.executionId, authStore.userId, false)
+    chatStore.isStreaming = false
+    chatStore.setTaskStatus('interrupted')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '暂停任务失败')
+  }
+}
+
+async function handleResumeTask() {
+  if (!chatStore.executionId) return
+  const supplementaryMsg = inputText.value.trim()
+  inputText.value = ''
+  if (inputRef.value) {
+    inputRef.value.style.height = 'auto'
+  }
+
+  try {
+    chatStore.isStreaming = true
+    chatStore.setTaskStatus('running')
+
+    const result = await agentApi.resumeTask(
+      chatStore.executionId,
+      chatStore.sessionId,
+      authStore.userId,
+      supplementaryMsg || undefined,
+    )
+
+    subscribeTaskEvents(chatStore.executionId)
+  } catch (e: any) {
+    chatStore.isStreaming = false
+    chatStore.setTaskStatus('interrupted')
+    ElMessage.error(e?.message || '恢复任务失败')
+  }
+}
+
+async function handleAbandonTask() {
+  if (!chatStore.executionId) return
+  try {
+    await agentApi.cancelTask(chatStore.executionId, authStore.userId, true)
+    chatStore.isStreaming = false
+    chatStore.setTaskStatus('cancelled')
+    chatStore.executionId = ''
+  } catch (e: any) {
+    ElMessage.error(e?.message || '放弃任务失败')
+  }
 }
 
 async function submitFeedback(messageId: string, type: 'thumbs_up' | 'thumbs_down', msg: Message) {
@@ -533,6 +834,7 @@ async function submitFeedback(messageId: string, type: 'thumbs_up' | 'thumbs_dow
 function startNewChat() {
   closeSSE()
   chatStore.clearChat()
+  taskFinalResult.value = null
   inputRef.value?.focus()
 }
 
@@ -555,23 +857,12 @@ async function restoreSessionAndTask(sessionId: string) {
     if (taskStatus && taskStatus.execution_id) {
       chatStore.setExecutionId(taskStatus.execution_id)
       chatStore.updateTaskSteps(taskStatus.steps || [], taskStatus.total_steps)
-      chatStore.setTaskStatus(taskStatus.status || '')
-      if (taskStatus.status === 'paused') {
-        const confirmStep = (taskStatus.steps || []).find(
-          (s: any) => s.status === 'waiting_confirm' && s.confirm_id,
-        )
-        if (confirmStep && confirmStep.confirm_id) {
-          chatStore.setWaitingConfirm(true)
-          chatStore.confirmInfo = {
-            confirmId: confirmStep.confirm_id,
-            confirmType: confirmStep.confirm_type || 'sensitive_action',
-            confirmReason: confirmStep.confirm_reason || '',
-            options: confirmStep.options || [],
-            stepIndex: confirmStep.step_index,
-          }
-        }
+      if (taskStatus.status === 'paused' || taskStatus.steps?.some((s: any) => s.status === 'waiting_confirm')) {
+        chatStore.setTaskStatus('paused')
+      } else {
+        chatStore.setTaskStatus(taskStatus.status || '')
       }
-      if (taskStatus.status === 'running') {
+      if (taskStatus.status === 'running' || taskStatus.status === 'paused') {
         subscribeTaskEvents(taskStatus.execution_id)
       }
     }
@@ -587,6 +878,7 @@ async function loadSession(sessionId: string) {
 
   try {
     chatStore.clearChat()
+    taskFinalResult.value = null
     await restoreSessionAndTask(sessionId)
   } catch {
     ElMessage.error('加载对话历史失败')
@@ -684,43 +976,96 @@ function subscribeTaskEvents(execId: string) {
   es.addEventListener('step_completed', (e: MessageEvent) => {
     try {
       const data = JSON.parse(e.data)
-      refreshTaskStatus()
+      const stepData = data.data || data
+      if (stepData.step_name) {
+        runningStepInfo.value = null
+      }
     } catch { /* ignore */ }
+    refreshTaskStatus()
   })
 
   es.addEventListener('step_failed', (e: MessageEvent) => {
     try {
       const data = JSON.parse(e.data)
-      refreshTaskStatus()
+      const stepData = data.data || data
+      if (stepData.step_name) {
+        runningStepInfo.value = null
+      }
     } catch { /* ignore */ }
+    refreshTaskStatus()
   })
 
-  es.addEventListener('task_completed', (e: MessageEvent) => {
+  es.addEventListener('task_completed', (_e: MessageEvent) => {
     chatStore.setTaskStatus('completed')
+    chatStore.isStreaming = false
     chatStore.setWaitingConfirm(false)
+    runningStepInfo.value = null
+    const lastMsg = chatStore.messages.findLast((m) => m.role === 'assistant' && m.streaming)
+    if (lastMsg) {
+      if (!lastMsg.content.trim()) {
+        chatStore.appendToStreamingMessage(lastMsg.id, '任务已执行完成，请查看上方任务进度面板了解详细结果。')
+      }
+      chatStore.finalizeStreamingMessage(lastMsg.id)
+    } else {
+      const emptyMsg = chatStore.messages.findLast((m) => m.role === 'assistant')
+      if (emptyMsg && !emptyMsg.content.trim()) {
+        chatStore.appendToStreamingMessage(emptyMsg.id, '任务已执行完成，请查看上方任务进度面板了解详细结果。')
+      }
+    }
+    // 任务完成后调接口获取最终结果，作为独立AI回复消息显示，并在活动流末尾添加完成标记
+    fetchAndDisplayTaskResult()
+    refreshTaskStatus()
     closeSSE()
   })
 
-  es.addEventListener('task_paused', (e: MessageEvent) => {
+  es.addEventListener('task_paused', (_e: MessageEvent) => {
     chatStore.setTaskStatus('paused')
+    runningStepInfo.value = null
     refreshTaskStatus()
   })
 
   es.addEventListener('task_resumed', (_e: MessageEvent) => {
     chatStore.setTaskStatus('running')
+    chatStore.isStreaming = true
+    const waitingAct = chatStore.taskActivities.findLast(
+      (a) => a.status === 'waiting_confirm',
+    )
+    if (waitingAct) {
+      waitingAct.status = 'completed'
+    }
     refreshTaskStatus()
   })
 
-  es.addEventListener('task_step_start', (_e: MessageEvent) => {
+  es.addEventListener('task_step_start', (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data)
+      const stepData = data.data || data
+      if (stepData.step_name) {
+        runningStepInfo.value = {
+          step_index: stepData.step_index || 0,
+          step_name: stepData.step_name,
+          agent_name: stepData.agent_name || '',
+          total_steps: stepData.total_steps || 0,
+        }
+      }
+    } catch { /* ignore */ }
     refreshTaskStatus()
   })
 
-  es.addEventListener('task_step_complete', (_e: MessageEvent) => {
+  es.addEventListener('task_step_complete', (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data)
+      const stepData = data.data || data
+      if (stepData.step_name) {
+        runningStepInfo.value = null
+      }
+    } catch { /* ignore */ }
     refreshTaskStatus()
   })
 
-  es.addEventListener('task_interrupted', (e: MessageEvent) => {
+  es.addEventListener('task_interrupted', (_e: MessageEvent) => {
     chatStore.setTaskStatus('interrupted')
+    chatStore.isStreaming = false
     sseDisconnected.value = true
   })
 
@@ -764,7 +1109,72 @@ async function refreshTaskStatus() {
     const status = await agentApi.getTaskStatus(chatStore.executionId)
     if (status) {
       chatStore.updateTaskSteps(status.steps || [], status.total_steps)
-      chatStore.setTaskStatus(status.status || '')
+      // 检查是否有未处理的待确认步骤
+      const hasUnhandledConfirm = status.steps?.some(
+        (s: any) => s.status === 'waiting_confirm' && s.confirm_id && !chatStore.resolvedConfirmIds.has(s.confirm_id),
+      )
+      if (status.status === 'paused' && hasUnhandledConfirm) {
+        chatStore.setTaskStatus('paused')
+      } else if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
+        chatStore.setTaskStatus(status.status)
+      } else if (status.status === 'interrupted') {
+        chatStore.setTaskStatus('interrupted')
+        chatStore.isStreaming = false
+      } else {
+        // running 或其他状态，保持当前状态
+        if (chatStore.taskStatus !== 'running') {
+          chatStore.setTaskStatus('running')
+        }
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+async function fetchAndDisplayTaskResult() {
+  if (!chatStore.executionId) return
+  try {
+    const status = await agentApi.getTaskStatus(chatStore.executionId)
+    if (!status || !status.steps) return
+
+    // 从步骤中查找最终结果（裁判裁决、汇总等关键步骤的输出）
+    const resultSteps = status.steps.filter(
+      (s: any) => s.result && s.status === 'completed',
+    )
+
+    let finalResult = ''
+    let resultAgentName = ''
+
+    for (const step of resultSteps) {
+      const stepResult = (step as any).result as string
+      if (!stepResult) continue
+      const isAggregateStep = step.step_type === 'aggregate' || step.step_name?.includes('裁决') || step.step_name?.includes('汇总') || step.step_name?.includes('总结')
+      const isLastStep = step.step_index === status.total_steps
+      if (isAggregateStep || isLastStep) {
+        finalResult = stepResult
+        resultAgentName = step.agent_name || ''
+        break
+      }
+    }
+
+    // 将最终结果存储到 taskFinalResult，在任务看板下方独立展示
+    if (finalResult) {
+      taskFinalResult.value = {
+        content: finalResult,
+        agentName: resultAgentName,
+      }
+    }
+
+    // 在活动流末尾添加"任务执行完成"标记，确保它在最后显示
+    const hasCompletedActivity = chatStore.taskActivities.some(
+      (a) => a.type === 'handoff' && a.content === '任务执行完成',
+    )
+    if (!hasCompletedActivity) {
+      chatStore.addTaskActivity({
+        type: 'handoff',
+        agentName: '',
+        content: '任务执行完成',
+        status: 'completed',
+      })
     }
   } catch { /* ignore */ }
 }
@@ -790,6 +1200,32 @@ async function handleConfirm(decision: string) {
     chatStore.resolvedConfirmIds.add(confirmedId)
     // 先关闭确认弹窗
     chatStore.setWaitingConfirm(false)
+
+    // 确认后立即更新前端状态，不等待 SSE 事件
+    if (decision === 'continue' || decision === 'skip') {
+      chatStore.setTaskStatus('running')
+      runningStepInfo.value = null
+      const waitingAct = chatStore.taskActivities.findLast(
+        (a) => a.status === 'waiting_confirm',
+      )
+      if (waitingAct) {
+        waitingAct.status = 'completed'
+      }
+      // 向最后一条消息追加确认信息
+      const lastMsg = chatStore.messages.findLast((m) => m.role === 'assistant')
+      if (lastMsg) {
+        const confirmText = decision === 'continue' ? '\n> [已确认] 继续执行...\n' : '\n> [已跳过] 跳过此步骤...\n'
+        chatStore.appendToStreamingMessage(lastMsg.id, confirmText)
+        scrollToBottom()
+      }
+    } else if (decision === 'cancel') {
+      chatStore.setTaskStatus('cancelled')
+      const lastMsg = chatStore.messages.findLast((m) => m.role === 'assistant')
+      if (lastMsg) {
+        chatStore.appendToStreamingMessage(lastMsg.id, '\n> [已取消] 任务已取消\n')
+      }
+    }
+
     ElMessage.success('确认已提交')
 
     // 确认后立即订阅 SSE，后端已改为后台异步执行，事件会通过 SSE 推送
@@ -836,6 +1272,9 @@ onMounted(async () => {
     // 仅运行中的任务才订阅SSE，已完成/已暂停/已中断的不需要
     if (chatStore.taskStatus === 'running') {
       subscribeTaskEvents(chatStore.executionId)
+    } else if (chatStore.taskStatus === 'completed') {
+      // 已完成的任务，调接口获取最终结果并展示到任务看板
+      fetchAndDisplayTaskResult()
     }
     // 刷新侧边栏以高亮当前会话
     refreshSessionList()
@@ -1143,6 +1582,167 @@ onUnmounted(() => {
   background: var(--color-bg-elevated) !important;
 }
 
+.task-result-bubble {
+  border: 1px solid var(--color-border-light);
+  background: var(--color-bg-elevated) !important;
+}
+
+.task-result-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.task-result-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.task-result-agent {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-secondary, #f0f2f5);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.task-result-content {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text);
+  max-height: 500px;
+  overflow-y: auto;
+  word-break: break-word;
+}
+
+.task-result-content :deep(h1),
+.task-result-content :deep(h2),
+.task-result-content :deep(h3) {
+  margin-top: 12px;
+  margin-bottom: 6px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.task-result-content :deep(p) {
+  margin: 4px 0;
+}
+
+.task-result-content :deep(ul),
+.task-result-content :deep(ol) {
+  padding-left: 20px;
+  margin: 4px 0;
+}
+
+.activity-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  font-size: 13px;
+  line-height: 1.5;
+  animation: activityFadeIn 0.3s ease-out;
+}
+
+@keyframes activityFadeIn {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.activity-item.activity-running {
+  background: #e6f7ff;
+  border-left: 3px solid #1890ff;
+}
+
+.activity-item.activity-waiting {
+  background: #fff7e6;
+  border-left: 3px solid #fa8c16;
+}
+
+.activity-item.activity-failed {
+  background: #fff1f0;
+  border-left: 3px solid #f5222d;
+}
+
+.activity-item.activity-completed {
+  border-left: 3px solid transparent;
+}
+
+.activity-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+  line-height: 1.5;
+}
+
+.activity-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.activity-agent {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+  padding: 1px 6px;
+  border-radius: 3px;
+  display: inline-block;
+  width: fit-content;
+}
+
+.activity-text {
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.activity-detail {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.task-empty-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.empty-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #e6f7ff;
+  border-top-color: #1890ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 .task-progress-header {
   display: flex;
   align-items: center;
@@ -1253,6 +1853,11 @@ onUnmounted(() => {
   color: #1890ff;
 }
 
+.step-status-tag.interrupted {
+  background: #fff1f0;
+  color: #f5222d;
+}
+
 .step-status-tag.waiting_confirm {
   background: #fff7e6;
   color: #fa8c16;
@@ -1276,6 +1881,21 @@ onUnmounted(() => {
 
 .task-step-item.pending .step-name-text {
   color: var(--color-text-tertiary);
+}
+
+.task-step-item.interrupted {
+  border-left: 3px solid #f5222d;
+  padding-left: 9px;
+  background: #fff7f7;
+}
+
+.step-interrupted-hint {
+  margin-top: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #f5222d;
+  background: #fff1f0;
+  border-radius: 4px;
 }
 
 .step-agent-tag {
@@ -1608,6 +2228,96 @@ onUnmounted(() => {
 .btn-send:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.btn-stop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: #e74c3c;
+  color: white;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.btn-stop:hover {
+  background: #c0392b;
+  transform: scale(1.05);
+}
+
+.btn-resume-send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: var(--radius-md);
+  background: #27ae60;
+  color: white;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.btn-resume-send:hover {
+  background: #219a52;
+  transform: scale(1.05);
+}
+
+.task-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #fef9e7;
+  border: 1px solid #f0d96b;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  margin-bottom: -1px;
+}
+
+.task-action-hint {
+  font-size: 13px;
+  color: #8a6d3b;
+}
+
+.task-action-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-task-action {
+  padding: 4px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border: none;
+}
+
+.btn-resume {
+  background: #27ae60;
+  color: white;
+}
+
+.btn-resume:hover {
+  background: #219a52;
+}
+
+.btn-abandon {
+  background: #e74c3c;
+  color: white;
+}
+
+.btn-abandon:hover {
+  background: #c0392b;
 }
 
 .input-footer {

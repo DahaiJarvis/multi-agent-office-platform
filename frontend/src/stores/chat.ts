@@ -2,6 +2,16 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { agentApi, type TaskStepStatus, type ConfirmOption } from '../api/agent'
 
+export interface TaskActivity {
+  id: string
+  type: 'intent' | 'thought' | 'tool_call' | 'tool_result' | 'step_start' | 'step_done' | 'handoff' | 'result'
+  agentName: string
+  content: string
+  timestamp: number
+  status?: string
+  detail?: string
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system'
@@ -41,6 +51,10 @@ export const useChatStore = defineStore('chat', () => {
     stepIndex: number
   } | null>(null)
   const taskStatus = ref('')
+
+  // 任务实时活动记录（来自 SSE 流事件）
+  const taskActivities = ref<TaskActivity[]>([])
+  let _activitySeq = 0
 
   // 已确认的 confirm_id 集合，防止重复触发确认弹窗
   const resolvedConfirmIds = new Set<string>()
@@ -154,8 +168,8 @@ export const useChatStore = defineStore('chat', () => {
           stepIndex: confirmStep.step_index,
         }
       }
-    } else {
-      // 没有待确认步骤，清除确认状态
+    } else if (steps.length > 0) {
+      // 步骤列表非空但没有待确认步骤，清除确认状态
       waitingConfirm.value = false
       confirmInfo.value = null
     }
@@ -172,6 +186,20 @@ export const useChatStore = defineStore('chat', () => {
     taskStatus.value = status
   }
 
+  function addTaskActivity(activity: Omit<TaskActivity, 'id' | 'timestamp'>) {
+    _activitySeq += 1
+    taskActivities.value.push({
+      id: `act-${Date.now()}-${_activitySeq}`,
+      timestamp: Date.now(),
+      ...activity,
+    })
+  }
+
+  function clearTaskActivities() {
+    taskActivities.value = []
+    _activitySeq = 0
+  }
+
   function clearChat() {
     sessionId.value = ''
     messages.value = []
@@ -182,6 +210,8 @@ export const useChatStore = defineStore('chat', () => {
     waitingConfirm.value = false
     confirmInfo.value = null
     taskStatus.value = ''
+    taskActivities.value = []
+    _activitySeq = 0
     resolvedConfirmIds.clear()
     sessionStorage.removeItem('current_execution_id')
     sessionStorage.removeItem('current_session_id')
@@ -221,18 +251,21 @@ export const useChatStore = defineStore('chat', () => {
           localStorage.setItem('current_session_id', status.session_id)
         }
 
-        if (status.status === 'paused') {
+        if (status.status === 'paused' || status.steps?.some((s: TaskStepStatus) => s.status === 'waiting_confirm')) {
+          taskStatus.value = 'paused'
           waitingConfirm.value = true
           const confirmStep = status.steps?.find(
             (s: TaskStepStatus) => s.status === 'waiting_confirm' && s.confirm_id,
           )
           if (confirmStep && confirmStep.confirm_id) {
-            confirmInfo.value = {
-              confirmId: confirmStep.confirm_id,
-              confirmType: confirmStep.confirm_type || 'sensitive_action',
-              confirmReason: confirmStep.confirm_reason || '',
-              options: confirmStep.options || [],
-              stepIndex: confirmStep.step_index,
+            if (!resolvedConfirmIds.has(confirmStep.confirm_id)) {
+              confirmInfo.value = {
+                confirmId: confirmStep.confirm_id,
+                confirmType: confirmStep.confirm_type || 'sensitive_action',
+                confirmReason: confirmStep.confirm_reason || '',
+                options: confirmStep.options || [],
+                stepIndex: confirmStep.step_index,
+              }
             }
           }
         }
@@ -266,6 +299,7 @@ export const useChatStore = defineStore('chat', () => {
     confirmInfo,
     taskStatus,
     resolvedConfirmIds,
+    taskActivities,
     addUserMessage,
     addAssistantMessage,
     addStreamingMessage,
@@ -277,6 +311,8 @@ export const useChatStore = defineStore('chat', () => {
     updateTaskSteps,
     setWaitingConfirm,
     setTaskStatus,
+    addTaskActivity,
+    clearTaskActivities,
     clearChat,
     loadHistory,
     recoverTaskStatus,

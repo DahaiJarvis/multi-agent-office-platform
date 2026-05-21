@@ -358,8 +358,334 @@ async def _connect_and_load(service_key: str, config: MCPServerConfig) -> list[A
     return tools
 
 
+# ==================== Mock 工具 ====================
+
+MOCK_TOOL_DEFINITIONS: dict[str, list[dict[str, Any]]] = {
+    "crm": [
+        {
+            "name": "query_customer",
+            "description": "查询客户信息，支持按姓名、手机号、企业名称检索",
+            "params": {"customer_name": {"type": "string", "description": "客户姓名"}},
+            "mock_data": {
+                "customer_name": "{customer_name}",
+                "company": "示例科技有限公司",
+                "industry": "互联网",
+                "scale": "200-500人",
+                "contact": "138****5678",
+                "cooperation_start": "2023-06-15",
+                "status": "活跃客户",
+                "last_interaction": "2025-05-10",
+                "total_contract_amount": "¥580万元",
+                "recent_deal": "2025-04-20 签约 ¥120万",
+            },
+        },
+        {
+            "name": "query_customer_orders",
+            "description": "查询客户订单记录",
+            "params": {"customer_name": {"type": "string", "description": "客户姓名"}},
+            "mock_data": [
+                {"order_id": "ORD-2025-0042", "product": "企业版SaaS", "amount": "¥120万", "date": "2025-04-20", "status": "已签约"},
+                {"order_id": "ORD-2024-0198", "product": "增值服务包", "amount": "¥35万", "date": "2024-11-15", "status": "已回款"},
+                {"order_id": "ORD-2024-0087", "product": "基础版SaaS", "amount": "¥58万", "date": "2024-06-01", "status": "已回款"},
+            ],
+        },
+    ],
+    "finance": [
+        {
+            "name": "query_financial_report",
+            "description": "查询财务报表数据，包括收入、支出、利润等",
+            "params": {"period": {"type": "string", "description": "查询周期，如 2025年Q1"}},
+            "mock_data": {
+                "period": "{period}",
+                "revenue": "¥3,280万",
+                "cost": "¥2,150万",
+                "gross_profit": "¥1,130万",
+                "gross_margin": "34.5%",
+                "operating_expense": "¥680万",
+                "net_profit": "¥450万",
+                "net_margin": "13.7%",
+                "yoy_growth": "+12.3%",
+            },
+        },
+        {
+            "name": "query_payment_status",
+            "description": "查询回款状态和待回款明细",
+            "params": {"customer_name": {"type": "string", "description": "客户姓名"}},
+            "mock_data": {
+                "customer": "{customer_name}",
+                "total_contract": "¥580万",
+                "received": "¥460万",
+                "pending": "¥120万",
+                "pending_details": [
+                    {"invoice": "INV-2025-0089", "amount": "¥80万", "due_date": "2025-06-30", "status": "已开票未回款"},
+                    {"invoice": "INV-2025-0102", "amount": "¥40万", "due_date": "2025-07-15", "status": "待开票"},
+                ],
+            },
+        },
+    ],
+    "oa": [
+        {
+            "name": "query_approval_status",
+            "description": "查询审批流程状态",
+            "params": {"approval_id": {"type": "string", "description": "审批单号"}},
+            "mock_data": {
+                "approval_id": "{approval_id}",
+                "title": "采购申请 - 办公设备",
+                "applicant": "张三",
+                "department": "技术部",
+                "amount": "¥15,000",
+                "status": "审批中",
+                "current_node": "部门经理审批",
+                "created_at": "2025-05-15",
+            },
+        },
+        {
+            "name": "submit_approval",
+            "description": "提交审批申请",
+            "params": {
+                "title": {"type": "string", "description": "审批标题"},
+                "content": {"type": "string", "description": "审批内容"},
+            },
+            "mock_data": {
+                "approval_id": "APR-2025-MOCK001",
+                "status": "已提交",
+                "message": "审批申请已成功提交，等待部门经理审批",
+            },
+        },
+    ],
+    "email": [
+        {
+            "name": "send_email",
+            "description": "发送邮件",
+            "params": {
+                "to": {"type": "string", "description": "收件人"},
+                "subject": {"type": "string", "description": "邮件主题"},
+                "body": {"type": "string", "description": "邮件正文"},
+            },
+            "mock_data": {
+                "message_id": "MSG-2025-MOCK001",
+                "status": "已发送",
+                "to": "{to}",
+                "subject": "{subject}",
+            },
+        },
+        {
+            "name": "search_emails",
+            "description": "搜索邮件",
+            "params": {"keyword": {"type": "string", "description": "搜索关键词"}},
+            "mock_data": [
+                {"from": "lisi@example.com", "subject": "关于Q2项目进度", "date": "2025-05-18", "snippet": "请查看附件中的项目进度报告..."},
+                {"from": "wangwu@example.com", "subject": "会议通知 - 周五例会", "date": "2025-05-17", "snippet": "本周五下午2点召开部门例会..."},
+            ],
+        },
+    ],
+    "calendar": [
+        {
+            "name": "query_schedule",
+            "description": "查询日程安排",
+            "params": {"date": {"type": "string", "description": "日期，如 2025-05-20"}},
+            "mock_data": [
+                {"time": "09:00-10:00", "title": "项目周会", "location": "3楼会议室A", "attendees": "张三、李四、王五"},
+                {"time": "14:00-15:30", "title": "客户演示", "location": "线上-腾讯会议", "attendees": "张三、客户团队"},
+                {"time": "16:00-17:00", "title": "1v1 with 主管", "location": "5楼小会议室", "attendees": "张三、赵六"},
+            ],
+        },
+    ],
+    "hr": [
+        {
+            "name": "query_employee_info",
+            "description": "查询员工信息",
+            "params": {"employee_name": {"type": "string", "description": "员工姓名"}},
+            "mock_data": {
+                "name": "{employee_name}",
+                "department": "技术部",
+                "position": "高级工程师",
+                "level": "P7",
+                "entry_date": "2021-03-15",
+                "status": "在职",
+                "annual_leave_remaining": "7天",
+            },
+        },
+        {
+            "name": "query_leave_balance",
+            "description": "查询假期余额",
+            "params": {"employee_name": {"type": "string", "description": "员工姓名"}},
+            "mock_data": {
+                "employee": "{employee_name}",
+                "annual_leave": {"total": 15, "used": 8, "remaining": 7},
+                "sick_leave": {"total": 10, "used": 2, "remaining": 8},
+                "personal_leave": {"total": 3, "used": 0, "remaining": 3},
+            },
+        },
+    ],
+    "approval": [
+        {
+            "name": "approve_request",
+            "description": "审批通过",
+            "params": {"approval_id": {"type": "string", "description": "审批单号"}, "comment": {"type": "string", "description": "审批意见"}},
+            "mock_data": {"approval_id": "{approval_id}", "status": "已通过", "comment": "{comment}"},
+        },
+        {
+            "name": "reject_request",
+            "description": "审批驳回",
+            "params": {"approval_id": {"type": "string", "description": "审批单号"}, "reason": {"type": "string", "description": "驳回原因"}},
+            "mock_data": {"approval_id": "{approval_id}", "status": "已驳回", "reason": "{reason}"},
+        },
+    ],
+    "im": [
+        {
+            "name": "send_message",
+            "description": "发送即时消息",
+            "params": {"to": {"type": "string", "description": "接收人"}, "content": {"type": "string", "description": "消息内容"}},
+            "mock_data": {"message_id": "IM-2025-MOCK001", "status": "已发送", "to": "{to}"},
+        },
+    ],
+    "doc": [
+        {
+            "name": "search_documents",
+            "description": "搜索文档",
+            "params": {"keyword": {"type": "string", "description": "搜索关键词"}},
+            "mock_data": [
+                {"title": "2025年Q1工作总结", "author": "张三", "updated": "2025-04-05", "type": "文档"},
+                {"title": "项目技术方案V2.0", "author": "李四", "updated": "2025-03-20", "type": "文档"},
+            ],
+        },
+    ],
+    "knowledge": [
+        {
+            "name": "search_knowledge",
+            "description": "搜索知识库",
+            "params": {"query": {"type": "string", "description": "搜索查询"}},
+            "mock_data": [
+                {"title": "公司差旅报销制度", "content": "员工出差报销标准：交通费实报实销，住宿费上限500元/晚...", "score": 0.95},
+                {"title": "年假管理制度", "content": "入职满1年享有15天年假，未休年假可结转至次年Q1...", "score": 0.88},
+            ],
+        },
+    ],
+    "web_search": [
+        {
+            "name": "web_search",
+            "description": "网络搜索",
+            "params": {"query": {"type": "string", "description": "搜索关键词"}},
+            "mock_data": [
+                {"title": "搜索结果1", "url": "https://example.com/1", "snippet": "这是模拟的搜索结果..."},
+                {"title": "搜索结果2", "url": "https://example.com/2", "snippet": "另一个模拟的搜索结果..."},
+            ],
+        },
+    ],
+}
+
+
+def _create_mock_tools(agent_name: str, server_names: list[str]) -> list[Any]:
+    """为 Agent 创建 mock 工具
+
+    当真实 MCP 服务不可用时，根据服务类型生成对应的 mock 工具。
+    mock 工具使用 FunctionTool 包装，返回预设的模拟数据。
+
+    Args:
+        agent_name: Agent 名称
+        server_names: 绑定的 MCP 服务名称列表
+
+    Returns:
+        FunctionTool 列表
+    """
+    from autogen_core.tools import FunctionTool
+
+    mock_tools: list[Any] = []
+
+    for server_name in server_names:
+        tool_defs = MOCK_TOOL_DEFINITIONS.get(server_name, [])
+        for tool_def in tool_defs:
+            try:
+                tool = _build_mock_function_tool(tool_def)
+                mock_tools.append(tool)
+            except Exception as e:
+                logger.warning("创建 mock 工具 %s 失败: %s", tool_def.get("name", ""), e)
+
+    return mock_tools
+
+
+def _build_mock_function_tool(tool_def: dict[str, Any]) -> Any:
+    """根据工具定义构建 mock FunctionTool
+
+    动态创建一个 Python 函数，其参数与真实 MCP 工具一致，
+    返回预设的 mock 数据。参数值会替换 mock 数据中的占位符。
+
+    Args:
+        tool_def: 工具定义字典，包含 name, description, params, mock_data
+
+    Returns:
+        FunctionTool 实例
+    """
+    import json
+    from autogen_core.tools import FunctionTool
+
+    tool_name = tool_def["name"]
+    tool_description = tool_def["description"]
+    params = tool_def.get("params", {})
+    mock_data = tool_def.get("mock_data", {})
+
+    param_names = list(params.keys())
+
+    # 使用闭包捕获 mock_data，通过 exec 创建具有正确参数签名的函数
+    # 函数体调用 _mock_tool_executor 完成实际逻辑
+    sig_params = ", ".join(f"{pname}: str" for pname in param_names)
+    func_body_lines = [
+        f"async def {tool_name}({sig_params}) -> str:",
+        f"    return await _mock_tool_executor({', '.join(param_names)})",
+    ]
+    exec_text = "\n".join(func_body_lines)
+
+    async def _mock_tool_executor(*args: str) -> str:
+        kwargs = dict(zip(param_names, args))
+        result = _replace_placeholders(mock_data, kwargs)
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    local_ns: dict[str, Any] = {"_mock_tool_executor": _mock_tool_executor}
+    exec(exec_text, local_ns, local_ns)
+    func = local_ns[tool_name]
+    func.__doc__ = tool_description
+
+    return FunctionTool(
+        func=func,
+        name=tool_name,
+        description=tool_description,
+    )
+
+
+def _replace_placeholders(data: Any, values: dict[str, str]) -> Any:
+    """替换 mock 数据中的占位符
+
+    占位符格式为 {param_name}，会被替换为对应的参数值。
+
+    Args:
+        data: mock 数据（可以是 dict, list, str 等）
+        values: 参数值字典
+
+    Returns:
+        替换后的数据
+    """
+    import copy
+    data = copy.deepcopy(data)
+
+    if isinstance(data, dict):
+        return {k: _replace_placeholders(v, values) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [_replace_placeholders(item, values) for item in data]
+    elif isinstance(data, str):
+        for key, val in values.items():
+            placeholder = "{" + key + "}"
+            if placeholder in data:
+                data = data.replace(placeholder, str(val) if val else f"[{key}]")
+        return data
+    return data
+
+
 async def load_agent_tools(agent_name: str) -> list[Any]:
     """根据 Agent 名称加载其绑定的 MCP 工具
+
+    当 MCP 服务不可用时，自动降级为 mock 工具，返回模拟数据。
+    mock 工具的 schema 与真实 MCP 工具一致，确保 Agent 能正常调用。
 
     Args:
         agent_name: Agent 名称，如 "EmailAgent"
@@ -368,7 +694,19 @@ async def load_agent_tools(agent_name: str) -> list[Any]:
         AutoGen Function Tool 列表
     """
     bound_servers = AGENT_TOOL_BINDINGS.get(agent_name, [])
-    return await load_mcp_tools(bound_servers)
+    tools = await load_mcp_tools(bound_servers)
+
+    if not tools and bound_servers:
+        # 真实 MCP 工具不可用，降级为 mock 工具
+        mock_tools = _create_mock_tools(agent_name, bound_servers)
+        if mock_tools:
+            logger.info(
+                "Agent %s MCP 工具不可用，已降级为 %d 个 mock 工具",
+                agent_name, len(mock_tools),
+            )
+        return mock_tools
+
+    return tools
 
 
 async def close_all_connections() -> None:

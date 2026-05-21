@@ -46,6 +46,7 @@ export interface TaskStepStatus {
   confirm_type?: string
   confirm_reason?: string
   options?: ConfirmOption[]
+  result?: string
 }
 
 export interface ConfirmOption {
@@ -192,11 +193,12 @@ export const agentApi = {
     return http.get<TaskExecutionStatus>(`/agent/task/session/${sessionId}`)
   },
 
-  resumeTask(executionId: string, sessionId: string, userId: string) {
+  resumeTask(executionId: string, sessionId: string, userId: string, supplementaryMessage?: string) {
     return http.post<TaskExecutionStatus>(`/agent/task/resume`, {
       execution_id: executionId,
       session_id: sessionId,
       user_id: userId,
+      supplementary_message: supplementaryMessage || null,
     })
   },
 
@@ -220,10 +222,11 @@ export const agentApi = {
     })
   },
 
-  cancelTask(executionId: string, userId: string) {
+  cancelTask(executionId: string, userId: string, force: boolean = false) {
     return http.post(`/agent/task/cancel`, {
       execution_id: executionId,
       user_id: userId,
+      force,
     })
   },
 

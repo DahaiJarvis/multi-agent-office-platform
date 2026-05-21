@@ -246,6 +246,15 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                         yield _format_sse("collaboration_mode", final_mode)
                         yield _format_sse("status", "completed")
 
+                    elif event_type == "paused":
+                        final_agent = event.get("agent_name", final_agent)
+                        final_intent = event.get("intent", "")
+                        final_mode = event.get("mode", "")
+                        yield _format_sse("agent_name", final_agent)
+                        yield _format_sse("intent", final_intent)
+                        yield _format_sse("collaboration_mode", final_mode)
+                        yield _format_sse("status", "paused")
+
                     elif event_type == "error":
                         yield _format_sse("error", event["message"])
                         yield _format_sse("status", "error")
@@ -481,6 +490,7 @@ async def resume_task(request: TaskResumeRequest) -> dict:
 
     从断点恢复任务执行，跳过已完成的步骤。
     仅支持状态为 interrupted 或 paused 的任务。
+    支持传入 supplementary_message 补充需求。
     """
     from agent.teams.task_execution_engine import get_task_execution_engine
 
@@ -489,6 +499,7 @@ async def resume_task(request: TaskResumeRequest) -> dict:
         execution_id=request.execution_id,
         session_id=request.session_id,
         user_id=request.user_id,
+        supplementary_message=request.supplementary_message,
     )
     return result
 
@@ -652,6 +663,7 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
                         cp.error = f"用户跳过: {comment}"
                         await store.save_checkpoint(execution.execution_id, cp)
                         break
+                execution = await store.get_execution(result.execution_id) or execution
                 execution.error = ""
                 await store.update_execution(execution)
 
@@ -669,6 +681,19 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
             else:
                 # continue：后台恢复执行
                 # 注意：不在此处修改 execution.status 为 RUNNING，由 resume() 内部处理状态转换
+                # 更新确认步骤的 checkpoint 状态为 COMPLETED
+                from agent.core.task_checkpoint import StepStatus
+                for cp in execution.checkpoints:
+                    if cp.step_index == result.step_index and cp.status == StepStatus.WAITING_CONFIRM:
+                        cp.status = StepStatus.COMPLETED
+                        cp.output_data = cp.output_data or {}
+                        cp.output_data["confirmed"] = True
+                        cp.output_data["decision"] = decision
+                        await store.save_checkpoint(execution.execution_id, cp)
+                        break
+                # save_checkpoint 内部已调用 update_execution 更新了存储
+                # 重新加载 execution 以获取最新状态，避免旧对象覆盖 save_checkpoint 的更新
+                execution = await store.get_execution(result.execution_id) or execution
                 execution.error = ""
                 await store.update_execution(execution)
 
@@ -692,6 +717,14 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
         if execution:
             execution.status = TaskStatus.CANCELLED
             execution.error = f"用户取消任务: {comment}"
+            from agent.core.task_checkpoint import StepStatus
+            for cp in execution.checkpoints:
+                if cp.step_index == result.step_index and cp.status == StepStatus.WAITING_CONFIRM:
+                    cp.status = StepStatus.FAILED
+                    cp.error = f"用户取消: {comment}"
+                    await store.save_checkpoint(execution.execution_id, cp)
+                    break
+            execution = await store.get_execution(result.execution_id) or execution
             await store.update_execution(execution)
             await store.remove_from_running(result.execution_id)
 
@@ -703,11 +736,12 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
     }
 
 
-@router.post("/task/cancel", summary="取消任务")
+@router.post("/task/cancel", summary="取消/暂停任务")
 async def cancel_task(request: TaskCancelRequest) -> dict:
-    """取消正在执行的任务
+    """取消或暂停正在执行的任务
 
-    将任务状态标记为CANCELLED，停止执行。
+    force=False: 暂停任务(INTERRUPTED)，可通过resume恢复
+    force=True: 放弃任务(CANCELLED)，不可恢复
     """
     from agent.core.task_checkpoint import get_task_checkpoint_store, TaskStatus
 
@@ -719,9 +753,15 @@ async def cancel_task(request: TaskCancelRequest) -> dict:
     if execution.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
         return {"status": "error", "message": f"任务状态不允许取消: {execution.status.value}"}
 
-    execution.status = TaskStatus.CANCELLED
-    execution.error = "用户取消任务"
-    await store.update_execution(execution)
-    await store.remove_from_running(request.execution_id)
-
-    return {"status": "cancelled", "message": "任务已取消"}
+    if request.force:
+        execution.status = TaskStatus.CANCELLED
+        execution.error = "用户放弃任务"
+        await store.update_execution(execution)
+        await store.remove_from_running(request.execution_id)
+        return {"status": "cancelled", "message": "任务已放弃"}
+    else:
+        execution.status = TaskStatus.INTERRUPTED
+        execution.error = "用户暂停任务"
+        await store.update_execution(execution)
+        await store.remove_from_running(request.execution_id)
+        return {"status": "interrupted", "message": "任务已暂停，可通过resume恢复"}

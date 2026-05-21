@@ -325,19 +325,7 @@ async def classify_intent(user_message: str) -> IntentResult:
 
     start_time = time.time()
 
-    # 1. 尝试从语义缓存获取（语义相似匹配）
-    try:
-        from agent.core.performance.semantic_cache import get_semantic_cache
-        sem_cache = get_semantic_cache()
-        cached_result = await sem_cache.get(user_message, agent_name="IntentClassifier")
-        if cached_result is not None:
-            logger.debug("意图分类命中语义缓存: %s", user_message[:30])
-            record_agent_call("Supervisor", "success", time.time() - start_time)
-            return IntentResult.model_validate(cached_result)
-    except Exception:
-        pass
-
-    # 2. 尝试从 L1 精确缓存获取
+    # 1. 尝试从 L1 精确缓存获取（O(1)，优先级最高）
     try:
         from agent.core.performance.cache import get_cache, generate_cache_key
 
@@ -349,6 +337,18 @@ async def classify_intent(user_message: str) -> IntentResult:
             logger.debug("意图分类命中缓存: %s", user_message[:30])
             record_agent_call("Supervisor", "success", time.time() - start_time)
             return IntentResult.model_validate(cached)
+    except Exception:
+        pass
+
+    # 2. 尝试从语义缓存获取（语义相似匹配，O(n)）
+    try:
+        from agent.core.performance.semantic_cache import get_semantic_cache
+        sem_cache = get_semantic_cache()
+        cached_result = await sem_cache.get(user_message, agent_name="IntentClassifier")
+        if cached_result is not None:
+            logger.debug("意图分类命中语义缓存: %s", user_message[:30])
+            record_agent_call("Supervisor", "success", time.time() - start_time)
+            return IntentResult.model_validate(cached_result)
     except Exception:
         pass
 

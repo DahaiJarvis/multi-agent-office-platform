@@ -282,6 +282,24 @@ AGENT_PROMPTS: dict[str, str] = {
 }
 
 
+def _is_mock_tools(tools: list[Any]) -> bool:
+    """判断工具列表是否为 mock 工具
+
+    通过检查工具类型来判断：mock 工具是 FunctionTool，
+    而真实 MCP 工具是 SseMcpToolAdapter / StdioMcpToolAdapter。
+
+    Args:
+        tools: 工具列表
+
+    Returns:
+        True 表示为 mock 工具
+    """
+    if not tools:
+        return False
+    from autogen_core.tools import FunctionTool
+    return all(isinstance(t, FunctionTool) for t in tools)
+
+
 async def _create_single_agent(agent_name: str) -> AssistantAgent:
     """通用领域 Agent 创建函数
 
@@ -336,6 +354,13 @@ async def _create_single_agent(agent_name: str) -> AssistantAgent:
             f"并告知用户相关服务暂时不可用。不要尝试调用任何工具。"
         )
         logger.warning("Agent %s 无可用工具（MCP 服务不可用），将仅基于知识回答", agent_name)
+    elif _is_mock_tools(tools):
+        prompt += (
+            "\n\n[系统提示] 当前 MCP 服务不可用，已自动切换为模拟数据模式。"
+            "你可以正常调用工具，但返回的数据为模拟数据，非真实业务数据。"
+            "请在回答中明确告知用户当前为模拟数据，并标注关键数据仅供参考。"
+        )
+        logger.info("Agent %s 使用 mock 工具（模拟数据模式）", agent_name)
     return AssistantAgent(
         name=agent_name,
         model_client=get_domain_agent_client(),

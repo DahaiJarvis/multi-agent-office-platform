@@ -49,6 +49,11 @@ def _extract_agent_response(result: Any) -> str:
     每条消息的 content 可能是字符串，也可能是包含多个 part 的列表（多模态场景）。
     此函数统一处理这两种格式，提取纯文本内容。
 
+    过滤策略：
+      - 跳过工具调用消息（source 为工具名或包含 function_call 的消息）
+      - 跳过纯 JSON 格式的消息（通常是 API 原始返回数据）
+      - 只保留 AssistantAgent 的最终回复
+
     Args:
         result: Agent.run() 的返回值，通常是 AutoGen TaskResult
 
@@ -61,20 +66,86 @@ def _extract_agent_response(result: Any) -> str:
             for msg in result.messages:
                 if hasattr(msg, 'content') and msg.content:
                     text = msg.content
-                    # 多模态场景：content 是 list[Part]，每个 Part 有 text 属性
                     if isinstance(text, list):
                         text = "".join(
                             part.text for part in text if hasattr(part, "text")
                         )
-                    if text:
-                        content_parts.append(text)
+                    if not text:
+                        continue
+
+                    # 跳过工具调用结果：source 为工具名（通常包含下划线或特定前缀）
+                    source = getattr(msg, 'source', '') or ''
+                    if _is_tool_source(source):
+                        continue
+
+                    # 跳过纯 JSON 格式的消息（API 原始返回数据）
+                    if _is_raw_json(text):
+                        continue
+
+                    content_parts.append(text)
             if content_parts:
-                return "\n".join(content_parts)
+                # 优先返回最后一条非工具消息（即 Agent 的最终回复）
+                return content_parts[-1]
     except Exception:
         pass
 
-    # 降级：直接转字符串
     return str(result)
+
+
+def _is_tool_source(source: str) -> bool:
+    """判断消息来源是否为工具调用
+
+    AutoGen 中工具调用的 source 通常是工具函数名，
+    如 "execute_sql"、"search_knowledge_base" 等。
+    AssistantAgent 的 source 通常是 Agent 名称。
+
+    Args:
+        source: 消息来源标识
+
+    Returns:
+        是否为工具调用结果
+    """
+    if not source:
+        return False
+    # Agent 名称通常以 "Agent" 结尾或为已知名称
+    agent_suffixes = ("Agent", "Assistant", "Judge", "Aggregator", "Voter", "Reviewer")
+    if any(source.endswith(suffix) for suffix in agent_suffixes):
+        return False
+    # user 是用户消息
+    if source == "user":
+        return False
+    # 其他 source 视为工具调用
+    return True
+
+
+def _is_raw_json(text: str) -> bool:
+    """判断文本是否为原始 JSON 数据
+
+    API 返回的原始数据通常是 JSON 格式，如：
+      - {"status": "success", "data": {...}}
+      - [{"id": 1, "name": "..."}]
+
+    但 Agent 的自然语言回复中也可能包含 JSON 代码块，
+    此函数只判断整段文本是否为纯 JSON（以 { 或 [ 开头）。
+
+    Args:
+        text: 待检测文本
+
+    Returns:
+        是否为原始 JSON 数据
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # 只判断整段文本为 JSON 的情况（以 { 或 [ 开头且能解析）
+    if stripped.startswith('{') or stripped.startswith('['):
+        try:
+            import json
+            json.loads(stripped)
+            return True
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return False
 
 
 class AdvancedMode(str, Enum):
@@ -209,7 +280,7 @@ class ParallelTeam:
             ),
         )
 
-    async def run(self, task: str) -> ParallelResult:
+    async def run(self, task: str, progress_callback: Any = None) -> ParallelResult:
         """并行执行任务
 
         执行流程：
@@ -221,6 +292,7 @@ class ParallelTeam:
 
         Args:
             task: 任务描述，所有 Agent 处理同一任务
+            progress_callback: 进度回调函数，签名为 async callback(agent_name, status, message)
 
         Returns:
             ParallelResult 包含各 Agent 独立结果和汇总结论
@@ -228,7 +300,6 @@ class ParallelTeam:
         await self._initialize()
         start_time = time.time()
 
-        # 并行执行：Semaphore 控制并发，asyncio.gather 实现并行
         semaphore = asyncio.Semaphore(self._max_concurrent)
         agent_results: dict[str, str] = {}
 
@@ -236,12 +307,17 @@ class ParallelTeam:
             """单个 Agent 的执行协程，受 Semaphore 控制并发"""
             async with semaphore:
                 try:
+                    if progress_callback:
+                        await progress_callback(agent.name, "running", f"{agent.name} 正在分析...")
                     result = await agent.run(task=task)
                     agent_results[agent.name] = _extract_agent_response(result)
+                    if progress_callback:
+                        await progress_callback(agent.name, "completed", f"{agent.name} 分析完成")
                 except Exception as e:
-                    # 单个 Agent 失败不影响其他 Agent，记录错误继续执行
                     agent_results[agent.name] = f"执行失败: {e}"
                     logger.error("并行执行 Agent %s 失败: %s", agent.name, e)
+                    if progress_callback:
+                        await progress_callback(agent.name, "failed", f"{agent.name} 执行失败: {e}")
 
         tasks = [_run_single(agent) for agent in self._agents]
         await asyncio.gather(*tasks)
@@ -362,7 +438,7 @@ class DebateTeam:
             ),
         )
 
-    async def run(self, task: str) -> DebateResult:
+    async def run(self, task: str, progress_callback: Any = None) -> DebateResult:
         """执行辩论
 
         执行流程：
@@ -375,28 +451,36 @@ class DebateTeam:
 
         Args:
             task: 辩论主题/任务描述
+            progress_callback: 进度回调函数，签名为 async callback(agent_name, status, message)
 
         Returns:
             DebateResult 包含辩论轮次、各方立场、共识和少数派意见
         """
         await self._initialize()
 
-        # 存储各 Agent 的当前立场，每轮更新
         positions: dict[str, str] = {}
 
-        # 第一轮：各 Agent 独立给出初始立场（不参考其他 Agent 的观点）
+        # 第一轮：各 Agent 独立给出初始立场
+        if progress_callback:
+            await progress_callback("Judge", "running", "辩论开始 - 初始立场阶段")
         for agent in self._agents:
             try:
+                if progress_callback:
+                    await progress_callback(agent.name, "running", f"{agent.name} 正在给出初始立场...")
                 result = await agent.run(task=f"请分析以下问题并给出你的观点: {task}")
                 positions[agent.name] = _extract_agent_response(result)
+                if progress_callback:
+                    await progress_callback(agent.name, "completed", f"{agent.name} 已给出初始立场")
             except Exception as e:
                 positions[agent.name] = f"分析失败: {e}"
+                if progress_callback:
+                    await progress_callback(agent.name, "failed", f"{agent.name} 初始立场分析失败")
 
         # 后续轮次：每个 Agent 基于其他 Agent 的观点进行反驳或补充
-        # 串行执行，因为每轮的输入依赖上一轮的输出
         for round_num in range(1, self._max_rounds):
+            if progress_callback:
+                await progress_callback("Judge", "running", f"辩论第{round_num + 1}轮开始")
             for agent in self._agents:
-                # 构建其他 Agent 的观点摘要，截取前 300 字避免 Prompt 过长
                 other_views = {
                     name: pos for name, pos in positions.items() if name != agent.name
                 }
@@ -407,8 +491,12 @@ class DebateTeam:
                     + f"\n\n请基于以上观点进行反驳或补充（第{round_num + 1}轮）。"
                 )
                 try:
+                    if progress_callback:
+                        await progress_callback(agent.name, "running", f"{agent.name} 第{round_num + 1}轮发言中...")
                     result = await agent.run(task=counter_prompt)
                     positions[agent.name] = _extract_agent_response(result)
+                    if progress_callback:
+                        await progress_callback(agent.name, "completed", f"{agent.name} 第{round_num + 1}轮发言完成")
                 except Exception as e:
                     logger.warning("辩论第%d轮 Agent %s 失败: %s", round_num + 1, agent.name, e)
 
@@ -517,7 +605,7 @@ class VoteTeam:
         if not self._agents:
             raise RuntimeError(f"团队初始化失败：所有 Agent 均不可用，尝试的 Agent: {self._agent_names}")
 
-    async def run(self, task: str, options: list[str] | None = None) -> VoteResult:
+    async def run(self, task: str, options: list[str] | None = None, progress_callback: Any = None) -> VoteResult:
         """执行投票
 
         执行流程：
@@ -529,6 +617,7 @@ class VoteTeam:
         Args:
             task: 任务/问题描述
             options: 可选的选项列表。提供时 Agent 只需选择，不提供时 Agent 自由回答
+            progress_callback: 进度回调函数，签名为 async callback(agent_name, status, message)
 
         Returns:
             VoteResult 包含各 Agent 的投票、计票结果和胜出选项
@@ -537,29 +626,29 @@ class VoteTeam:
 
         votes: dict[str, str] = {}
 
-        # 各 Agent 独立投票：串行执行但互不干扰
-        # 不使用并行，因为投票场景通常 Agent 数量较少（3-4 个），
-        # 串行执行更简单且避免 LLM 限流
         for agent in self._agents:
             try:
+                if progress_callback:
+                    await progress_callback(agent.name, "running", f"{agent.name} 正在投票...")
                 if options:
-                    # 有选项时：限制 Agent 只输出选项名称，便于计票
                     vote_prompt = (
                         f"问题: {task}\n"
                         f"选项: {', '.join(options)}\n"
                         f"请只输出你选择的选项，不要输出其他内容。"
                     )
                 else:
-                    # 无选项时：Agent 自由回答，取第一行作为投票结果
                     vote_prompt = f"请回答以下问题，给出简洁明确的答案: {task}"
 
                 result = await agent.run(task=vote_prompt)
                 content = _extract_agent_response(result)
-                # 取第一行作为投票结果，避免 Agent 输出多余的解释性文字
                 vote = content.strip().split("\n")[0] if content else "未知"
                 votes[agent.name] = vote
+                if progress_callback:
+                    await progress_callback(agent.name, "completed", f"{agent.name} 投票完成: {vote}")
             except Exception as e:
                 votes[agent.name] = f"投票失败: {e}"
+                if progress_callback:
+                    await progress_callback(agent.name, "failed", f"{agent.name} 投票失败")
 
         # 计票：归一化为小写后统计各选项票数
         vote_counts: dict[str, int] = {}

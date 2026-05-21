@@ -382,8 +382,9 @@ async def route_and_execute(
                 "intent": intent.intent,
             }
 
-        # 提取 Agent 输出
-        output = result.messages[-1].content if result and result.messages else "处理完成"
+        # 提取 Agent 输出（使用 _extract_agent_response 过滤工具调用和原始 JSON）
+        from agent.teams.advanced_orchestration import _extract_agent_response
+        output = _extract_agent_response(result) if result else "处理完成"
 
         duration = time.time() - start_time
         record_agent_call(intent.target_agent, "success", duration)
@@ -788,6 +789,24 @@ async def route_and_execute_stream(
 
             # 将最终结果作为 chunk 输出，确保前端消息气泡有内容
             final_message = result.get("message", "") if result else ""
+            result_status = result.get("status", "") if result else ""
+
+            if result_status == "paused":
+                if final_message:
+                    yield {
+                        "type": "chunk",
+                        "agent_name": result.get("agent_name", intent.target_agent) if result else intent.target_agent,
+                        "content": final_message,
+                    }
+                yield {
+                    "type": "paused",
+                    "agent_name": result.get("agent_name", intent.target_agent) if result else intent.target_agent,
+                    "intent": result.get("intent", intent.intent) if result else intent.intent,
+                    "mode": intent.collaboration_mode.value,
+                    "execution_id": result.get("execution_id", execution.execution_id),
+                }
+                return
+
             if final_message:
                 yield {
                     "type": "chunk",

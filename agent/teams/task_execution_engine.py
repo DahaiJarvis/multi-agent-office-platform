@@ -39,6 +39,7 @@ from agent.core.task_checkpoint import (
 )
 from agent.core.event_bus import publish_event, EventType
 from agent.agents.supervisor import IntentResult, CollaborationMode
+from agent.agents.domain import create_domain_agent
 from agent.teams.team_factory import create_team
 from agent.teams.execution_controller import get_execution_controller
 from agent.teams.fault_isolation import FaultIsolationPolicy, get_fault_isolation_policy
@@ -208,6 +209,7 @@ class TaskExecutionEngine:
                 # 输出步骤完成事件
                 done_info = {
                     "step_name": step.get("name", ""),
+                    "step_type": step.get("type", ""),
                     "agent_name": step.get("agent_name", ""),
                     "step_index": step_checkpoint_index,
                     "total_steps": len(execution.steps) + 1,
@@ -264,6 +266,7 @@ class TaskExecutionEngine:
                 # 输出步骤完成事件（失败）
                 done_info = {
                     "step_name": step.get("name", ""),
+                    "step_type": step.get("type", ""),
                     "agent_name": step.get("agent_name", ""),
                     "step_index": step_checkpoint_index,
                     "total_steps": len(execution.steps) + 1,
@@ -428,6 +431,7 @@ class TaskExecutionEngine:
         execution_id: str,
         session_id: str,
         user_id: str,
+        supplementary_message: str | None = None,
     ) -> dict[str, Any]:
         """从断点恢复执行
 
@@ -437,6 +441,7 @@ class TaskExecutionEngine:
             execution_id: 执行记录ID
             session_id: 会话ID
             user_id: 用户ID
+            supplementary_message: 补充需求，追加到原始请求上下文中
 
         Returns:
             执行结果字典
@@ -450,6 +455,19 @@ class TaskExecutionEngine:
                 "status": "error",
                 "message": f"任务状态不允许恢复: {execution.status.value}",
             }
+
+        # 记录补充需求
+        if supplementary_message and supplementary_message.strip():
+            execution.supplementary_messages.append(supplementary_message.strip())
+
+        # 构建包含补充需求的完整用户消息
+        user_message = execution.original_message
+        if execution.supplementary_messages:
+            supplement_parts = "\n\n".join(
+                f"[补充需求{i+1}] {msg}"
+                for i, msg in enumerate(execution.supplementary_messages)
+            )
+            user_message = f"{execution.original_message}\n\n{supplement_parts}"
 
         # 恢复为运行状态
         execution.status = TaskStatus.RUNNING
@@ -475,9 +493,12 @@ class TaskExecutionEngine:
             try:
                 checkpoint = await self._execute_step(
                     execution, step, step_checkpoint_index,
-                    execution.original_message, session_id, user_id, session, None,
+                    user_message, session_id, user_id, session, None,
                 )
                 await self._store.save_checkpoint(execution.execution_id, checkpoint)
+
+                # 重新加载执行记录，确保后续步骤能看到最新的 checkpoints
+                execution = await self._store.get_execution(execution.execution_id) or execution
 
                 if checkpoint.status == StepStatus.FAILED:
                     # 使用故障隔离策略处理步骤失败
@@ -578,7 +599,9 @@ class TaskExecutionEngine:
         根据协作模式生成不同的步骤列表：
           - DIRECT: 单步Agent调用
           - SELECTOR: Agent调用 + 审核
-          - SWARM: 多Agent调用 + 汇总
+          - SWARM + cross_system: PARALLEL并行编排
+          - SWARM + complex_task: DEBATE辩论编排
+          - SWARM + 其他: 多Agent调用 + 汇总
 
         对于包含敏感操作的步骤，会自动在操作前插入人工确认步骤。
 
@@ -591,7 +614,6 @@ class TaskExecutionEngine:
         steps: list[dict[str, Any]] = []
 
         if intent.collaboration_mode == CollaborationMode.DIRECT:
-            # DIRECT模式下，如果意图本身需要审核，插入确认步骤
             if intent.review_required:
                 steps.append({
                     "type": StepType.HUMAN_CONFIRM.value,
@@ -607,7 +629,6 @@ class TaskExecutionEngine:
             })
 
         elif intent.collaboration_mode == CollaborationMode.SELECTOR:
-            # SELECTOR模式下，敏感操作前插入确认步骤
             if intent.review_required:
                 steps.append({
                     "type": StepType.HUMAN_CONFIRM.value,
@@ -629,63 +650,210 @@ class TaskExecutionEngine:
                 })
 
         elif intent.collaboration_mode == CollaborationMode.SWARM:
-            # SWARM模式：根据子任务列表规划多步
-            # 每个子任务根据内容智能路由到对应的领域 Agent
-            default_agent = intent.target_agent
-            if default_agent in ("Swarm",):
-                default_agent = "OfficeAssistant"
-
-            if intent.sub_tasks:
-                for idx, sub_task in enumerate(intent.sub_tasks):
-                    # 根据子任务内容解析目标 Agent
-                    resolved_agent = self._resolve_agent_for_sub_task(sub_task, default_agent)
-                    # 检查子任务是否包含敏感操作，如果是则插入确认步骤
-                    if self._is_sensitive_action(sub_task):
-                        steps.append({
-                            "type": StepType.HUMAN_CONFIRM.value,
-                            "name": f"确认: {sub_task}",
-                            "agent_name": resolved_agent,
-                            "confirm_type": "sensitive_action",
-                            "confirm_reason": f"即将执行「{sub_task}」，此操作需要确认后才能继续",
-                        })
-                    steps.append({
-                        "type": StepType.AGENT_CALL.value,
-                        "name": sub_task,
-                        "agent_name": resolved_agent,
-                        "sub_task_index": idx,
-                    })
+            # cross_system 意图 -> PARALLEL 并行编排
+            if intent.intent == "cross_system":
+                steps = self._plan_parallel_steps(intent)
+            # complex_task 意图 -> DEBATE 辩论编排
+            elif intent.intent == "complex_task":
+                steps = self._plan_debate_steps(intent)
+            # 其他 SWARM 意图 -> 原有的多步编排
             else:
-                # 没有子任务时，检查意图是否需要确认
-                if intent.review_required:
+                steps = self._plan_swarm_steps(intent)
+
+        return steps
+
+    def _plan_parallel_steps(self, intent: IntentResult) -> list[dict[str, Any]]:
+        """为 cross_system 意图规划 PARALLEL 并行编排步骤
+
+        PARALLEL 模式：多个 Agent 并行执行同一任务，Aggregator 汇总结果。
+        步骤规划：
+          1. 并行执行步骤（包含所有参与的 Agent）
+          2. 结果汇总步骤
+
+        Args:
+            intent: 意图分类结果
+
+        Returns:
+            步骤列表
+        """
+        agent_names = self._resolve_parallel_agents(intent)
+        steps: list[dict[str, Any]] = []
+
+        if intent.review_required:
+            steps.append({
+                "type": StepType.HUMAN_CONFIRM.value,
+                "name": "确认并行执行",
+                "agent_name": "Aggregator",
+                "confirm_type": "sensitive_action",
+                "confirm_reason": f"即将并行调用 {', '.join(agent_names)} 执行任务，请确认是否继续",
+            })
+
+        steps.append({
+            "type": StepType.PARALLEL_EXEC.value,
+            "name": f"并行执行（{', '.join(agent_names)}）",
+            "agent_name": "Aggregator",
+            "parallel_agents": agent_names,
+        })
+
+        steps.append({
+            "type": StepType.AGGREGATE.value,
+            "name": "汇总并行结果",
+            "agent_name": "Aggregator",
+        })
+
+        return steps
+
+    def _plan_debate_steps(self, intent: IntentResult) -> list[dict[str, Any]]:
+        """为 complex_task 意图规划 DEBATE 辩论编排步骤
+
+        DEBATE 模式：多个 Agent 从不同角度辩论，Judge 裁决。
+        步骤规划：
+          1. 各轮辩论步骤
+          2. 裁判裁决步骤
+
+        Args:
+            intent: 意图分类结果
+
+        Returns:
+            步骤列表
+        """
+        agent_names = self._resolve_debate_agents(intent)
+        debate_rounds = 3
+        steps: list[dict[str, Any]] = []
+
+        if intent.review_required:
+            steps.append({
+                "type": StepType.HUMAN_CONFIRM.value,
+                "name": "确认辩论执行",
+                "agent_name": "Judge",
+                "confirm_type": "sensitive_action",
+                "confirm_reason": f"即将启动辩论模式（{', '.join(agent_names)}），请确认是否继续",
+            })
+
+        for round_idx in range(debate_rounds):
+            round_label = "初始立场" if round_idx == 0 else f"第{round_idx + 1}轮辩论"
+            steps.append({
+                "type": StepType.DEBATE_ROUND.value,
+                "name": f"辩论 - {round_label}",
+                "agent_name": "Judge",
+                "debate_agents": agent_names,
+                "round_index": round_idx,
+                "total_rounds": debate_rounds,
+            })
+
+        steps.append({
+            "type": StepType.AGGREGATE.value,
+            "name": "裁判裁决",
+            "agent_name": "Judge",
+        })
+
+        return steps
+
+    def _plan_swarm_steps(self, intent: IntentResult) -> list[dict[str, Any]]:
+        """为普通 SWARM 意图规划多步编排步骤
+
+        Args:
+            intent: 意图分类结果
+
+        Returns:
+            步骤列表
+        """
+        steps: list[dict[str, Any]] = []
+        default_agent = intent.target_agent
+        if default_agent in ("Swarm",):
+            default_agent = "OfficeAssistant"
+
+        if intent.sub_tasks:
+            for idx, sub_task in enumerate(intent.sub_tasks):
+                resolved_agent = self._resolve_agent_for_sub_task(sub_task, default_agent)
+                if self._is_sensitive_action(sub_task):
                     steps.append({
                         "type": StepType.HUMAN_CONFIRM.value,
-                        "name": f"确认操作: {default_agent}",
-                        "agent_name": default_agent,
+                        "name": f"确认: {sub_task}",
+                        "agent_name": resolved_agent,
                         "confirm_type": "sensitive_action",
-                        "confirm_reason": f"即将执行 {default_agent} 的操作，请确认是否继续",
+                        "confirm_reason": f"即将执行「{sub_task}」，此操作需要确认后才能继续",
                     })
                 steps.append({
                     "type": StepType.AGENT_CALL.value,
-                    "name": f"调用{default_agent}",
-                    "agent_name": default_agent,
+                    "name": sub_task,
+                    "agent_name": resolved_agent,
+                    "sub_task_index": idx,
                 })
-
+        else:
             if intent.review_required:
                 steps.append({
-                    "type": StepType.REVIEW.value,
-                    "name": "审核结果",
-                    "agent_name": "Reviewer",
+                    "type": StepType.HUMAN_CONFIRM.value,
+                    "name": f"确认操作: {default_agent}",
+                    "agent_name": default_agent,
+                    "confirm_type": "sensitive_action",
+                    "confirm_reason": f"即将执行 {default_agent} 的操作，请确认是否继续",
                 })
+            steps.append({
+                "type": StepType.AGENT_CALL.value,
+                "name": f"调用{default_agent}",
+                "agent_name": default_agent,
+            })
 
-            # 多步任务最后一步是汇总
-            if len(steps) > 1:
-                steps.append({
-                    "type": StepType.AGGREGATE.value,
-                    "name": "汇总结果",
-                    "agent_name": "OfficeAssistant",
-                })
+        if intent.review_required:
+            steps.append({
+                "type": StepType.REVIEW.value,
+                "name": "审核结果",
+                "agent_name": "Reviewer",
+            })
+
+        if len(steps) > 1:
+            steps.append({
+                "type": StepType.AGGREGATE.value,
+                "name": "汇总结果",
+                "agent_name": "OfficeAssistant",
+            })
 
         return steps
+
+    def _resolve_parallel_agents(self, intent: IntentResult) -> list[str]:
+        """根据意图和子任务解析 PARALLEL 模式需要的 Agent 列表
+
+        优先从子任务中提取，否则根据意图类型选择默认组合。
+
+        Args:
+            intent: 意图分类结果
+
+        Returns:
+            Agent 名称列表
+        """
+        if intent.sub_tasks:
+            agents = []
+            for sub_task in intent.sub_tasks:
+                agent = self._resolve_agent_for_sub_task(sub_task, "")
+                if agent and agent not in agents:
+                    agents.append(agent)
+            if agents:
+                return agents[:4]
+
+        return ["KnowledgeAgent", "CRMAgent", "FinanceAgent"]
+
+    def _resolve_debate_agents(self, intent: IntentResult) -> list[str]:
+        """根据意图和子任务解析 DEBATE 模式需要的 Agent 列表
+
+        辩论需要至少两个不同视角的 Agent。
+
+        Args:
+            intent: 意图分类结果
+
+        Returns:
+            Agent 名称列表
+        """
+        if intent.sub_tasks:
+            agents = []
+            for sub_task in intent.sub_tasks:
+                agent = self._resolve_agent_for_sub_task(sub_task, "")
+                if agent and agent not in agents:
+                    agents.append(agent)
+            if len(agents) >= 2:
+                return agents[:4]
+
+        return ["KnowledgeAgent", "OfficeAssistant"]
 
     def _is_sensitive_action(self, task_name: str) -> bool:
         """判断子任务是否包含敏感操作
@@ -757,6 +925,42 @@ class TaskExecutionEngine:
                 checkpoint.error = result.get("message", "执行失败")
                 checkpoint.output_data = result
 
+        elif step_type == StepType.PARALLEL_EXEC:
+            result = await self._execute_parallel_step(
+                execution, step, user_message, session_id, user_id, session, knowledge_base_id,
+            )
+            if result.get("status") == "success":
+                checkpoint.status = StepStatus.COMPLETED
+                checkpoint.output_data = result
+            else:
+                checkpoint.status = StepStatus.FAILED
+                checkpoint.error = result.get("message", "并行执行失败")
+                checkpoint.output_data = result
+
+        elif step_type == StepType.DEBATE_ROUND:
+            result = await self._execute_debate_round(
+                execution, step, user_message, session_id, user_id, session, knowledge_base_id,
+            )
+            if result.get("status") == "success":
+                checkpoint.status = StepStatus.COMPLETED
+                checkpoint.output_data = result
+            else:
+                checkpoint.status = StepStatus.FAILED
+                checkpoint.error = result.get("message", "辩论执行失败")
+                checkpoint.output_data = result
+
+        elif step_type == StepType.VOTE_EXEC:
+            result = await self._execute_vote_step(
+                execution, step, user_message, session_id, user_id, session, knowledge_base_id,
+            )
+            if result.get("status") == "success":
+                checkpoint.status = StepStatus.COMPLETED
+                checkpoint.output_data = result
+            else:
+                checkpoint.status = StepStatus.FAILED
+                checkpoint.error = result.get("message", "投票执行失败")
+                checkpoint.output_data = result
+
         elif step_type == StepType.REVIEW:
             # 审核步骤：调用Reviewer Agent对前一步骤的输出进行审核
             prev_output = ""
@@ -799,11 +1003,17 @@ class TaskExecutionEngine:
                 checkpoint.output_data = {"reviewed": True, "review_message": "无可审核内容，自动通过"}
 
         elif step_type == StepType.AGGREGATE:
-            # 汇总之前的所有Agent调用结果，生成综合回复
+            # 汇总之前的所有步骤结果，生成综合回复
             agent_results = {}
             agent_messages = []
+            advanced_step_types = {
+                StepType.AGENT_CALL,
+                StepType.PARALLEL_EXEC,
+                StepType.DEBATE_ROUND,
+                StepType.VOTE_EXEC,
+            }
             for cp in execution.checkpoints:
-                if cp.step_type == StepType.AGENT_CALL and cp.status == StepStatus.COMPLETED:
+                if cp.step_type in advanced_step_types and cp.status == StepStatus.COMPLETED:
                     agent_results[cp.agent_name] = cp.output_data
                     msg = cp.output_data.get("message", "") if cp.output_data else ""
                     if msg:
@@ -1019,7 +1229,8 @@ class TaskExecutionEngine:
                     "agent_name": step_agent,
                 }
 
-            output = result.messages[-1].content if result and result.messages else "处理完成"
+            from agent.teams.advanced_orchestration import _extract_agent_response
+            output = _extract_agent_response(result) if result else "处理完成"
             return {
                 "status": "success",
                 "message": output,
@@ -1035,6 +1246,273 @@ class TaskExecutionEngine:
                 "message": str(e),
                 "agent_name": step.get("agent_name", ""),
             }
+
+    async def _execute_parallel_step(
+        self,
+        execution: TaskExecution,
+        step: dict[str, Any],
+        user_message: str,
+        session_id: str,
+        user_id: str,
+        session: SessionState | None,
+        knowledge_base_id: str | None,
+    ) -> dict[str, Any]:
+        """执行 PARALLEL 并行编排步骤
+
+        使用 ParallelTeam 并行执行多个 Agent，收集各 Agent 的结果。
+
+        Args:
+            execution: 任务执行记录
+            step: 步骤定义（包含 parallel_agents 字段）
+            user_message: 用户原始消息
+            session_id: 会话ID
+            user_id: 用户ID
+            session: 会话状态
+            knowledge_base_id: 知识库ID
+
+        Returns:
+            执行结果字典
+        """
+        try:
+            from agent.teams.advanced_orchestration import ParallelTeam
+
+            agent_names = step.get("parallel_agents", ["KnowledgeAgent", "CRMAgent", "FinanceAgent"])
+            team = ParallelTeam(agent_names=agent_names)
+
+            # 构建任务描述：包含原始请求和前置步骤结果
+            task_parts = [user_message]
+            prev_results = self._collect_prev_results(execution)
+            if prev_results:
+                task_parts.append("[前置步骤结果]\n" + "\n".join(prev_results))
+            task = "\n\n".join(task_parts)
+
+            result = await team.run(task=task)
+
+            # 格式化并行结果为可读文本
+            formatted_parts = []
+            for name, agent_result in result.agent_results.items():
+                formatted_parts.append(f"**{name}**的分析:\n{agent_result}")
+            formatted = "\n\n---\n\n".join(formatted_parts)
+            if result.aggregated:
+                formatted = result.aggregated
+
+            return {
+                "status": "success",
+                "message": formatted,
+                "agent_name": "Aggregator",
+                "parallel_agents": agent_names,
+                "agent_results": result.agent_results,
+                "duration_ms": result.duration_ms,
+            }
+
+        except Exception as e:
+            logger.error("并行执行失败: step=%s error=%s", step.get("name", ""), e)
+            return {
+                "status": "error",
+                "message": str(e),
+                "agent_name": step.get("agent_name", "Aggregator"),
+            }
+
+    async def _execute_debate_round(
+        self,
+        execution: TaskExecution,
+        step: dict[str, Any],
+        user_message: str,
+        session_id: str,
+        user_id: str,
+        session: SessionState | None,
+        knowledge_base_id: str | None,
+    ) -> dict[str, Any]:
+        """执行 DEBATE 辩论步骤
+
+        每轮辩论中，各 Agent 独立或基于其他 Agent 观点进行分析。
+        第一轮独立分析，后续轮次基于其他 Agent 观点反驳/补充。
+
+        Args:
+            execution: 任务执行记录
+            step: 步骤定义（包含 debate_agents, round_index, total_rounds 字段）
+            user_message: 用户原始消息
+            session_id: 会话ID
+            user_id: 用户ID
+            session: 会话状态
+            knowledge_base_id: 知识库ID
+
+        Returns:
+            执行结果字典
+        """
+        try:
+            from agent.teams.advanced_orchestration import DebateTeam, _extract_agent_response
+
+            agent_names = step.get("debate_agents", ["KnowledgeAgent", "OfficeAssistant"])
+            round_index = step.get("round_index", 0)
+            total_rounds = step.get("total_rounds", 3)
+
+            # 收集前置辩论轮次的结果作为上下文
+            prev_positions: dict[str, str] = {}
+            for cp in execution.checkpoints:
+                if cp.step_type == StepType.DEBATE_ROUND and cp.status == StepStatus.COMPLETED and cp.output_data:
+                    prev_positions_data = cp.output_data.get("positions", {})
+                    if prev_positions_data:
+                        prev_positions = prev_positions_data
+
+            # 为每个 Agent 创建实例并执行当前轮次
+            agents = []
+            for name in agent_names:
+                try:
+                    agent = await create_domain_agent(name)
+                    agents.append(agent)
+                except Exception as e:
+                    logger.warning("辩论轮次初始化 Agent %s 失败: %s", name, e)
+
+            if not agents:
+                return {
+                    "status": "error",
+                    "message": "所有辩论 Agent 均不可用",
+                    "agent_name": "Judge",
+                }
+
+            positions: dict[str, str] = dict(prev_positions)
+
+            if round_index == 0:
+                # 第一轮：各 Agent 独立给出初始立场
+                for agent in agents:
+                    try:
+                        result = await agent.run(task=f"请分析以下问题并给出你的观点: {user_message}")
+                        positions[agent.name] = _extract_agent_response(result)
+                    except Exception as e:
+                        positions[agent.name] = f"分析失败: {e}"
+            else:
+                # 后续轮次：基于其他 Agent 观点反驳/补充
+                for agent in agents:
+                    other_views = {
+                        name: pos for name, pos in positions.items() if name != agent.name
+                    }
+                    counter_prompt = (
+                        f"原始问题: {user_message}\n\n"
+                        f"其他观点:\n"
+                        + "\n".join(f"【{name}】{view[:300]}" for name, view in other_views.items())
+                        + f"\n\n请基于以上观点进行反驳或补充（第{round_index + 1}轮）。"
+                    )
+                    try:
+                        result = await agent.run(task=counter_prompt)
+                        positions[agent.name] = _extract_agent_response(result)
+                    except Exception as e:
+                        logger.warning("辩论第%d轮 Agent %s 失败: %s", round_index + 1, agent.name, e)
+
+            # 格式化当前轮次结果
+            round_label = "初始立场" if round_index == 0 else f"第{round_index + 1}轮辩论"
+            formatted_parts = []
+            for name, pos in positions.items():
+                formatted_parts.append(f"**{name}**的观点:\n{pos}")
+            formatted = f"## {round_label}\n\n" + "\n\n---\n\n".join(formatted_parts)
+
+            return {
+                "status": "success",
+                "message": formatted,
+                "agent_name": "Judge",
+                "positions": positions,
+                "round_index": round_index,
+                "total_rounds": total_rounds,
+            }
+
+        except Exception as e:
+            logger.error("辩论执行失败: step=%s error=%s", step.get("name", ""), e)
+            return {
+                "status": "error",
+                "message": str(e),
+                "agent_name": step.get("agent_name", "Judge"),
+            }
+
+    async def _execute_vote_step(
+        self,
+        execution: TaskExecution,
+        step: dict[str, Any],
+        user_message: str,
+        session_id: str,
+        user_id: str,
+        session: SessionState | None,
+        knowledge_base_id: str | None,
+    ) -> dict[str, Any]:
+        """执行 VOTE 投票步骤
+
+        各 Agent 独立回答同一问题，多数决定最终结果。
+
+        Args:
+            execution: 任务执行记录
+            step: 步骤定义
+            user_message: 用户原始消息
+            session_id: 会话ID
+            user_id: 用户ID
+            session: 会话状态
+            knowledge_base_id: 知识库ID
+
+        Returns:
+            执行结果字典
+        """
+        try:
+            from agent.teams.advanced_orchestration import VoteTeam
+
+            agent_names = step.get("vote_agents", ["KnowledgeAgent", "OfficeAssistant", "HRAgent"])
+            team = VoteTeam(agent_names=agent_names)
+
+            # 构建任务描述
+            task_parts = [user_message]
+            prev_results = self._collect_prev_results(execution)
+            if prev_results:
+                task_parts.append("[前置步骤结果]\n" + "\n".join(prev_results))
+            task = "\n\n".join(task_parts)
+
+            result = await team.run(task=task)
+
+            # 格式化投票结果
+            formatted = f"## 投票结果\n\n"
+            formatted += f"**胜出选项**: {result.winner}\n"
+            formatted += f"**置信度**: {result.confidence:.1%}\n\n"
+            for name, vote in result.votes.items():
+                formatted += f"- **{name}**: {vote}\n"
+
+            return {
+                "status": "success",
+                "message": formatted,
+                "agent_name": "Voter",
+                "votes": result.votes,
+                "vote_counts": result.vote_counts,
+                "winner": result.winner,
+                "confidence": result.confidence,
+            }
+
+        except Exception as e:
+            logger.error("投票执行失败: step=%s error=%s", step.get("name", ""), e)
+            return {
+                "status": "error",
+                "message": str(e),
+                "agent_name": step.get("agent_name", "Voter"),
+            }
+
+    def _collect_prev_results(self, execution: TaskExecution) -> list[str]:
+        """收集前置步骤的执行结果
+
+        从检查点中提取已完成步骤的输出，用于构建后续步骤的上下文。
+
+        Args:
+            execution: 任务执行记录
+
+        Returns:
+            前置步骤结果列表
+        """
+        prev_results = []
+        result_step_types = {
+            StepType.AGENT_CALL,
+            StepType.PARALLEL_EXEC,
+            StepType.DEBATE_ROUND,
+            StepType.VOTE_EXEC,
+        }
+        for cp in execution.checkpoints:
+            if cp.step_type in result_step_types and cp.status == StepStatus.COMPLETED and cp.output_data:
+                msg = cp.output_data.get("message", "")
+                if msg:
+                    prev_results.append(f"[{cp.agent_name}的结果] {msg}")
+        return prev_results
 
     async def retry_step(
         self,
@@ -1267,6 +1745,11 @@ class TaskExecutionEngine:
                 step_info["confirm_type"] = cp.output_data.get("confirm_type", "")
                 step_info["confirm_reason"] = cp.output_data.get("confirm_reason", "")
                 step_info["options"] = cp.output_data.get("options", [])
+            # 已完成步骤附加输出结果，供前端展示步骤执行内容
+            if cp.status in (StepStatus.COMPLETED, StepStatus.DEGRADED) and cp.output_data:
+                msg = cp.output_data.get("message", "")
+                if msg:
+                    step_info["result"] = msg
             step_details.append(step_info)
 
         return {
