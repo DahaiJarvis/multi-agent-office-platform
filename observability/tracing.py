@@ -99,7 +99,7 @@ logger = logging.getLogger(__name__)
 _tracer_provider: TracerProvider | None = None
 
 
-def setup_tracing(service_name: str, endpoint: str) -> None:
+def setup_tracing(service_name: str, endpoint: str, enabled: bool = True) -> None:
     """初始化 OpenTelemetry 追踪
 
     配置 OpenTelemetry SDK 并连接到 OTLP Exporter。
@@ -108,19 +108,24 @@ def setup_tracing(service_name: str, endpoint: str) -> None:
     -------------------------------------------------------------------------
     1. 创建 Resource（服务标识）
     2. 创建 TracerProvider
-    3. 配置 OTLP Span Exporter
-    4. 添加 BatchSpanProcessor
-    5. 设置为全局 TracerProvider
+    3. 若 enabled=True，配置 OTLP Span Exporter 并添加 BatchSpanProcessor
+    4. 设置为全局 TracerProvider
     -------------------------------------------------------------------------
 
     Args:
         service_name: 服务名称，用于标识追踪来源
         endpoint: OTLP Exporter 地址，格式：host:port
+        enabled: 是否启用 OTLP 追踪导出，默认 True。当本地无 Collector 时设为 False 可避免连接报错
     """
     global _tracer_provider
 
     resource = Resource.create({"service.name": service_name})
     _tracer_provider = TracerProvider(resource=resource)
+
+    if not enabled:
+        logger.info("OpenTelemetry 追踪导出已禁用（OTEL_ENABLED=false）")
+        trace.set_tracer_provider(_tracer_provider)
+        return
 
     try:
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter

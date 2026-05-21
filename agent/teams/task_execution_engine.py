@@ -24,6 +24,7 @@
 
 import logging
 import time
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from agent.core.task_checkpoint import (
@@ -72,6 +73,217 @@ class TaskExecutionEngine:
         self._store = checkpoint_store or get_task_checkpoint_store()
         self._fault_policy = fault_policy or get_fault_isolation_policy()
         self._confirm_manager = confirm_manager or get_human_confirm_manager()
+
+    async def create_execution_record(
+        self,
+        user_message: str,
+        session_id: str,
+        user_id: str,
+        intent: IntentResult,
+        session: SessionState | None = None,
+        knowledge_base_id: str | None = None,
+        failure_policy: FailurePolicy = FailurePolicy.RELAXED,
+    ) -> TaskExecution:
+        """创建任务执行记录（不含执行）
+
+        在流式模式下，先创建执行记录获取 execution_id，
+        然后再逐步执行，以便前端能尽早订阅任务事件。
+
+        Args:
+            与 execute() 参数一致
+
+        Returns:
+            TaskExecution 执行记录对象
+        """
+        execution = TaskExecution(
+            session_id=session_id,
+            user_id=user_id,
+            original_message=user_message,
+            intent_result={
+                "intent": intent.intent,
+                "confidence": intent.confidence,
+                "target_agent": intent.target_agent,
+                "collaboration_mode": intent.collaboration_mode.value,
+                "review_required": intent.review_required,
+                "sub_tasks": intent.sub_tasks,
+            },
+            collaboration_mode=intent.collaboration_mode.value,
+            failure_policy=failure_policy,
+        )
+
+        # 保存意图分类步骤的检查点（已完成）
+        intent_checkpoint = StepCheckpoint(
+            step_index=0,
+            step_type=StepType.INTENT_CLASSIFY,
+            step_name="意图分类",
+            status=StepStatus.COMPLETED,
+            output_data={
+                "intent": intent.intent,
+                "confidence": intent.confidence,
+                "target_agent": intent.target_agent,
+                "collaboration_mode": intent.collaboration_mode.value,
+            },
+        )
+        execution.checkpoints.append(intent_checkpoint)
+
+        # 规划执行步骤
+        steps = self._plan_steps(intent)
+        execution.steps = steps
+
+        # 保存执行记录
+        await self._store.create_execution(execution)
+
+        # 发布任务开始事件
+        await self._publish_task_event(execution, "task_started")
+
+        return execution
+
+    async def execute_with_progress(
+        self,
+        execution: TaskExecution,
+        user_message: str,
+        session_id: str,
+        user_id: str,
+        intent: IntentResult,
+        session: SessionState | None = None,
+        knowledge_base_id: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """带进度事件的任务执行（异步生成器模式）
+
+        在流式模式下使用，逐步执行并yield步骤进度事件，
+        上层路由可将其作为流式事件输出到前端。
+
+        Yields:
+            步骤进度事件字典：
+            - {"type": "step_start", "step_name": ..., "agent_name": ..., ...}
+            - {"type": "step_done", "step_name": ..., "status": ..., ...}
+
+        最后一次yield为执行结果：
+            - {"type": "result", "status": ..., "message": ..., ...}
+        """
+        # 逐步执行
+        for step_index in range(len(execution.steps)):
+            step = execution.steps[step_index]
+            step_checkpoint_index = step_index + 1  # +1 因为步骤0是意图分类
+
+            # 跳过已完成的步骤（断点恢复时）
+            if step_checkpoint_index < execution.current_step:
+                continue
+
+            # 更新心跳
+            await self._store.update_heartbeat(execution.execution_id)
+
+            # 更新任务状态为运行中
+            execution.status = TaskStatus.RUNNING
+            await self._store.update_execution(execution)
+
+            # 输出步骤开始事件
+            step_info = {
+                "step_name": step.get("name", ""),
+                "agent_name": step.get("agent_name", ""),
+                "step_index": step_checkpoint_index,
+                "total_steps": len(execution.steps) + 1,
+            }
+            yield {"type": "step_start", **step_info}
+            # 发布步骤开始事件到事件总线
+            await publish_event(
+                EventType.TASK_STEP_START,
+                session_id,
+                {
+                    "execution_id": execution.execution_id,
+                    "step_index": step_checkpoint_index,
+                    "step_name": step.get("name", ""),
+                    "agent_name": step.get("agent_name", ""),
+                    "total_steps": len(execution.steps) + 1,
+                },
+            )
+
+            try:
+                checkpoint = await self._execute_step(
+                    execution, step, step_checkpoint_index,
+                    user_message, session_id, user_id, session, knowledge_base_id,
+                )
+                await self._store.save_checkpoint(execution.execution_id, checkpoint)
+
+                # 输出步骤完成事件
+                done_info = {
+                    "step_name": step.get("name", ""),
+                    "agent_name": step.get("agent_name", ""),
+                    "step_index": step_checkpoint_index,
+                    "total_steps": len(execution.steps) + 1,
+                    "status": checkpoint.status.value,
+                }
+                # 携带步骤输出结果，供前端展示
+                if checkpoint.output_data:
+                    msg = checkpoint.output_data.get("message", "")
+                    if msg:
+                        done_info["message"] = msg
+                    err = checkpoint.error
+                    if err:
+                        done_info["error"] = err
+                yield {"type": "step_done", **done_info}
+
+                # 如果步骤需要人工确认（WAITING_CONFIRM），暂停执行
+                if checkpoint.status == StepStatus.WAITING_CONFIRM:
+                    # 重新加载执行记录（_execute_step 可能已修改状态为 PAUSED）
+                    execution = await self._store.get_execution(execution.execution_id) or execution
+                    if execution.status == TaskStatus.PAUSED:
+                        await self._publish_task_event(execution, "task_paused")
+                        yield {"type": "result", **self._build_result(execution)}
+                        return
+
+                # 如果步骤失败，启动故障隔离策略
+                if checkpoint.status == StepStatus.FAILED:
+                    recovery_checkpoint = await self._fault_policy.handle_step_failure(
+                        execution, step_checkpoint_index,
+                        error=Exception(checkpoint.error),
+                    )
+                    await self._store.save_checkpoint(execution.execution_id, recovery_checkpoint)
+                    execution = await self._store.get_execution(execution.execution_id) or execution
+
+                    if execution.status == TaskStatus.PAUSED:
+                        await self._publish_task_event(execution, "task_paused")
+                        yield {"type": "result", **self._build_result(execution)}
+                        return
+
+                    if recovery_checkpoint.status == StepStatus.DEGRADED:
+                        logger.info(
+                            "步骤降级执行完成: step=%s fallback=%s",
+                            recovery_checkpoint.step_name, recovery_checkpoint.fallback_used,
+                        )
+
+            except Exception as e:
+                logger.error("步骤执行异常: step=%s error=%s", step.get("name", ""), e)
+
+                recovery_checkpoint = await self._fault_policy.handle_step_failure(
+                    execution, step_checkpoint_index, error=e,
+                )
+                await self._store.save_checkpoint(execution.execution_id, recovery_checkpoint)
+                execution = await self._store.get_execution(execution.execution_id) or execution
+
+                # 输出步骤完成事件（失败）
+                done_info = {
+                    "step_name": step.get("name", ""),
+                    "agent_name": step.get("agent_name", ""),
+                    "step_index": step_checkpoint_index,
+                    "total_steps": len(execution.steps) + 1,
+                    "status": "failed",
+                }
+                yield {"type": "step_done", **done_info}
+
+                if execution.status == TaskStatus.PAUSED:
+                    await self._publish_task_event(execution, "task_paused")
+                    yield {"type": "result", **self._build_result(execution)}
+                    return
+
+        # 所有步骤完成
+        execution.status = TaskStatus.COMPLETED
+        execution.updated_at = time.time()
+        await self._store.update_execution(execution)
+        await self._store.remove_from_running(execution.execution_id)
+        await self._publish_task_event(execution, "task_completed")
+
+        yield {"type": "result", **self._build_result(execution)}
 
     async def execute(
         self,
@@ -304,6 +516,62 @@ class TaskExecutionEngine:
 
         return self._build_result(execution)
 
+    # 敏感操作关键词，包含这些关键词的子任务需要人工确认
+    SENSITIVE_ACTION_KEYWORDS = [
+        "发送邮件", "发邮件", "邮件发送",
+        "提交审批", "审批操作",
+        "删除", "修改数据",
+        "提交报销", "付款",
+    ]
+
+    # 子任务关键词到领域 Agent 的映射
+    # 用于将子任务智能路由到对应的专业 Agent
+    SUB_TASK_AGENT_MAP: dict[str, str] = {
+        "审批": "ApprovalAgent",
+        "待审批": "ApprovalAgent",
+        "OA": "ApprovalAgent",
+        "邮件": "EmailAgent",
+        "收件箱": "EmailAgent",
+        "日程": "CalendarAgent",
+        "会议": "CalendarAgent",
+        "日历": "CalendarAgent",
+        "客户": "CRMAgent",
+        "商机": "CRMAgent",
+        "CRM": "CRMAgent",
+        "考勤": "HRAgent",
+        "请假": "HRAgent",
+        "薪资": "HRAgent",
+        "假期": "HRAgent",
+        "HR": "HRAgent",
+        "报销": "FinanceAgent",
+        "预算": "FinanceAgent",
+        "发票": "FinanceAgent",
+        "财务": "FinanceAgent",
+        "知识库": "KnowledgeAgent",
+        "文档": "KnowledgeAgent",
+        "搜索": "KnowledgeAgent",
+        "消息": "OfficeAssistant",
+        "通知": "OfficeAssistant",
+    }
+
+    def _resolve_agent_for_sub_task(self, sub_task: str, default_agent: str) -> str:
+        """根据子任务内容智能解析目标 Agent
+
+        通过关键词匹配将子任务路由到最合适的领域 Agent。
+        如果无法匹配，则使用默认 Agent。
+
+        Args:
+            sub_task: 子任务描述
+            default_agent: 默认 Agent 名称
+
+        Returns:
+            匹配到的 Agent 名称
+        """
+        for keyword, agent_name in self.SUB_TASK_AGENT_MAP.items():
+            if keyword in sub_task:
+                return agent_name
+        return default_agent
+
     def _plan_steps(self, intent: IntentResult) -> list[dict[str, Any]]:
         """根据意图规划执行步骤
 
@@ -311,6 +579,8 @@ class TaskExecutionEngine:
           - DIRECT: 单步Agent调用
           - SELECTOR: Agent调用 + 审核
           - SWARM: 多Agent调用 + 汇总
+
+        对于包含敏感操作的步骤，会自动在操作前插入人工确认步骤。
 
         Args:
             intent: 意图分类结果
@@ -321,6 +591,15 @@ class TaskExecutionEngine:
         steps: list[dict[str, Any]] = []
 
         if intent.collaboration_mode == CollaborationMode.DIRECT:
+            # DIRECT模式下，如果意图本身需要审核，插入确认步骤
+            if intent.review_required:
+                steps.append({
+                    "type": StepType.HUMAN_CONFIRM.value,
+                    "name": f"确认操作: {intent.target_agent}",
+                    "agent_name": intent.target_agent,
+                    "confirm_type": "sensitive_action",
+                    "confirm_reason": f"即将执行 {intent.target_agent} 的操作，请确认是否继续",
+                })
             steps.append({
                 "type": StepType.AGENT_CALL.value,
                 "name": f"调用{intent.target_agent}",
@@ -328,6 +607,15 @@ class TaskExecutionEngine:
             })
 
         elif intent.collaboration_mode == CollaborationMode.SELECTOR:
+            # SELECTOR模式下，敏感操作前插入确认步骤
+            if intent.review_required:
+                steps.append({
+                    "type": StepType.HUMAN_CONFIRM.value,
+                    "name": f"确认操作: {intent.target_agent}",
+                    "agent_name": intent.target_agent,
+                    "confirm_type": "sensitive_action",
+                    "confirm_reason": f"即将执行 {intent.target_agent} 的操作，请确认是否继续",
+                })
             steps.append({
                 "type": StepType.AGENT_CALL.value,
                 "name": f"调用{intent.target_agent}",
@@ -342,19 +630,44 @@ class TaskExecutionEngine:
 
         elif intent.collaboration_mode == CollaborationMode.SWARM:
             # SWARM模式：根据子任务列表规划多步
+            # 每个子任务根据内容智能路由到对应的领域 Agent
+            default_agent = intent.target_agent
+            if default_agent in ("Swarm",):
+                default_agent = "OfficeAssistant"
+
             if intent.sub_tasks:
                 for idx, sub_task in enumerate(intent.sub_tasks):
+                    # 根据子任务内容解析目标 Agent
+                    resolved_agent = self._resolve_agent_for_sub_task(sub_task, default_agent)
+                    # 检查子任务是否包含敏感操作，如果是则插入确认步骤
+                    if self._is_sensitive_action(sub_task):
+                        steps.append({
+                            "type": StepType.HUMAN_CONFIRM.value,
+                            "name": f"确认: {sub_task}",
+                            "agent_name": resolved_agent,
+                            "confirm_type": "sensitive_action",
+                            "confirm_reason": f"即将执行「{sub_task}」，此操作需要确认后才能继续",
+                        })
                     steps.append({
                         "type": StepType.AGENT_CALL.value,
                         "name": sub_task,
-                        "agent_name": intent.target_agent,
+                        "agent_name": resolved_agent,
                         "sub_task_index": idx,
                     })
             else:
+                # 没有子任务时，检查意图是否需要确认
+                if intent.review_required:
+                    steps.append({
+                        "type": StepType.HUMAN_CONFIRM.value,
+                        "name": f"确认操作: {default_agent}",
+                        "agent_name": default_agent,
+                        "confirm_type": "sensitive_action",
+                        "confirm_reason": f"即将执行 {default_agent} 的操作，请确认是否继续",
+                    })
                 steps.append({
                     "type": StepType.AGENT_CALL.value,
-                    "name": f"调用{intent.target_agent}",
-                    "agent_name": intent.target_agent,
+                    "name": f"调用{default_agent}",
+                    "agent_name": default_agent,
                 })
 
             if intent.review_required:
@@ -369,10 +682,24 @@ class TaskExecutionEngine:
                 steps.append({
                     "type": StepType.AGGREGATE.value,
                     "name": "汇总结果",
-                    "agent_name": "Supervisor",
+                    "agent_name": "OfficeAssistant",
                 })
 
         return steps
+
+    def _is_sensitive_action(self, task_name: str) -> bool:
+        """判断子任务是否包含敏感操作
+
+        Args:
+            task_name: 子任务名称
+
+        Returns:
+            是否为敏感操作
+        """
+        for keyword in self.SENSITIVE_ACTION_KEYWORDS:
+            if keyword in task_name:
+                return True
+        return False
 
     async def _execute_step(
         self,
@@ -414,6 +741,9 @@ class TaskExecutionEngine:
             status=StepStatus.RUNNING,
             input_data=step,
         )
+
+        # 发布步骤开始事件
+        await self._publish_step_event(execution, "task_step_start", checkpoint)
 
         if step_type == StepType.AGENT_CALL:
             result = await self._execute_agent_call(
@@ -479,18 +809,19 @@ class TaskExecutionEngine:
                     if msg:
                         agent_messages.append(f"[{cp.agent_name}]: {msg}")
 
-            if agent_messages and agent_name:
+            if agent_messages:
                 try:
                     aggregate_task = (
                         "请汇总以下多个Agent的执行结果，生成一份综合回复:\n\n"
                         + "\n\n".join(agent_messages)
                     )
+                    # AGGREGATE 步骤使用 OfficeAssistant（Supervisor 不在 AGENT_CREATORS 中）
                     aggregate_result = await self._execute_agent_call(
                         execution,
                         {
                             "type": StepType.AGENT_CALL.value,
                             "name": step_name,
-                            "agent_name": agent_name,
+                            "agent_name": "OfficeAssistant",
                         },
                         aggregate_task,
                         session_id,
@@ -528,6 +859,16 @@ class TaskExecutionEngine:
             confirm_type_str = step.get("confirm_type", "sensitive_action")
             confirm_type = ConfirmType(confirm_type_str)
             confirm_reason = step.get("confirm_reason", step_name)
+
+            # 收集前置步骤的执行结果，作为确认上下文供用户预览
+            prev_results = []
+            for cp in execution.checkpoints:
+                if cp.step_type == StepType.AGENT_CALL and cp.status == StepStatus.COMPLETED and cp.output_data:
+                    msg = cp.output_data.get("message", "")
+                    if msg:
+                        prev_results.append(f"[{cp.agent_name}] {msg}")
+            if prev_results:
+                confirm_reason += "\n\n--- 已收集的信息 ---\n" + "\n\n".join(prev_results)
 
             confirm_request = await self._confirm_manager.request_confirm(
                 execution_id=execution.execution_id,
@@ -567,6 +908,14 @@ class TaskExecutionEngine:
             execution.error = f"等待人工确认: {step_name}"
             await self._store.update_execution(execution)
 
+        # 发布步骤完成/失败事件（WAITING_CONFIRM 不发布完成事件，等确认后再继续）
+        if checkpoint.status == StepStatus.COMPLETED:
+            await self._publish_step_event(execution, "step_completed", checkpoint)
+        elif checkpoint.status == StepStatus.FAILED:
+            await self._publish_step_event(execution, "step_failed", checkpoint)
+        elif checkpoint.status == StepStatus.SKIPPED:
+            await self._publish_step_event(execution, "step_completed", checkpoint)
+
         return checkpoint
 
     async def _execute_agent_call(
@@ -583,6 +932,9 @@ class TaskExecutionEngine:
 
         复用现有的团队创建和执行控制逻辑。
 
+        对于 SWARM 模式下的子任务步骤，使用步骤自身的 agent_name
+        创建 DIRECT 模式的领域 Agent 执行，而非使用原始意图创建团队。
+
         Args:
             execution: 任务执行记录
             step: 步骤定义
@@ -596,24 +948,56 @@ class TaskExecutionEngine:
             执行结果字典
         """
         try:
-            # 从意图结果重建IntentResult用于创建团队
-            intent_data = execution.intent_result
-            from agent.agents.supervisor import IntentResult, CollaborationMode
-            intent = IntentResult(
-                intent=intent_data.get("intent", ""),
-                confidence=intent_data.get("confidence", 0),
-                target_agent=intent_data.get("target_agent", ""),
-                collaboration_mode=CollaborationMode(intent_data.get("collaboration_mode", "direct")),
-                review_required=intent_data.get("review_required", False),
-                sub_tasks=intent_data.get("sub_tasks", []),
-            )
+            step_agent = step.get("agent_name", "")
+            step_name = step.get("name", "")
+            is_swarm = execution.collaboration_mode == "swarm"
 
-            # 创建团队
-            team = await create_team(intent)
+            # SWARM 模式下，每个子任务用步骤自身的 agent_name 创建 DIRECT 模式的领域 Agent
+            # 而不是用原始意图（target_agent="Swarm"）创建高级编排团队
+            if is_swarm and step_agent and step_agent not in ("Swarm",):
+                from agent.agents.supervisor import IntentResult, CollaborationMode
+                step_intent = IntentResult(
+                    intent="task_step",
+                    confidence=1.0,
+                    target_agent=step_agent,
+                    collaboration_mode=CollaborationMode.DIRECT,
+                    review_required=False,
+                )
+                team = await create_team(step_intent)
 
-            # 构建任务描述
-            from agent.teams.routing import _build_contextual_task
-            task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
+                # 构建子任务描述：包含原始请求和前置步骤结果，使 Agent 理解上下文
+                from agent.teams.routing import _build_contextual_task
+                task_parts = [f"[子任务] {step_name}"]
+                task_parts.append(f"[原始请求] {user_message}")
+
+                # 收集前置步骤的执行结果作为上下文
+                prev_results = []
+                for cp in execution.checkpoints:
+                    if cp.step_type == StepType.AGENT_CALL and cp.status == StepStatus.COMPLETED and cp.output_data:
+                        msg = cp.output_data.get("message", "")
+                        if msg:
+                            prev_results.append(f"[{cp.agent_name}的结果] {msg}")
+                if prev_results:
+                    task_parts.append("[前置步骤结果]\n" + "\n".join(prev_results))
+
+                task = "\n\n".join(task_parts)
+            else:
+                # 非 SWARM 模式，使用原始意图创建团队
+                intent_data = execution.intent_result
+                from agent.agents.supervisor import IntentResult, CollaborationMode
+                intent = IntentResult(
+                    intent=intent_data.get("intent", ""),
+                    confidence=intent_data.get("confidence", 0),
+                    target_agent=intent_data.get("target_agent", ""),
+                    collaboration_mode=CollaborationMode(intent_data.get("collaboration_mode", "direct")),
+                    review_required=intent_data.get("review_required", False),
+                    sub_tasks=intent_data.get("sub_tasks", []),
+                )
+                team = await create_team(intent)
+
+                # 构建任务描述
+                from agent.teams.routing import _build_contextual_task
+                task = await _build_contextual_task(user_message, intent, session, knowledge_base_id)
 
             # 执行任务
             controller = get_execution_controller()
@@ -625,27 +1009,27 @@ class TaskExecutionEngine:
                 return {
                     "status": "error",
                     "message": f"任务执行超时（超过 {controller._config.max_runtime}s）",
-                    "agent_name": step.get("agent_name", ""),
+                    "agent_name": step_agent,
                 }
 
             if exec_meta.status == "error" and result is None:
                 return {
                     "status": "error",
                     "message": exec_meta.message,
-                    "agent_name": step.get("agent_name", ""),
+                    "agent_name": step_agent,
                 }
 
             output = result.messages[-1].content if result and result.messages else "处理完成"
             return {
                 "status": "success",
                 "message": output,
-                "agent_name": step.get("agent_name", ""),
+                "agent_name": step_agent,
                 "retries": exec_meta.retries,
                 "compacted": exec_meta.compacted,
             }
 
         except Exception as e:
-            logger.error("Agent调用失败: step=%s error=%s", step.get("name", ""), e)
+            logger.error("Agent调用失败: step=%s agent=%s error=%s", step.get("name", ""), step.get("agent_name", ""), e)
             return {
                 "status": "error",
                 "message": str(e),
@@ -692,11 +1076,7 @@ class TaskExecutionEngine:
         # 如果重试成功且任务之前是暂停状态，恢复执行
         if checkpoint.status in (StepStatus.COMPLETED, StepStatus.DEGRADED):
             if execution.status == TaskStatus.PAUSED:
-                execution.status = TaskStatus.RUNNING
-                execution.error = ""
-                await self._store.update_execution(execution)
-
-                # 继续执行后续步骤
+                # resume() 内部会处理状态从 PAUSED 到 RUNNING 的转换
                 return await self.resume(execution.execution_id, execution.session_id, execution.user_id)
 
         return self._build_result(execution)
@@ -809,6 +1189,50 @@ class TaskExecutionEngine:
                     "total_steps": len(execution.steps) + 1,
                     "status": execution.status.value,
                 },
+            )
+        except Exception:
+            pass
+
+    async def _publish_step_event(
+        self,
+        execution: TaskExecution,
+        event_name: str,
+        checkpoint: StepCheckpoint,
+    ) -> None:
+        """发布步骤级别事件
+
+        Args:
+            execution: 任务执行记录
+            event_name: 事件名称
+            checkpoint: 步骤检查点
+        """
+        try:
+            event_type_map = {
+                "task_step_start": EventType.TASK_STEP_START,
+                "task_step_complete": EventType.TASK_STEP_COMPLETE,
+                "step_completed": EventType.STEP_COMPLETED,
+                "step_failed": EventType.STEP_FAILED,
+            }
+            event_type = event_type_map.get(event_name, EventType.AGENT_START)
+
+            step_data = {
+                "event_name": event_name,
+                "execution_id": execution.execution_id,
+                "step_index": checkpoint.step_index,
+                "step_name": checkpoint.step_name,
+                "step_type": checkpoint.step_type.value,
+                "agent_name": checkpoint.agent_name,
+                "status": checkpoint.status.value,
+                "current_step": checkpoint.step_index,
+                "total_steps": len(execution.steps) + 1,
+            }
+            if checkpoint.error:
+                step_data["error"] = checkpoint.error
+
+            await publish_event(
+                event_type,
+                execution.session_id,
+                step_data,
             )
         except Exception:
             pass

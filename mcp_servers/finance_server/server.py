@@ -9,11 +9,39 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_servers.base import EnterpriseAPIClient, format_result, load_enterprise_config
+from mcp_servers.base import EnterpriseAPIClient, format_result, is_mock_mode, load_enterprise_config
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("finance-mcp-server", host="0.0.0.0", port=9009)
+
+# Mock 数据
+MOCK_DATA = {
+    "reimbursements": [
+        {"id": "REIM-2026-001", "title": "北京出差报销", "amount": "3500", "category": "travel", "status": "approved", "applicant": "张三", "created_at": "2026-05-01"},
+        {"id": "REIM-2026-002", "title": "办公用品采购", "amount": "860", "category": "office", "status": "submitted", "applicant": "李四", "created_at": "2026-05-02"},
+        {"id": "REIM-2026-003", "title": "客户招待餐费", "amount": "1200", "category": "meal", "status": "approved", "applicant": "张三", "created_at": "2026-05-10"},
+        {"id": "REIM-2026-004", "title": "上海出差交通费", "amount": "2100", "category": "travel", "status": "rejected", "applicant": "王五", "created_at": "2026-05-12"},
+        {"id": "REIM-2026-005", "title": "团建活动费用", "amount": "5600", "category": "other", "status": "paid", "applicant": "赵主管", "created_at": "2026-05-15"},
+        {"id": "REIM-2026-006", "title": "技术书籍采购", "amount": "420", "category": "office", "status": "draft", "applicant": "孙六", "created_at": "2026-05-18"},
+    ],
+    "budget": {
+        "department": "技术部", "year": "2026", "quarter": "Q2",
+        "total_budget": "500000", "used": "185000", "remaining": "315000", "usage_rate": "37%",
+        "by_category": {
+            "travel": {"budget": "150000", "used": "68000"},
+            "office": {"budget": "100000", "used": "35000"},
+            "meal": {"budget": "80000", "used": "42000"},
+            "equipment": {"budget": "170000", "used": "40000"},
+        },
+    },
+    "invoices": [
+        {"id": "INV-2026-001", "type": "vat_normal", "amount": "1200", "status": "verified", "date": "2026-05-10", "number": "FP20260510001"},
+        {"id": "INV-2026-002", "type": "vat_special", "amount": "5800", "status": "pending", "date": "2026-05-12", "number": "FP20260512001"},
+        {"id": "INV-2026-003", "type": "vat_normal", "amount": "3500", "status": "reimbursed", "date": "2026-05-01", "number": "FP20260501001"},
+        {"id": "INV-2026-004", "type": "receipt", "amount": "860", "status": "verified", "date": "2026-05-15", "number": "FP20260515001"},
+    ],
+}
 
 _api_client: EnterpriseAPIClient | None = None
 
@@ -50,6 +78,9 @@ async def query_reimbursements(
     Returns:
         报销列表 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["reimbursements"], "total": len(MOCK_DATA["reimbursements"]), "page": page, "page_size": page_size})
+
     client = _get_api_client()
     params: dict[str, Any] = {"page": page, "page_size": page_size}
     if status:
@@ -94,6 +125,9 @@ async def submit_reimbursement(
     if category not in valid_categories:
         return format_result(False, error=f"不支持的报销类别: {category}，可选 {valid_categories}")
 
+    if is_mock_mode():
+        return format_result(True, data={"reimbursement_id": "REIM-NEW-001", "title": title, "amount": amount, "category": category, "status": "submitted"})
+
     client = _get_api_client()
     payload: dict[str, Any] = {
         "title": title,
@@ -130,6 +164,9 @@ async def query_budget(
     Returns:
         预算信息 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data=MOCK_DATA["budget"])
+
     client = _get_api_client()
     params: dict[str, Any] = {}
     if department:
@@ -168,6 +205,9 @@ async def query_invoices(
     Returns:
         发票列表 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["invoices"], "total": len(MOCK_DATA["invoices"]), "page": page, "page_size": page_size})
+
     client = _get_api_client()
     params: dict[str, Any] = {"page": page, "page_size": page_size}
     if status:
@@ -209,6 +249,9 @@ async def upload_invoice(
     valid_types = ("vat_special", "vat_normal", "receipt")
     if invoice_type not in valid_types:
         return format_result(False, error=f"不支持的发票类型: {invoice_type}，可选 {valid_types}")
+
+    if is_mock_mode():
+        return format_result(True, data={"invoice_id": "INV-NEW-001", "invoice_type": invoice_type, "amount": amount, "status": "uploaded"})
 
     client = _get_api_client()
     payload: dict[str, Any] = {

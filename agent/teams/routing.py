@@ -739,14 +739,16 @@ async def route_and_execute_stream(
         }
         return
 
-    # 步骤 2.5：SWARM 模式委托给 TaskExecutionEngine（同步执行，流式输出结果）
+    # 步骤 2.5：SWARM 模式委托给 TaskExecutionEngine（异步执行，流式输出进度和结果）
     if intent.collaboration_mode == CollaborationMode.SWARM:
         try:
             from agent.teams.task_execution_engine import get_task_execution_engine
             from agent.core.task_checkpoint import FailurePolicy
 
             engine = get_task_execution_engine()
-            result = await engine.execute(
+
+            # 先创建执行记录，获取 execution_id 以便前端订阅任务进度
+            execution = await engine.create_execution_record(
                 user_message=user_message,
                 session_id=session_id,
                 user_id=user_id,
@@ -755,17 +757,50 @@ async def route_and_execute_stream(
                 knowledge_base_id=knowledge_base_id,
                 failure_policy=FailurePolicy.RELAXED,
             )
-            if result.get("execution_id"):
+
+            # 输出 execution_id，让前端可以立即订阅任务事件
+            if execution.execution_id:
                 yield {
                     "type": "execution_id",
-                    "execution_id": result["execution_id"],
+                    "execution_id": execution.execution_id,
                 }
+
+            # 逐步执行并输出步骤进度事件
+            result = None
+            async for event in engine.execute_with_progress(
+                execution=execution,
+                user_message=user_message,
+                session_id=session_id,
+                user_id=user_id,
+                intent=intent,
+                session=session,
+                knowledge_base_id=knowledge_base_id,
+            ):
+                if event.get("type") == "step_start":
+                    # 步骤开始事件，直接传递
+                    yield event
+                elif event.get("type") == "step_done":
+                    # 步骤完成事件，直接传递
+                    yield event
+                elif event.get("type") == "result":
+                    # 执行结果，保存并后续处理
+                    result = event
+
+            # 将最终结果作为 chunk 输出，确保前端消息气泡有内容
+            final_message = result.get("message", "") if result else ""
+            if final_message:
+                yield {
+                    "type": "chunk",
+                    "agent_name": result.get("agent_name", intent.target_agent) if result else intent.target_agent,
+                    "content": final_message,
+                }
+
             yield {
                 "type": "complete",
-                "agent_name": result.get("agent_name", intent.target_agent),
-                "intent": result.get("intent", intent.intent),
+                "agent_name": result.get("agent_name", intent.target_agent) if result else intent.target_agent,
+                "intent": result.get("intent", intent.intent) if result else intent.intent,
                 "mode": intent.collaboration_mode.value,
-                "full_message": result.get("message", ""),
+                "full_message": final_message,
             }
             return
         except Exception as e:

@@ -31,6 +31,7 @@ export const useChatStore = defineStore('chat', () => {
   // 任务执行状态
   const executionId = ref('')
   const taskSteps = ref<TaskStepStatus[]>([])
+  const totalSteps = ref(0)
   const waitingConfirm = ref(false)
   const confirmInfo = ref<{
     confirmId: string
@@ -40,6 +41,9 @@ export const useChatStore = defineStore('chat', () => {
     stepIndex: number
   } | null>(null)
   const taskStatus = ref('')
+
+  // 已确认的 confirm_id 集合，防止重复触发确认弹窗
+  const resolvedConfirmIds = new Set<string>()
 
   function addUserMessage(content: string) {
     messages.value.push({
@@ -104,33 +108,54 @@ export const useChatStore = defineStore('chat', () => {
 
   function setSessionId(id: string) {
     sessionId.value = id
+    if (id) {
+      sessionStorage.setItem('current_session_id', id)
+      localStorage.setItem('current_session_id', id)
+    } else {
+      sessionStorage.removeItem('current_session_id')
+      localStorage.removeItem('current_session_id')
+    }
   }
 
   function setExecutionId(id: string) {
     executionId.value = id
     if (id) {
       sessionStorage.setItem('current_execution_id', id)
+      localStorage.setItem('current_execution_id', id)
     } else {
       sessionStorage.removeItem('current_execution_id')
+      localStorage.removeItem('current_execution_id')
     }
   }
 
-  function updateTaskSteps(steps: TaskStepStatus[]) {
+  function updateTaskSteps(steps: TaskStepStatus[], total?: number) {
     taskSteps.value = steps
-    // 检查是否有人工确认步骤
+    if (total !== undefined && total > 0) {
+      totalSteps.value = total
+    }
+    // 检查是否有新的人工确认步骤
     const confirmStep = steps.find(
       (s) => s.status === 'waiting_confirm' && s.confirm_id,
     )
     if (confirmStep && confirmStep.confirm_id) {
-      waitingConfirm.value = true
-      confirmInfo.value = {
-        confirmId: confirmStep.confirm_id,
-        confirmType: confirmStep.confirm_type || 'sensitive_action',
-        confirmReason: confirmStep.confirm_reason || '',
-        options: confirmStep.options || [],
-        stepIndex: confirmStep.step_index,
+      // 如果该确认ID已被用户处理过，不重复触发
+      if (resolvedConfirmIds.has(confirmStep.confirm_id)) {
+        return
+      }
+      // 如果是同一个确认ID，不重复触发（用户刚确认过的）
+      const isSameConfirm = confirmInfo.value && confirmInfo.value.confirmId === confirmStep.confirm_id
+      if (!isSameConfirm) {
+        waitingConfirm.value = true
+        confirmInfo.value = {
+          confirmId: confirmStep.confirm_id,
+          confirmType: confirmStep.confirm_type || 'sensitive_action',
+          confirmReason: confirmStep.confirm_reason || '',
+          options: confirmStep.options || [],
+          stepIndex: confirmStep.step_index,
+        }
       }
     } else {
+      // 没有待确认步骤，清除确认状态
       waitingConfirm.value = false
       confirmInfo.value = null
     }
@@ -153,10 +178,15 @@ export const useChatStore = defineStore('chat', () => {
     currentAgent.value = ''
     executionId.value = ''
     taskSteps.value = []
+    totalSteps.value = 0
     waitingConfirm.value = false
     confirmInfo.value = null
     taskStatus.value = ''
+    resolvedConfirmIds.clear()
     sessionStorage.removeItem('current_execution_id')
+    sessionStorage.removeItem('current_session_id')
+    localStorage.removeItem('current_execution_id')
+    localStorage.removeItem('current_session_id')
   }
 
   function loadHistory(historyMessages: any[]) {
@@ -172,16 +202,24 @@ export const useChatStore = defineStore('chat', () => {
     }))
   }
 
-  async function recoverTaskStatus() {
-    const savedExecutionId = sessionStorage.getItem('current_execution_id')
-    if (!savedExecutionId) return false
+  async function recoverTaskStatus(): Promise<{ recovered: boolean; sessionId?: string }> {
+    const savedExecutionId = sessionStorage.getItem('current_execution_id') || localStorage.getItem('current_execution_id')
+    if (!savedExecutionId) return { recovered: false }
 
     try {
       const status = await agentApi.getTaskStatus(savedExecutionId)
       if (status) {
         executionId.value = savedExecutionId
         taskSteps.value = status.steps || []
+        totalSteps.value = status.total_steps || 0
         taskStatus.value = status.status || ''
+
+        // 从任务状态中恢复 sessionId
+        if (status.session_id) {
+          sessionId.value = status.session_id
+          sessionStorage.setItem('current_session_id', status.session_id)
+          localStorage.setItem('current_session_id', status.session_id)
+        }
 
         if (status.status === 'paused') {
           waitingConfirm.value = true
@@ -203,14 +241,17 @@ export const useChatStore = defineStore('chat', () => {
           taskStatus.value = 'interrupted'
         }
 
-        return true
+        return { recovered: true, sessionId: status.session_id }
       }
     } catch {
       // 恢复失败，清除保存的ID
       sessionStorage.removeItem('current_execution_id')
+      sessionStorage.removeItem('current_session_id')
+      localStorage.removeItem('current_execution_id')
+      localStorage.removeItem('current_session_id')
     }
 
-    return false
+    return { recovered: false }
   }
 
   return {
@@ -220,9 +261,11 @@ export const useChatStore = defineStore('chat', () => {
     currentAgent,
     executionId,
     taskSteps,
+    totalSteps,
     waitingConfirm,
     confirmInfo,
     taskStatus,
+    resolvedConfirmIds,
     addUserMessage,
     addAssistantMessage,
     addStreamingMessage,

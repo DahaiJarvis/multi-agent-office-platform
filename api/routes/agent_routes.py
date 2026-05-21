@@ -211,6 +211,31 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                     elif event_type == "execution_id":
                         yield _format_sse("execution_id", event.get("execution_id", ""))
 
+                    elif event_type == "step_start":
+                        # 步骤开始事件：通知前端当前执行进度
+                        yield _format_sse("step_start", json.dumps({
+                            "step_name": event.get("step_name", ""),
+                            "agent_name": event.get("agent_name", ""),
+                            "step_index": event.get("step_index", 0),
+                            "total_steps": event.get("total_steps", 0),
+                        }, ensure_ascii=False))
+
+                    elif event_type == "step_done":
+                        # 步骤完成事件：通知前端步骤执行结果
+                        step_done_data = {
+                            "step_name": event.get("step_name", ""),
+                            "agent_name": event.get("agent_name", ""),
+                            "step_index": event.get("step_index", 0),
+                            "total_steps": event.get("total_steps", 0),
+                            "status": event.get("status", ""),
+                        }
+                        # 携带步骤输出结果，供前端预览
+                        if event.get("message"):
+                            step_done_data["message"] = event["message"]
+                        if event.get("error"):
+                            step_done_data["error"] = event["error"]
+                        yield _format_sse("step_done", json.dumps(step_done_data, ensure_ascii=False))
+
                     elif event_type == "complete":
                         final_agent = event.get("agent_name", final_agent)
                         final_intent = event.get("intent", "")
@@ -569,10 +594,14 @@ async def get_pending_confirms(user_id: str) -> dict:
 async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
     """处理人工确认请求
 
+    确认后任务恢复执行采用后台异步方式，API 立即返回，
+    前端通过 SSE 事件流或轮询获取后续任务进度。
+
     Args:
         confirm_id: 确认单ID
         body: 确认请求体，包含 decision/comment/user_id 等字段
     """
+    import asyncio
     from agent.core.human_confirm import get_human_confirm_manager
 
     decision = body.decision
@@ -601,13 +630,21 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
             engine = get_task_execution_engine()
 
             if decision == "retry":
-                return await engine.retry_step(
-                    execution_id=result.execution_id,
-                    step_index=result.step_index,
-                    agent_name_override=body.agent_name,
-                )
+                # 重试步骤也改为后台执行
+                async def _retry_background():
+                    try:
+                        await engine.retry_step(
+                            execution_id=result.execution_id,
+                            step_index=result.step_index,
+                            agent_name_override=body.agent_name,
+                        )
+                    except Exception as e:
+                        logger.error("后台重试步骤失败: execution_id=%s error=%s", result.execution_id, e)
+
+                asyncio.create_task(_retry_background())
             elif decision == "skip":
-                # skip：将当前步骤标记为SKIPPED，然后恢复执行后续步骤
+                # skip：将当前步骤标记为SKIPPED，然后后台恢复执行后续步骤
+                # 注意：不在此处修改 execution.status 为 RUNNING，由 resume() 内部处理状态转换
                 from agent.core.task_checkpoint import StepStatus
                 for cp in execution.checkpoints:
                     if cp.step_index == result.step_index and cp.status in (StepStatus.WAITING_CONFIRM, StepStatus.FAILED):
@@ -615,24 +652,37 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
                         cp.error = f"用户跳过: {comment}"
                         await store.save_checkpoint(execution.execution_id, cp)
                         break
-                execution.status = TaskStatus.RUNNING
                 execution.error = ""
                 await store.update_execution(execution)
-                return await engine.resume(
-                    execution_id=result.execution_id,
-                    session_id=execution.session_id,
-                    user_id=execution.user_id,
-                )
+
+                async def _resume_background():
+                    try:
+                        await engine.resume(
+                            execution_id=result.execution_id,
+                            session_id=execution.session_id,
+                            user_id=execution.user_id,
+                        )
+                    except Exception as e:
+                        logger.error("后台恢复执行失败: execution_id=%s error=%s", result.execution_id, e)
+
+                asyncio.create_task(_resume_background())
             else:
-                # continue：恢复执行
-                execution.status = TaskStatus.RUNNING
+                # continue：后台恢复执行
+                # 注意：不在此处修改 execution.status 为 RUNNING，由 resume() 内部处理状态转换
                 execution.error = ""
                 await store.update_execution(execution)
-                return await engine.resume(
-                    execution_id=result.execution_id,
-                    session_id=execution.session_id,
-                    user_id=execution.user_id,
-                )
+
+                async def _resume_background():
+                    try:
+                        await engine.resume(
+                            execution_id=result.execution_id,
+                            session_id=execution.session_id,
+                            user_id=execution.user_id,
+                        )
+                    except Exception as e:
+                        logger.error("后台恢复执行失败: execution_id=%s error=%s", result.execution_id, e)
+
+                asyncio.create_task(_resume_background())
 
     elif decision == "cancel":
         from agent.core.task_checkpoint import get_task_checkpoint_store, TaskStatus
@@ -649,6 +699,7 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
         "status": "resolved",
         "confirm_id": confirm_id,
         "decision": decision,
+        "execution_id": result.execution_id,
     }
 
 

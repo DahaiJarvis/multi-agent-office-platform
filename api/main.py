@@ -86,6 +86,7 @@ async def lifespan(app: FastAPI):
     setup_tracing(
         service_name=settings.otel_service_name,
         endpoint=settings.otel_exporter_otlp_endpoint,
+        enabled=settings.otel_enabled,
     )
 
     session_mgr = await get_session_manager()

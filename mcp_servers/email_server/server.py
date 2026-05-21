@@ -9,11 +9,33 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_servers.base import EnterpriseAPIClient, format_result, load_enterprise_config
+from mcp_servers.base import EnterpriseAPIClient, format_result, is_mock_mode, load_enterprise_config
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("email-mcp-server", host="0.0.0.0", port=9002)
+
+# Mock 数据
+MOCK_DATA = {
+    "emails": [
+        {"id": "EM-2026-001", "subject": "关于项目进度汇报", "sender": "zhangsan@company.com", "folder": "inbox", "date": "2026-05-19 09:30:00", "is_read": False, "priority": "high"},
+        {"id": "EM-2026-002", "subject": "下周会议安排", "sender": "lisi@company.com", "folder": "inbox", "date": "2026-05-19 14:00:00", "is_read": True, "priority": "normal"},
+        {"id": "EM-2026-003", "subject": "报销审批结果通知", "sender": "system@company.com", "folder": "inbox", "date": "2026-05-18 16:45:00", "is_read": True, "priority": "normal"},
+        {"id": "EM-2026-004", "subject": "Q2季度OKR确认", "sender": "zhaozg@company.com", "folder": "inbox", "date": "2026-05-17 10:00:00", "is_read": False, "priority": "high"},
+        {"id": "EM-2026-005", "subject": "新员工入职通知", "sender": "hr@company.com", "folder": "inbox", "date": "2026-05-16 09:00:00", "is_read": True, "priority": "low"},
+        {"id": "EM-2026-006", "subject": "技术方案评审邀请", "sender": "wangwu@company.com", "folder": "inbox", "date": "2026-05-20 08:15:00", "is_read": False, "priority": "normal"},
+    ],
+    "email_detail": {
+        "id": "EM-2026-001", "subject": "关于项目进度汇报", "sender": "zhangsan@company.com", "to": "me@company.com",
+        "date": "2026-05-19 09:30:00", "priority": "high",
+        "body": "你好，\n\n关于A项目的进度，目前开发已完成80%，预计6月底可上线。\n\n关键里程碑：\n1. 后端API开发已完成90%\n2. 前端页面开发完成75%\n3. 联调测试计划6月第一周开始\n\n请知悉。\n\n张三",
+        "attachments": [{"name": "项目进度表.xlsx", "size": "256KB"}],
+    },
+    "email_stats": {
+        "total": 156, "unread": 12, "sent": 45,
+        "by_folder": {"inbox": 89, "sent": 45, "draft": 8, "trash": 14},
+    },
+}
 
 _api_client: EnterpriseAPIClient | None = None
 
@@ -52,6 +74,9 @@ async def query_emails(
     Returns:
         邮件列表 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["emails"], "total": len(MOCK_DATA["emails"]), "page": page, "page_size": page_size})
+
     client = _get_api_client()
     params: dict[str, Any] = {"folder": folder, "page": page, "page_size": page_size}
     if keyword:
@@ -82,6 +107,9 @@ async def get_email_detail(email_id: str) -> str:
     Returns:
         邮件详情 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data=MOCK_DATA["email_detail"])
+
     client = _get_api_client()
     result = await client.get(f"/emails/{email_id}")
     if result.get("success") is False:
@@ -116,6 +144,9 @@ async def send_email(
     """
     if priority not in ("low", "normal", "high"):
         return format_result(False, error=f"不支持的优先级: {priority}，可选 low/normal/high")
+
+    if is_mock_mode():
+        return format_result(True, data={"message_id": "EM-NEW-001", "status": "sent", "to": to, "subject": subject})
 
     client = _get_api_client()
     payload: dict[str, Any] = {
@@ -154,6 +185,9 @@ async def classify_email(email_id: str, category: str = "") -> str:
     if category and category not in valid_categories:
         return format_result(False, error=f"不支持的分类: {category}，可选 {valid_categories}")
 
+    if is_mock_mode():
+        return format_result(True, data={"email_id": email_id, "category": category or "important", "auto_classified": not category})
+
     client = _get_api_client()
     payload: dict[str, Any] = {}
     if category:
@@ -178,6 +212,9 @@ async def delete_email(email_id: str) -> str:
     Returns:
         操作结果 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"email_id": email_id, "status": "deleted"})
+
     client = _get_api_client()
     result = await client.post(f"/emails/{email_id}/delete", data={})
     if result.get("success") is False:

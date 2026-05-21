@@ -9,11 +9,42 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_servers.base import EnterpriseAPIClient, format_result, load_enterprise_config
+from mcp_servers.base import EnterpriseAPIClient, format_result, is_mock_mode, load_enterprise_config
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("calendar-mcp-server", host="0.0.0.0", port=9003)
+
+# Mock 数据
+MOCK_DATA = {
+    "events": [
+        {"id": "EVT-2026-001", "title": "产品需求评审会", "start_time": "2026-05-21 10:00", "end_time": "2026-05-21 11:30", "type": "meeting", "location": "3楼会议室A", "status": "confirmed"},
+        {"id": "EVT-2026-002", "title": "项目周报", "start_time": "2026-05-21 14:00", "end_time": "2026-05-21 15:00", "type": "meeting", "location": "线上-腾讯会议", "status": "confirmed"},
+        {"id": "EVT-2026-003", "title": "提交月度报告", "start_time": "2026-05-22 09:00", "end_time": "2026-05-22 09:30", "type": "reminder", "location": "", "status": "pending"},
+        {"id": "EVT-2026-004", "title": "技术方案讨论", "start_time": "2026-05-22 15:00", "end_time": "2026-05-22 16:30", "type": "meeting", "location": "5楼会议室B", "status": "confirmed"},
+        {"id": "EVT-2026-005", "title": "1v1 with 赵主管", "start_time": "2026-05-23 10:00", "end_time": "2026-05-23 10:30", "type": "meeting", "location": "赵主管办公室", "status": "confirmed"},
+        {"id": "EVT-2026-006", "title": "Sprint回顾会", "start_time": "2026-05-23 16:00", "end_time": "2026-05-23 17:00", "type": "meeting", "location": "线上-飞书", "status": "pending"},
+        {"id": "EVT-2026-007", "title": "客户演示准备", "start_time": "2026-05-26 09:00", "end_time": "2026-05-26 12:00", "type": "task", "location": "", "status": "pending"},
+    ],
+    "event_detail": {
+        "id": "EVT-2026-001", "title": "产品需求评审会", "start_time": "2026-05-21 10:00", "end_time": "2026-05-21 11:30",
+        "type": "meeting", "location": "3楼会议室A", "status": "confirmed",
+        "description": "评审V2.0版本产品需求文档，确认优先级和排期",
+        "attendees": ["zhangsan@company.com", "lisi@company.com", "wangwu@company.com"],
+        "organizer": "lisi@company.com",
+    },
+    "today_summary": {
+        "date": "2026-05-21",
+        "total_events": 2,
+        "next_event": {"id": "EVT-2026-001", "title": "产品需求评审会", "start_time": "2026-05-21 10:00"},
+        "free_slots": [
+            {"start": "08:00", "end": "10:00"},
+            {"start": "11:30", "end": "14:00"},
+            {"start": "15:00", "end": "18:00"},
+        ],
+    },
+    "conflict": {"has_conflict": False, "conflicting_events": []},
+}
 
 _api_client: EnterpriseAPIClient | None = None
 
@@ -50,6 +81,9 @@ async def query_events(
     Returns:
         日程列表 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["events"], "total": len(MOCK_DATA["events"]), "page": page, "page_size": page_size})
+
     client = _get_api_client()
     params: dict[str, Any] = {"page": page, "page_size": page_size}
     if date_from:
@@ -80,6 +114,9 @@ async def get_event_detail(event_id: str) -> str:
     Returns:
         日程详情 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data=MOCK_DATA["event_detail"])
+
     client = _get_api_client()
     result = await client.get(f"/events/{event_id}")
     if result.get("success") is False:
@@ -116,6 +153,9 @@ async def create_event(
     """
     if event_type not in ("meeting", "reminder"):
         return format_result(False, error=f"不支持的日程类型: {event_type}，可选 meeting/reminder")
+
+    if is_mock_mode():
+        return format_result(True, data={"id": "EVT-NEW-001", "title": title, "start_time": start_time, "end_time": end_time, "type": event_type, "status": "created"})
 
     client = _get_api_client()
     payload: dict[str, Any] = {
@@ -162,6 +202,9 @@ async def update_event(
     Returns:
         更新结果 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"event_id": event_id, "status": "updated"})
+
     client = _get_api_client()
     payload: dict[str, Any] = {}
     if title:
@@ -198,6 +241,9 @@ async def cancel_event(event_id: str, reason: str = "") -> str:
     Returns:
         取消结果 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"event_id": event_id, "status": "cancelled"})
+
     client = _get_api_client()
     payload: dict[str, Any] = {}
     if reason:
@@ -228,6 +274,9 @@ async def check_time_conflict(
     Returns:
         冲突检查结果 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data=MOCK_DATA["conflict"])
+
     client = _get_api_client()
     params: dict[str, Any] = {"start_time": start_time, "end_time": end_time}
     if user_id:

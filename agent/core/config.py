@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     )
 
     # OpenTelemetry
+    otel_enabled: bool = Field(
+        default=False, alias="OTEL_ENABLED"
+    )
     otel_exporter_otlp_endpoint: str = Field(
         default="http://localhost:4317", alias="OTEL_EXPORTER_OTLP_ENDPOINT"
     )

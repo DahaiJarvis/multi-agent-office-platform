@@ -15,6 +15,18 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def is_mock_mode() -> bool:
+    """检测是否启用 Mock 模式
+
+    通过环境变量 MCP_MOCK_MODE 控制，设置为 true/1/yes 时启用。
+    Mock 模式下 MCP 工具函数将返回模拟数据，不调用真实企业 API。
+
+    Returns:
+        是否启用 Mock 模式
+    """
+    return os.getenv("MCP_MOCK_MODE", "").lower() in ("true", "1", "yes")
+
+
 @dataclass
 class MCPServerConfig:
     """MCP 服务运行配置"""

@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -320,12 +321,17 @@ async def _connect_and_load(service_key: str, config: MCPServerConfig) -> list[A
         TimeoutError: 连接或加载工具超时
     """
     settings = get_settings()
+    mock_mode = os.getenv("MCP_MOCK_MODE", "").lower() in ("true", "1", "yes")
 
     if config.transport == "sse":
-        reachable = await _check_sse_endpoint(config.url)
-        if not reachable:
-            config.enabled = False
-            raise ConnectionError(f"MCP 服务 [{service_key}] SSE 端点不可达: {config.url}")
+        # Mock 模式下跳过 SSE 端点预检，日志提示
+        if not mock_mode:
+            reachable = await _check_sse_endpoint(config.url)
+            if not reachable:
+                config.enabled = False
+                raise ConnectionError(f"MCP 服务 [{service_key}] SSE 端点不可达: {config.url}")
+        else:
+            logger.info("Mock 模式已启用，跳过 SSE 端点预检: %s", config.name)
 
         connect_kwargs: dict[str, Any] = {"url": config.url, "timeout": 5, "sse_read_timeout": 30}
         if service_key == "knowledge" and settings.mcp_api_key:

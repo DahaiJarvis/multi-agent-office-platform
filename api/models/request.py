@@ -101,8 +101,8 @@ class TaskStepRetryRequest(BaseModel):
 class TaskConfirmRequest(BaseModel):
     """人工确认请求"""
 
-    execution_id: str = Field(..., description="执行记录ID")
-    step_index: int = Field(..., ge=1, description="步骤索引（从1开始，0为意图分类）")
+    execution_id: str | None = Field(default=None, description="执行记录ID（可选，后端通过confirm_id自动获取）")
+    step_index: int | None = Field(default=None, ge=0, description="步骤索引（可选，后端通过confirm_id自动获取）")
     decision: str = Field(..., description="决策: continue/skip/cancel/retry")
     comment: str = Field(default="", description="备注")
     user_id: str = Field(..., description="用户ID")

@@ -209,10 +209,10 @@ export const agentApi = {
     })
   },
 
-  confirmTask(confirmId: string, decision: string, comment?: string, userId?: string, agentName?: string) {
+  confirmTask(confirmId: string, decision: string, comment?: string, userId?: string, agentName?: string, executionId?: string, stepIndex?: number) {
     return http.post(`/agent/task/confirm/${confirmId}`, {
-      execution_id: '',
-      step_index: 0,
+      execution_id: executionId || '',
+      step_index: stepIndex ?? 0,
       decision,
       comment: comment || '',
       user_id: userId || '',

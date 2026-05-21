@@ -441,7 +441,7 @@ class SessionManager:
 
         return True
 
-    async def archive_session(self, session_id: str) -> None:
+    async def archive_session(self, session_id: str) -> bool:
         """归档会话到 L3 (PostgreSQL)
 
         归档流程：
@@ -466,8 +466,21 @@ class SessionManager:
         try:
             from agent.core.long_term_memory import get_long_term_memory
 
-            ltm = await get_long_term_memory()
-            await ltm.save_session(session.model_dump())
+            ltm = get_long_term_memory()
+            archived = await ltm.archive_session(
+                session_id=session.session_id,
+                user_id=session.user_id,
+                channel=session.channel,
+                messages=[msg for msg in session.message_history],
+                context_summary=session.context_summary,
+                metadata=session.metadata,
+                tenant_id=session.tenant_id,
+            )
+
+            # L3 归档失败时，保留 L2 数据，避免会话丢失
+            if not archived:
+                logger.warning("L3 归档失败，保留 L2 数据: session_id=%s", session_id)
+                return False
 
             # 从 L2 删除
             redis = await self._redis_or_fallback()
@@ -476,6 +489,9 @@ class SessionManager:
                 keys.append(f"session:{session_id}")
                 if keys:
                     await redis.delete(*keys)
+                # 从用户会话索引中移除，避免查询时触发不必要的 L3 恢复
+                index_key = self._user_sessions_key(session.user_id, session.tenant_id)
+                await redis.zrem(index_key, session_id)
             else:
                 keys_to_delete = [
                     k
@@ -484,10 +500,16 @@ class SessionManager:
                 ]
                 for k in keys_to_delete:
                     del self._memory_store[k]
+                # 从内存索引中移除
+                index_key = self._user_sessions_key(session.user_id, session.tenant_id)
+                if index_key in self._memory_index:
+                    self._memory_index[index_key].pop(session_id, None)
 
             logger.info("归档会话: session_id=%s", session_id)
+            return True
         except Exception as e:
             logger.warning("归档会话失败: %s", e)
+            return False
 
     async def list_archived_sessions(
         self,
@@ -495,9 +517,10 @@ class SessionManager:
         tenant_id: str = "",
         limit: int = 20,
     ) -> list[dict[str, Any]]:
-        """查询用户已归档的会话列表
+        """查询用户的所有会话列表（合并 L2 活跃会话和 L3 归档会话）
 
-        从 L3 (PostgreSQL) 查询用户的历史会话。
+        优先从 L2 Redis 索引获取活跃会话，
+        再从 L3 PostgreSQL 获取归档会话，合并去重后返回。
 
         Args:
             user_id: 用户ID
@@ -507,13 +530,51 @@ class SessionManager:
         Returns:
             会话摘要列表
         """
-        try:
-            from agent.core.long_term_memory import get_long_term_memory
+        seen_ids: set[str] = set()
+        result: list[dict[str, Any]] = []
 
-            ltm = await get_long_term_memory()
-            return await ltm.list_sessions(user_id, tenant_id, limit)
-        except Exception:
-            return []
+        # 先从 L2 Redis 获取活跃会话
+        try:
+            redis_sessions = await self._list_sessions_from_redis(
+                user_id, limit=limit, tenant_id=tenant_id,
+            )
+            for s in redis_sessions:
+                sid = s["session_id"]
+                if sid not in seen_ids:
+                    seen_ids.add(sid)
+                    # 补充 first_message 字段
+                    session = await self.get_session(sid)
+                    if session and session.message_history:
+                        first_user_msg = next(
+                            (m for m in session.message_history if m.get("role") == "user"),
+                            None,
+                        )
+                        s["first_message"] = first_user_msg.get("content", "") if first_user_msg else ""
+                    else:
+                        s["first_message"] = ""
+                    result.append(s)
+        except Exception as e:
+            logger.warning("从 Redis 获取活跃会话失败: user_id=%s error=%s", user_id, e)
+
+        # 再从 L3 PostgreSQL 获取归档会话
+        remaining = limit - len(result)
+        if remaining > 0:
+            try:
+                from agent.core.long_term_memory import get_long_term_memory
+
+                ltm = get_long_term_memory()
+                archived = await ltm.list_user_sessions(user_id, limit=remaining, offset=0, tenant_id=tenant_id)
+                for s in archived:
+                    sid = s["session_id"]
+                    if sid not in seen_ids:
+                        seen_ids.add(sid)
+                        result.append(s)
+            except Exception as e:
+                logger.warning("从 L3 获取归档会话失败: user_id=%s error=%s", user_id, e)
+
+        # 按更新时间倒序排列
+        result.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        return result[:limit]
 
     async def _list_sessions_from_redis(
         self, user_id: str, limit: int = 20, offset: int = 0, tenant_id: str = ""

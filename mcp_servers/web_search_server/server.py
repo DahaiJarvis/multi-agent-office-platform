@@ -12,6 +12,8 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+from mcp_servers.base import format_result, is_mock_mode
+
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("web-search-mcp-server", host="0.0.0.0", port=9011)
@@ -106,6 +108,16 @@ async def internet_search(query: str) -> str:
     Returns:
         搜索结果 JSON 字符串，包含搜索内容和来源信息
     """
+    if is_mock_mode():
+        return json.dumps(
+            {
+                "success": True,
+                "content": f"根据搜索结果，关于「{query}」的信息如下：\n\n这是一个模拟的搜索结果。在 Mock 模式下，网络搜索将返回此占位内容。\n\n实际部署时，此工具会通过 DashScope API 进行真实的互联网搜索。",
+                "sources": [{"title": "模拟搜索结果", "url": "https://example.com/mock"}],
+            },
+            ensure_ascii=False,
+        )
+
     if not DASHSCOPE_API_KEY:
         return json.dumps(
             {"success": False, "error": "DashScope API Key 未配置，无法进行网络搜索"},
@@ -152,6 +164,16 @@ async def search_news(keyword: str, count: int = 5) -> str:
     Returns:
         新闻搜索结果 JSON 字符串
     """
+    if is_mock_mode():
+        return json.dumps(
+            {
+                "success": True,
+                "content": f"关于「{keyword}」的最新新闻：\n\n1. 模拟新闻标题一：这是一个模拟的新闻搜索结果。\n2. 模拟新闻标题二：在 Mock 模式下，新闻搜索将返回此占位内容。\n\n实际部署时，此工具会通过 DashScope API 进行真实的新闻搜索。",
+                "sources": [{"title": "模拟新闻来源", "url": "https://example.com/mock-news"}],
+            },
+            ensure_ascii=False,
+        )
+
     news_query = f"最新新闻 {keyword}"
     if not DASHSCOPE_API_KEY:
         return json.dumps(

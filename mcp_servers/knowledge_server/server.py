@@ -9,11 +9,34 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_servers.base import EnterpriseAPIClient, format_result, load_enterprise_config
+from mcp_servers.base import EnterpriseAPIClient, format_result, is_mock_mode, load_enterprise_config
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("knowledge-mcp-server", host="0.0.0.0", port=9010)
+
+# Mock 数据
+MOCK_DATA = {
+    "knowledge_items": [
+        {"id": "KN-001", "title": "差旅报销流程说明", "category": "process", "summary": "差旅报销需在出差后7日内提交，附上发票原件和出差审批单。", "score": 0.92},
+        {"id": "KN-002", "title": "年假使用规定", "category": "policy", "summary": "员工入职满1年后享有5天年假，每增加1年加1天，上限15天。", "score": 0.88},
+        {"id": "KN-003", "title": "新员工入职FAQ", "category": "faq", "summary": "Q: 入职需要准备什么材料？A: 身份证、学历证书、离职证明等。", "score": 0.85},
+        {"id": "KN-004", "title": "合同审批流程", "category": "process", "summary": "合同审批需经过法务审核、财务审核、总经理审批三个环节。", "score": 0.90},
+        {"id": "KN-005", "title": "绩效考核制度", "category": "policy", "summary": "每季度进行一次绩效考核，考核结果与季度奖金挂钩。", "score": 0.82},
+        {"id": "KN-006", "title": "IT设备申请流程", "category": "process", "summary": "通过OA系统提交设备申请，经部门主管审批后由IT部门采购。", "score": 0.78},
+        {"id": "KN-007", "title": "远程办公管理办法", "category": "policy", "summary": "每周可申请2天远程办公，需提前一天在OA系统中申请。", "score": 0.86},
+    ],
+    "knowledge_detail": {
+        "id": "KN-001", "title": "差旅报销流程说明", "category": "process",
+        "content": "差旅报销流程：\n1. 出差前提交出差申请，经主管审批\n2. 出差结束后7日内提交报销申请\n3. 附上发票原件和出差审批单\n4. 主管审批后提交财务处理\n5. 财务审核通过后10个工作日内打款\n\n注意事项：\n- 住宿标准：一线城市500元/天，二线城市300元/天\n- 餐饮标准：100元/天\n- 交通：优先选择公共交通",
+        "author": "财务部", "updated_at": "2026-03-01", "tags": ["报销", "差旅", "流程"],
+    },
+    "faq_results": [
+        {"question": "如何申请年假？", "answer": "在OA系统中提交请假申请，选择年假类型，经主管审批后生效。", "score": 0.95},
+        {"question": "报销需要多长时间？", "answer": "财务审核通过后10个工作日内打款。", "score": 0.88},
+        {"question": "如何申请远程办公？", "answer": "提前一天在OA系统中提交远程办公申请，经主管审批后生效。", "score": 0.82},
+    ],
+}
 
 _api_client: EnterpriseAPIClient | None = None
 
@@ -46,6 +69,9 @@ async def search_knowledge(
     Returns:
         搜索结果 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["knowledge_items"], "total": len(MOCK_DATA["knowledge_items"])})
+
     client = _get_api_client()
     params: dict[str, Any] = {
         "query": query,
@@ -74,6 +100,9 @@ async def get_knowledge_detail(knowledge_id: str) -> str:
     Returns:
         知识详情 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data=MOCK_DATA["knowledge_detail"])
+
     client = _get_api_client()
     result = await client.get(f"/knowledge/{knowledge_id}")
     if result.get("success") is False:
@@ -98,6 +127,9 @@ async def query_faq(
     Returns:
         FAQ 匹配结果 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["faq_results"], "total": len(MOCK_DATA["faq_results"])})
+
     client = _get_api_client()
     params: dict[str, Any] = {"question": question, "top_k": top_k}
 
@@ -128,6 +160,9 @@ async def search_by_keywords(
     Returns:
         搜索结果 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["knowledge_items"], "total": len(MOCK_DATA["knowledge_items"]), "page": page, "page_size": page_size})
+
     client = _get_api_client()
     params: dict[str, Any] = {"keywords": keywords, "page": page, "page_size": page_size}
     if category:
@@ -156,6 +191,9 @@ async def get_related_knowledge(
     Returns:
         相关知识列表 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["knowledge_items"][:top_k], "total": min(top_k, len(MOCK_DATA["knowledge_items"]))})
+
     client = _get_api_client()
     params: dict[str, Any] = {"top_k": top_k}
 

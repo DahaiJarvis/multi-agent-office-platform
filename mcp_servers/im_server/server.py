@@ -9,11 +9,35 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_servers.base import EnterpriseAPIClient, format_result, load_enterprise_config
+from mcp_servers.base import EnterpriseAPIClient, format_result, is_mock_mode, load_enterprise_config
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("im-mcp-server", host="0.0.0.0", port=9006)
+
+# Mock 数据
+MOCK_DATA = {
+    "messages": [
+        {"id": "MSG-2026-001", "chat_id": "CHAT-001", "sender": "张三", "content": "下午的会议改到3点了", "time": "2026-05-20 11:30:00", "msg_type": "text"},
+        {"id": "MSG-2026-002", "chat_id": "CHAT-001", "sender": "李四", "content": "收到，我会准时参加", "time": "2026-05-20 11:32:00", "msg_type": "text"},
+        {"id": "MSG-2026-003", "chat_id": "CHAT-001", "sender": "王五", "content": "测试报告已上传到文档中心", "time": "2026-05-20 14:15:00", "msg_type": "text"},
+        {"id": "MSG-2026-004", "chat_id": "CHAT-002", "sender": "赵主管", "content": "本周五团建，大家确认参加", "time": "2026-05-19 09:00:00", "msg_type": "text"},
+        {"id": "MSG-2026-005", "chat_id": "CHAT-002", "sender": "孙六", "content": "我参加!", "time": "2026-05-19 09:05:00", "msg_type": "text"},
+    ],
+    "group_info": {
+        "id": "GRP-001", "name": "项目A讨论组", "description": "项目A的日常沟通群",
+        "members": [
+            {"id": "U001", "name": "张三"}, {"id": "U002", "name": "李四"},
+            {"id": "U003", "name": "王五"}, {"id": "U004", "name": "赵主管"},
+        ],
+        "member_count": 4, "created_at": "2026-01-15 09:00:00",
+    },
+    "chat_list": [
+        {"id": "CHAT-001", "name": "项目A讨论组", "type": "group", "last_message": "测试报告已上传到文档中心", "unread": 2, "time": "2026-05-20 14:15:00"},
+        {"id": "CHAT-002", "name": "技术部全员", "type": "group", "last_message": "我参加!", "unread": 0, "time": "2026-05-19 09:05:00"},
+        {"id": "CHAT-003", "name": "赵主管", "type": "private", "last_message": "明天1v1记得准备周报", "unread": 1, "time": "2026-05-20 17:30:00"},
+    ],
+}
 
 _api_client: EnterpriseAPIClient | None = None
 
@@ -53,6 +77,9 @@ async def send_message(
     valid_target_types = ("user", "group")
     if target_type not in valid_target_types:
         return format_result(False, error=f"不支持的目标类型: {target_type}，可选 {valid_target_types}")
+
+    if is_mock_mode():
+        return format_result(True, data={"target_id": target_id, "msg_type": msg_type, "status": "sent", "message_id": "MSG-NEW-001"})
 
     client = _get_api_client()
     payload: dict[str, Any] = {
@@ -95,6 +122,9 @@ async def query_messages(
     Returns:
         消息列表 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["messages"], "total": len(MOCK_DATA["messages"]), "page": page, "page_size": page_size})
+
     client = _get_api_client()
     params: dict[str, Any] = {"chat_id": chat_id, "page": page, "page_size": page_size}
     if keyword:
@@ -137,6 +167,9 @@ async def send_notification(
     if priority not in valid_priorities:
         return format_result(False, error=f"不支持的优先级: {priority}，可选 {valid_priorities}")
 
+    if is_mock_mode():
+        return format_result(True, data={"notification_id": "NTF-NEW-001", "user_ids": user_ids.split(","), "title": title, "status": "sent"})
+
     client = _get_api_client()
     payload: dict[str, Any] = {
         "user_ids": [u.strip() for u in user_ids.split(",")],
@@ -164,6 +197,9 @@ async def query_group_info(group_id: str) -> str:
     Returns:
         群组信息 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data=MOCK_DATA["group_info"])
+
     client = _get_api_client()
     result = await client.get(f"/groups/{group_id}")
     if result.get("success") is False:
@@ -190,6 +226,9 @@ async def create_group(
     Returns:
         创建结果 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"group_id": "GRP-NEW-001", "name": name, "member_count": len(member_ids.split(",")), "status": "created"})
+
     client = _get_api_client()
     payload: dict[str, Any] = {
         "name": name,

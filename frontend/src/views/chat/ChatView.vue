@@ -42,77 +42,6 @@
 
     <div class="chat-main">
       <div class="chat-messages" ref="messagesContainer">
-        <!-- 任务进度面板 -->
-        <div v-if="chatStore.executionId && chatStore.taskSteps.length > 0" class="task-progress-panel">
-          <div class="task-progress-header">
-            <span class="task-progress-title">任务执行进度</span>
-            <span class="task-status-badge" :class="chatStore.taskStatus">
-              {{ taskStatusLabel }}
-            </span>
-          </div>
-          <div class="task-steps-list">
-            <div
-              v-for="(step, idx) in chatStore.taskSteps"
-              :key="idx"
-              class="task-step-item"
-              :class="step.status"
-            >
-              <div class="step-indicator">
-                <span v-if="step.status === 'completed'" class="step-icon done">
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.854 3.646a.5.5 0 010 .708l-7 7a.5.5 0 01-.708 0l-3.5-3.5a.5.5 0 11.708-.708L6.5 10.293l6.646-6.647a.5.5 0 01.708 0z"/></svg>
-                </span>
-                <span v-else-if="step.status === 'failed'" class="step-icon fail">
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.646 4.646a.5.5 0 01.708 0L8 7.293l2.646-2.647a.5.5 0 01.708.708L8.707 8l2.647 2.646a.5.5 0 01-.708.708L8 8.707l-2.646 2.647a.5.5 0 01-.708-.708L7.293 8 4.646 5.354a.5.5 0 010-.708z"/></svg>
-                </span>
-                <span v-else-if="step.status === 'running'" class="step-icon running">
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a.5.5 0 01.5.5v4a.5.5 0 01-.5.5H4.5a.5.5 0 010-1H7V4a.5.5 0 01.5-.5z"/><path d="M8 0a8 8 0 100 16A8 8 0 008 0zm0 15A7 7 0 118 1a7 7 0 010 14z"/></svg>
-                </span>
-                <span v-else-if="step.status === 'waiting_confirm'" class="step-icon confirm">
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 15A7 7 0 118 1a7 7 0 010 14zm0 1A8 8 0 108 0a8 8 0 000 16z"/><path d="M8.93 6.588l-2.29.287-.082.38.45.083c.294.07.352.176.288.469l-.738 3.468c-.194.897.105 1.319.808 1.319.545 0 1.178-.252 1.465-.598l.088-.416c-.2.176-.492.246-.686.246-.275 0-.375-.193-.304-.533L8.93 6.588zM9 4.5a1 1 0 11-2 0 1 1 0 012 0z"/></svg>
-                </span>
-                <span v-else-if="step.status === 'skipped'" class="step-icon skip">
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a7 7 0 1014 0A7 7 0 001 8zm15 0A8 8 0 010 8a8 8 0 0116 0zM4.5 7.5a.5.5 0 000 1h5.793l-2.147 2.146a.5.5 0 00.708.708l3-3a.5.5 0 000-.708l-3-3a.5.5 0 00-.708.708L10.293 7.5H4.5z"/></svg>
-                </span>
-                <span v-else class="step-icon pending">{{ idx + 1 }}</span>
-              </div>
-              <div class="step-info">
-                <div class="step-name">{{ step.step_name }}</div>
-                <div v-if="step.agent_name" class="step-agent">{{ step.agent_name }}</div>
-                <div v-if="step.error" class="step-error">{{ step.error }}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 人工确认弹窗 -->
-        <div v-if="chatStore.waitingConfirm && chatStore.confirmInfo" class="confirm-dialog-overlay">
-          <div class="confirm-dialog">
-            <div class="confirm-header">
-              <span class="confirm-type-badge" :class="chatStore.confirmInfo.confirmType">
-                {{ confirmTypeLabel }}
-              </span>
-              <h4 class="confirm-title">需要人工确认</h4>
-            </div>
-            <div class="confirm-body">
-              <p class="confirm-reason">{{ chatStore.confirmInfo.confirmReason }}</p>
-              <div class="confirm-options">
-                <button
-                  v-for="opt in (chatStore.confirmInfo.options.length > 0 ? chatStore.confirmInfo.options : defaultConfirmOptions)"
-                  :key="opt.value"
-                  class="confirm-option-btn"
-                  :class="opt.value"
-                  @click="handleConfirm(opt.value)"
-                  :disabled="confirmLoading"
-                >
-                  <span class="option-label">{{ opt.label }}</span>
-                  <span v-if="opt.description" class="option-desc">{{ opt.description }}</span>
-                </button>
-              </div>
-            </div>
-            <div v-if="confirmLoading" class="confirm-loading">处理中...</div>
-          </div>
-        </div>
-
         <!-- 断线重连提示 -->
         <div v-if="sseDisconnected" class="reconnect-banner">
           <span>连接已断开</span>
@@ -191,6 +120,77 @@
             {{ authStore.userId.charAt(0).toUpperCase() }}
           </div>
         </div>
+
+        <!-- 任务进度面板 - 跟在消息后面 -->
+        <div v-if="chatStore.executionId && chatStore.taskSteps.length > 0" class="message-row assistant">
+          <div class="msg-avatar assistant">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM5.5 7a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2zm-5.13 2.84a.5.5 0 01.76-.66A3.5 3.5 0 008 10.5a3.5 3.5 0 002.87-1.32.5.5 0 01.76.66A4.5 4.5 0 018 11.5a4.5 4.5 0 01-3.63-1.66z" />
+            </svg>
+          </div>
+          <div class="msg-content">
+            <div class="msg-bubble assistant task-progress-panel">
+              <div class="task-progress-header">
+                <span class="task-progress-title">任务执行进度</span>
+                <span class="task-progress-summary">{{ completedStepCount }}/{{ chatStore.totalSteps || chatStore.taskSteps.length }} 已完成</span>
+                <span class="task-status-badge" :class="chatStore.taskStatus">
+                  {{ taskStatusLabel }}
+                </span>
+              </div>
+              <div class="task-steps-list">
+                <div
+                  v-for="(step, idx) in chatStore.taskSteps"
+                  :key="idx"
+                  class="task-step-item"
+                  :class="getStepDisplayClass(step)"
+                >
+                  <span class="step-status-tag" :class="getStepDisplayClass(step)">
+                    {{ getStepStatusTag(step) }}
+                  </span>
+                  <span class="step-name-text">{{ step.step_name }}</span>
+                  <span v-if="step.agent_name && step.step_type === 'agent_call'" class="step-agent-tag">{{ step.agent_name }}</span>
+                  <div v-if="step.error" class="step-error-inline">{{ step.error }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 人工确认 - 内联显示在对话流中 -->
+        <div v-if="chatStore.waitingConfirm && chatStore.confirmInfo" class="message-row assistant">
+          <div class="msg-avatar assistant">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM5.5 7a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2zm-5.13 2.84a.5.5 0 01.76-.66A3.5 3.5 0 008 10.5a3.5 3.5 0 002.87-1.32.5.5 0 01.76.66A4.5 4.5 0 018 11.5a4.5 4.5 0 01-3.63-1.66z" />
+            </svg>
+          </div>
+          <div class="msg-content">
+            <div class="msg-bubble assistant confirm-inline-card">
+              <div class="confirm-inline-header">
+                <span class="confirm-type-badge" :class="chatStore.confirmInfo.confirmType">
+                  {{ confirmTypeLabel }}
+                </span>
+                <span class="confirm-inline-title">需要人工确认</span>
+              </div>
+              <div class="confirm-inline-body">
+                <p class="confirm-reason">{{ chatStore.confirmInfo.confirmReason }}</p>
+                <div class="confirm-options">
+                  <button
+                    v-for="opt in (chatStore.confirmInfo.options.length > 0 ? chatStore.confirmInfo.options : defaultConfirmOptions)"
+                    :key="opt.value"
+                    class="confirm-option-btn"
+                    :class="opt.value"
+                    @click="handleConfirm(opt.value)"
+                    :disabled="confirmLoading"
+                  >
+                    <span class="option-label">{{ opt.label }}</span>
+                    <span v-if="opt.description" class="option-desc">{{ opt.description }}</span>
+                  </button>
+                </div>
+              </div>
+              <div v-if="confirmLoading" class="confirm-loading">处理中...</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="chat-input-area">
@@ -236,7 +236,7 @@ import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { useAuthStore } from '../../stores/auth'
 import { useChatStore, type Message } from '../../stores/chat'
-import { agentApi, type ConfirmOption } from '../../api/agent'
+import { agentApi, type ConfirmOption, type TaskStepStatus } from '../../api/agent'
 import { sessionApi, type SessionInfo } from '../../api/session'
 import { knowledgeApi, type ParseResultItem } from '../../api/knowledge'
 import KbSelector from '../../components/chat/KbSelector.vue'
@@ -274,6 +274,32 @@ const taskStatusLabel = computed(() => {
   }
   return statusMap[chatStore.taskStatus] || chatStore.taskStatus
 })
+
+const completedStepCount = computed(() => {
+  return chatStore.taskSteps.filter(
+    (s) => s.status === 'completed' || s.status === 'skipped',
+  ).length
+})
+
+function getStepDisplayClass(step: TaskStepStatus): string {
+  if (step.status === 'completed') return 'completed'
+  if (step.status === 'skipped') return 'skipped'
+  if (step.status === 'running') return 'running'
+  if (step.status === 'waiting_confirm') return 'waiting_confirm'
+  if (step.status === 'failed') return 'failed'
+  if (step.status === 'degraded') return 'completed'
+  return 'pending'
+}
+
+function getStepStatusTag(step: TaskStepStatus): string {
+  if (step.status === 'completed') return '已完成'
+  if (step.status === 'skipped') return '已跳过'
+  if (step.status === 'running') return '进行中'
+  if (step.status === 'waiting_confirm') return '待确认'
+  if (step.status === 'failed') return '已失败'
+  if (step.status === 'degraded') return '已降级'
+  return '待执行'
+}
 
 const confirmTypeLabel = computed(() => {
   if (!chatStore.confirmInfo) return ''
@@ -332,6 +358,9 @@ function scrollToBottom() {
 
 watch(() => chatStore.messages.length, scrollToBottom)
 watch(() => chatStore.messages[chatStore.messages.length - 1]?.content, scrollToBottom)
+// 确认卡片和任务进度面板出现时也自动滚动到底部
+watch(() => chatStore.waitingConfirm, scrollToBottom)
+watch(() => chatStore.taskSteps.length, scrollToBottom)
 
 function sendQuickAction(text: string) {
   inputText.value = text
@@ -381,12 +410,80 @@ async function handleSend() {
       } else if (data.event === 'execution_id') {
         execId = data.data
         chatStore.setExecutionId(execId)
+        chatStore.setTaskStatus('running')
         subscribeTaskEvents(execId)
       } else if (data.event === 'chunk') {
         chatStore.appendToStreamingMessage(streamingId, data.data)
         scrollToBottom()
+      } else if (data.event === 'tool_call') {
+        // 工具调用事件：展示Agent正在调用工具
+        try {
+          const toolData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
+          if (toolData.tools && toolData.tools.length > 0) {
+            const toolNames = toolData.tools.join(', ')
+            chatStore.appendToStreamingMessage(streamingId, `\n> 正在调用工具: ${toolNames}...\n`)
+            scrollToBottom()
+          }
+        } catch { /* ignore */ }
+      } else if (data.event === 'tool_result') {
+        // 工具结果事件：展示工具执行结果摘要
+        try {
+          const resultData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
+          if (resultData.is_error) {
+            chatStore.appendToStreamingMessage(streamingId, `\n> 工具执行失败\n`)
+          }
+        } catch { /* ignore */ }
+      } else if (data.event === 'handoff') {
+        // Agent切换事件
+        try {
+          const handoffData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
+          if (handoffData.to_agent) {
+            agentName = handoffData.to_agent
+            chatStore.appendToStreamingMessage(streamingId, `\n> 切换到 ${handoffData.to_agent}\n`)
+            scrollToBottom()
+          }
+        } catch { /* ignore */ }
+      } else if (data.event === 'bus_event') {
+        // 事件总线事件（审批、降级等）
+        try {
+          const busData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
+          if (busData.event_type === 'approval_pending' || busData.event_type === 'human_confirm_required') {
+            // 人工确认事件已通过SSE任务事件流处理
+          }
+        } catch { /* ignore */ }
+      } else if (data.event === 'step_start') {
+        // 步骤开始：在消息中展示进度
+        try {
+          const stepData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
+          if (stepData.step_name) {
+            const agentInfo = stepData.agent_name ? ` (${stepData.agent_name})` : ''
+            chatStore.appendToStreamingMessage(streamingId, `\n> **步骤 ${stepData.step_index}/${stepData.total_steps}**: ${stepData.step_name}${agentInfo} - 执行中...\n`)
+            scrollToBottom()
+          }
+        } catch { /* ignore */ }
+      } else if (data.event === 'step_done') {
+        // 步骤完成：更新进度状态，展示步骤结果
+        try {
+          const stepData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
+          if (stepData.step_name) {
+            const statusIcon = stepData.status === 'completed' ? '[完成]' : stepData.status === 'failed' ? '[失败]' : stepData.status === 'waiting_confirm' ? '[待确认]' : '[完成]'
+            let stepMsg = `\n> **步骤 ${stepData.step_index}/${stepData.total_steps}**: ${stepData.step_name} ${statusIcon}`
+            // 展示步骤的输出结果
+            if (stepData.message) {
+              stepMsg += `\n> ${stepData.message.substring(0, 200)}${stepData.message.length > 200 ? '...' : ''}`
+            }
+            if (stepData.error) {
+              stepMsg += `\n> [错误] ${stepData.error}`
+            }
+            chatStore.appendToStreamingMessage(streamingId, stepMsg + '\n')
+            scrollToBottom()
+            // 刷新任务步骤列表
+            refreshTaskStatus()
+          }
+        } catch { /* ignore */ }
       } else if (data.event === 'status' && data.data === 'completed') {
         chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode, executionId: execId })
+        chatStore.setTaskStatus('completed')
       } else if (data.event === 'error') {
         const errMsg = typeof data.data === 'string' ? data.data : (data.data?.message || data.message || '服务异常')
         chatStore.appendToStreamingMessage(streamingId, `\n\n[错误] ${errMsg}`)
@@ -403,6 +500,11 @@ async function handleSend() {
       chatStore.isStreaming = false
     },
     () => {
+      // 如果消息内容为空，显示默认提示
+      const streamMsg = chatStore.messages.find((m) => m.id === streamingId)
+      if (streamMsg && !streamMsg.content.trim()) {
+        chatStore.appendToStreamingMessage(streamingId, '任务已执行完成，请查看上方任务进度面板了解详细结果。')
+      }
       chatStore.finalizeStreamingMessage(streamingId, { agentName, intent, mode, executionId: execId })
       chatStore.isStreaming = false
       refreshSessionList()
@@ -443,17 +545,49 @@ async function refreshSessionList() {
   }
 }
 
+async function restoreSessionAndTask(sessionId: string) {
+  chatStore.setSessionId(sessionId)
+  const data = await sessionApi.getHistory(sessionId)
+  const historyMessages = data.messages || []
+  chatStore.loadHistory(historyMessages)
+  try {
+    const taskStatus = await agentApi.getTaskStatusBySession(sessionId)
+    if (taskStatus && taskStatus.execution_id) {
+      chatStore.setExecutionId(taskStatus.execution_id)
+      chatStore.updateTaskSteps(taskStatus.steps || [], taskStatus.total_steps)
+      chatStore.setTaskStatus(taskStatus.status || '')
+      if (taskStatus.status === 'paused') {
+        const confirmStep = (taskStatus.steps || []).find(
+          (s: any) => s.status === 'waiting_confirm' && s.confirm_id,
+        )
+        if (confirmStep && confirmStep.confirm_id) {
+          chatStore.setWaitingConfirm(true)
+          chatStore.confirmInfo = {
+            confirmId: confirmStep.confirm_id,
+            confirmType: confirmStep.confirm_type || 'sensitive_action',
+            confirmReason: confirmStep.confirm_reason || '',
+            options: confirmStep.options || [],
+            stepIndex: confirmStep.step_index,
+          }
+        }
+      }
+      if (taskStatus.status === 'running') {
+        subscribeTaskEvents(taskStatus.execution_id)
+      }
+    }
+  } catch {
+    // 任务状态查询失败不影响消息恢复
+  }
+  scrollToBottom()
+}
+
 async function loadSession(sessionId: string) {
   if (chatStore.isStreaming) return
   if (chatStore.sessionId === sessionId) return
 
   try {
-    const data = await sessionApi.getHistory(sessionId)
-    const messages = data.messages || []
     chatStore.clearChat()
-    chatStore.setSessionId(sessionId)
-    chatStore.loadHistory(messages)
-    scrollToBottom()
+    await restoreSessionAndTask(sessionId)
   } catch {
     ElMessage.error('加载对话历史失败')
   }
@@ -525,11 +659,16 @@ function subscribeTaskEvents(execId: string) {
   sseEventSource = es
   sseDisconnected.value = false
 
+  // 已处理过的确认ID，防止SSE事件重复触发弹窗
+  // 使用全局 resolvedConfirmIds 集合（跨订阅共享）
+
   es.addEventListener('human_confirm_required', (e: MessageEvent) => {
     try {
       const data = JSON.parse(e.data)
       const payload = data.data || data
       if (payload.confirm_id) {
+        // 如果该确认ID已被处理过，则忽略（避免重复弹窗）
+        if (chatStore.resolvedConfirmIds.has(payload.confirm_id)) return
         chatStore.setWaitingConfirm(true)
         chatStore.confirmInfo = {
           confirmId: payload.confirm_id,
@@ -564,6 +703,19 @@ function subscribeTaskEvents(execId: string) {
 
   es.addEventListener('task_paused', (e: MessageEvent) => {
     chatStore.setTaskStatus('paused')
+    refreshTaskStatus()
+  })
+
+  es.addEventListener('task_resumed', (_e: MessageEvent) => {
+    chatStore.setTaskStatus('running')
+    refreshTaskStatus()
+  })
+
+  es.addEventListener('task_step_start', (_e: MessageEvent) => {
+    refreshTaskStatus()
+  })
+
+  es.addEventListener('task_step_complete', (_e: MessageEvent) => {
     refreshTaskStatus()
   })
 
@@ -611,7 +763,7 @@ async function refreshTaskStatus() {
   try {
     const status = await agentApi.getTaskStatus(chatStore.executionId)
     if (status) {
-      chatStore.updateTaskSteps(status.steps || [])
+      chatStore.updateTaskSteps(status.steps || [], status.total_steps)
       chatStore.setTaskStatus(status.status || '')
     }
   } catch { /* ignore */ }
@@ -621,6 +773,9 @@ async function handleConfirm(decision: string) {
   if (!chatStore.confirmInfo) return
   confirmLoading.value = true
 
+  // 记录已确认的 confirm_id，防止 SSE 事件重复触发弹窗
+  const confirmedId = chatStore.confirmInfo.confirmId
+
   try {
     await agentApi.confirmTask(
       chatStore.confirmInfo.confirmId,
@@ -628,15 +783,31 @@ async function handleConfirm(decision: string) {
       '',
       authStore.userId,
       decision === 'retry' ? chatStore.confirmInfo.options?.[0]?.value : undefined,
+      chatStore.executionId,
+      chatStore.confirmInfo.stepIndex,
     )
+    // 标记此 confirm_id 已处理，后续 SSE 事件和 updateTaskSteps 不会重复弹窗
+    chatStore.resolvedConfirmIds.add(confirmedId)
+    // 先关闭确认弹窗
     chatStore.setWaitingConfirm(false)
     ElMessage.success('确认已提交')
-    // 刷新任务状态
-    await refreshTaskStatus()
-    // 重新订阅SSE
+
+    // 确认后立即订阅 SSE，后端已改为后台异步执行，事件会通过 SSE 推送
     if (chatStore.executionId) {
       subscribeTaskEvents(chatStore.executionId)
     }
+
+    // 启动轮询作为 SSE 的补充，确保任务进度更新
+    let pollCount = 0
+    const maxPolls = 30
+    const pollInterval = setInterval(async () => {
+      pollCount++
+      if (pollCount > maxPolls || chatStore.taskStatus === 'completed' || chatStore.taskStatus === 'cancelled') {
+        clearInterval(pollInterval)
+        return
+      }
+      await refreshTaskStatus()
+    }, 2000)
   } catch {
     ElMessage.error('确认提交失败')
   } finally {
@@ -649,9 +820,43 @@ onMounted(async () => {
   refreshSessionList()
 
   // 恢复任务状态
-  const recovered = await chatStore.recoverTaskStatus()
+  const { recovered, sessionId: recoveredSessionId } = await chatStore.recoverTaskStatus()
   if (recovered && chatStore.executionId) {
-    subscribeTaskEvents(chatStore.executionId)
+    // 恢复会话消息
+    if (recoveredSessionId) {
+      try {
+        const data = await sessionApi.getHistory(recoveredSessionId)
+        const historyMessages = data.messages || []
+        chatStore.loadHistory(historyMessages)
+        scrollToBottom()
+      } catch {
+        // 消息加载失败不影响任务状态恢复
+      }
+    }
+    // 仅运行中的任务才订阅SSE，已完成/已暂停/已中断的不需要
+    if (chatStore.taskStatus === 'running') {
+      subscribeTaskEvents(chatStore.executionId)
+    }
+    // 刷新侧边栏以高亮当前会话
+    refreshSessionList()
+  } else {
+    // sessionStorage 中无 execution_id，尝试从最近会话恢复
+    // 场景：用户关闭浏览器后重新打开，sessionStorage 已丢失
+    try {
+      const savedSessionId = sessionStorage.getItem('current_session_id') || localStorage.getItem('current_session_id')
+      if (savedSessionId) {
+        await restoreSessionAndTask(savedSessionId)
+      } else {
+        // 尝试从最近会话列表恢复最近的会话
+        const data = await sessionApi.listUserSessions(authStore.userId, 1)
+        const recentSessions = data.sessions || data || []
+        if (recentSessions.length > 0 && recentSessions[0].session_id) {
+          await restoreSessionAndTask(recentSessions[0].session_id)
+        }
+      }
+    } catch {
+      // 恢复失败不影响正常使用
+    }
   }
 })
 
@@ -932,19 +1137,16 @@ onUnmounted(() => {
   border-color: var(--color-primary-light);
 }
 
-/* 任务进度面板 */
+/* 任务进度面板 - 内联在消息气泡中 */
 .task-progress-panel {
-  background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-lg);
-  padding: 16px;
-  margin-bottom: 20px;
+  background: var(--color-bg-elevated) !important;
 }
 
 .task-progress-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 10px;
   margin-bottom: 12px;
 }
 
@@ -954,11 +1156,18 @@ onUnmounted(() => {
   color: var(--color-text);
 }
 
+.task-progress-summary {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
 .task-status-badge {
   font-size: 12px;
   padding: 2px 10px;
   border-radius: var(--radius-full);
   font-weight: 500;
+  margin-left: auto;
 }
 
 .task-status-badge.running {
@@ -994,17 +1203,18 @@ onUnmounted(() => {
 .task-steps-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .task-step-item {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 8px 10px;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
   border-radius: var(--radius-md);
   background: var(--color-bg);
   transition: background var(--transition-fast);
+  flex-wrap: wrap;
 }
 
 .task-step-item.running {
@@ -1019,99 +1229,89 @@ onUnmounted(() => {
   background: #fff7e6;
 }
 
-.step-indicator {
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-full);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
+.step-status-tag {
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.step-icon.done {
+.step-status-tag.completed {
+  background: #f0f9eb;
   color: #52c41a;
 }
 
-.step-icon.fail {
-  color: #f5222d;
-}
-
-.step-icon.running {
-  color: #1890ff;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-.step-icon.confirm {
-  color: #fa8c16;
-}
-
-.step-icon.skip {
+.step-status-tag.skipped {
+  background: #f5f5f5;
   color: #999;
 }
 
-.step-icon.pending {
-  color: var(--color-text-tertiary);
+.step-status-tag.running {
+  background: #e6f7ff;
+  color: #1890ff;
 }
 
-.step-info {
-  flex: 1;
-  min-width: 0;
+.step-status-tag.waiting_confirm {
+  background: #fff7e6;
+  color: #fa8c16;
 }
 
-.step-name {
+.step-status-tag.failed {
+  background: #fff1f0;
+  color: #f5222d;
+}
+
+.step-status-tag.pending {
+  background: #f5f5f5;
+  color: #bbb;
+}
+
+.step-name-text {
   font-size: 13px;
   font-weight: 500;
   color: var(--color-text);
 }
 
-.step-agent {
+.task-step-item.pending .step-name-text {
+  color: var(--color-text-tertiary);
+}
+
+.step-agent-tag {
   font-size: 11px;
   color: var(--color-text-tertiary);
-  margin-top: 2px;
+  background: var(--color-bg);
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--color-border-light);
 }
 
-.step-error {
+.step-error-inline {
   font-size: 12px;
   color: #f5222d;
-  margin-top: 4px;
+  width: 100%;
+  margin-top: 2px;
+  padding-left: 0;
 }
 
-/* 人工确认弹窗 */
-.confirm-dialog-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
+/* 人工确认 - 内联卡片 */
+.confirm-inline-card {
+  border: 1px solid #ffd591;
+  background: #fffbe6 !important;
 }
 
-.confirm-dialog {
-  background: white;
-  border-radius: var(--radius-lg);
-  padding: 24px;
-  width: 420px;
-  max-width: 90vw;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
-}
-
-.confirm-header {
+.confirm-inline-header {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
+}
+
+.confirm-inline-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text);
 }
 
 .confirm-type-badge {
@@ -1136,15 +1336,8 @@ onUnmounted(() => {
   color: #1890ff;
 }
 
-.confirm-title {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--color-text);
-  margin: 0;
-}
-
-.confirm-body {
-  margin-bottom: 16px;
+.confirm-inline-body {
+  margin-bottom: 8px;
 }
 
 .confirm-reason {
@@ -1156,7 +1349,7 @@ onUnmounted(() => {
 
 .confirm-options {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1164,13 +1357,14 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  padding: 12px 16px;
+  padding: 8px 14px;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   background: white;
   cursor: pointer;
   transition: all var(--transition-fast);
   text-align: left;
+  flex: 0 0 auto;
 }
 
 .confirm-option-btn:hover:not(:disabled) {

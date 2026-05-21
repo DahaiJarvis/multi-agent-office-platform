@@ -100,7 +100,7 @@ async def list_user_sessions(
     从 L3 PostgreSQL 查询用户的历史会话，返回摘要信息。
     """
     session_mgr = await get_session_manager()
-    sessions = await session_mgr.list_archived_sessions(user_id, limit, offset)
+    sessions = await session_mgr.list_archived_sessions(user_id, limit=limit)
 
     return {
         "user_id": user_id,

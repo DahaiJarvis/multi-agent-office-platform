@@ -9,11 +9,38 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_servers.base import EnterpriseAPIClient, format_result, load_enterprise_config
+from mcp_servers.base import EnterpriseAPIClient, format_result, is_mock_mode, load_enterprise_config
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("crm-mcp-server", host="0.0.0.0", port=9004)
+
+# Mock 数据
+MOCK_DATA = {
+    "customers": [
+        {"id": "CUS-001", "name": "北京科技有限公司", "industry": "互联网", "level": "vip", "owner": "张三", "contact_count": 3},
+        {"id": "CUS-002", "name": "上海贸易集团", "industry": "贸易", "level": "important", "owner": "李四", "contact_count": 2},
+        {"id": "CUS-003", "name": "深圳创新科技", "industry": "科技", "level": "normal", "owner": "王五", "contact_count": 1},
+        {"id": "CUS-004", "name": "广州智能制造", "industry": "制造业", "level": "potential", "owner": "张三", "contact_count": 1},
+        {"id": "CUS-005", "name": "杭州数据科技", "industry": "互联网", "level": "vip", "owner": "李四", "contact_count": 4},
+    ],
+    "customer_detail": {
+        "id": "CUS-001", "name": "北京科技有限公司", "industry": "互联网", "level": "vip",
+        "owner": "张三", "address": "北京市海淀区XX路XX号", "phone": "010-12345678",
+        "contacts": [
+            {"name": "赵经理", "title": "采购总监", "phone": "13800001111", "email": "zhao@bjtech.com", "is_primary": True},
+            {"name": "钱工程师", "title": "技术经理", "phone": "13800002222", "email": "qian@bjtech.com", "is_primary": False},
+        ],
+        "total_deals": 5, "total_amount": "1280000",
+        "last_contact_date": "2026-05-15",
+    },
+    "opportunities": [
+        {"id": "OPP-001", "customer_id": "CUS-001", "title": "ERP系统升级", "stage": "proposal", "amount": "580000", "owner": "张三", "expected_close_date": "2026-07-01"},
+        {"id": "OPP-002", "customer_id": "CUS-002", "title": "数据平台建设", "stage": "negotiation", "amount": "1200000", "owner": "李四", "expected_close_date": "2026-06-15"},
+        {"id": "OPP-003", "customer_id": "CUS-005", "title": "AI助手定制开发", "stage": "prospect", "amount": "850000", "owner": "李四", "expected_close_date": "2026-09-01"},
+        {"id": "OPP-004", "customer_id": "CUS-004", "title": "MES系统实施", "stage": "qualification", "amount": "2000000", "owner": "张三", "expected_close_date": "2026-10-01"},
+    ],
+}
 
 _api_client: EnterpriseAPIClient | None = None
 
@@ -50,6 +77,9 @@ async def query_customers(
     Returns:
         客户列表 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["customers"], "total": len(MOCK_DATA["customers"]), "page": page, "page_size": page_size})
+
     client = _get_api_client()
     params: dict[str, Any] = {"page": page, "page_size": page_size}
     if keyword:
@@ -80,6 +110,9 @@ async def get_customer_detail(customer_id: str) -> str:
     Returns:
         客户详情 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data=MOCK_DATA["customer_detail"])
+
     client = _get_api_client()
     result = await client.get(f"/customers/{customer_id}")
     if result.get("success") is False:
@@ -111,6 +144,9 @@ async def query_opportunities(
     Returns:
         商机列表 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"items": MOCK_DATA["opportunities"], "total": len(MOCK_DATA["opportunities"]), "page": page, "page_size": page_size})
+
     client = _get_api_client()
     params: dict[str, Any] = {"page": page, "page_size": page_size}
     if customer_id:
@@ -152,6 +188,9 @@ async def update_opportunity(
     valid_stages = ("prospect", "qualification", "proposal", "negotiation", "closed_won", "closed_lost")
     if stage and stage not in valid_stages:
         return format_result(False, error=f"不支持的商机阶段: {stage}，可选 {valid_stages}")
+
+    if is_mock_mode():
+        return format_result(True, data={"opportunity_id": opportunity_id, "status": "updated"})
 
     client = _get_api_client()
     payload: dict[str, Any] = {}
@@ -198,6 +237,9 @@ async def add_customer_contact(
     Returns:
         添加结果 JSON 字符串
     """
+    if is_mock_mode():
+        return format_result(True, data={"customer_id": customer_id, "contact_name": name, "status": "added"})
+
     client = _get_api_client()
     payload: dict[str, Any] = {"name": name}
     if title:

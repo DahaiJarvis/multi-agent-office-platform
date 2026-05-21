@@ -339,7 +339,9 @@ class LongTermMemory:
                     result = await session.execute(
                         text("""
                             SELECT s.session_id, s.user_id, s.tenant_id, s.channel, s.context_summary,
-                                   s.archived_at, COUNT(m.id) as message_count
+                                   s.archived_at, s.created_at as session_created_at,
+                                   COUNT(m.id) as message_count,
+                                   (SELECT m2.content FROM messages m2 WHERE m2.session_id = s.session_id AND m2.role = 'user' ORDER BY m2.created_at ASC LIMIT 1) as first_message
                             FROM sessions s
                             LEFT JOIN messages m ON s.session_id = m.session_id
                             WHERE s.user_id = :uid AND s.tenant_id = :tid
@@ -353,7 +355,9 @@ class LongTermMemory:
                     result = await session.execute(
                         text("""
                             SELECT s.session_id, s.user_id, s.tenant_id, s.channel, s.context_summary,
-                                   s.archived_at, COUNT(m.id) as message_count
+                                   s.archived_at, s.created_at as session_created_at,
+                                   COUNT(m.id) as message_count,
+                                   (SELECT m2.content FROM messages m2 WHERE m2.session_id = s.session_id AND m2.role = 'user' ORDER BY m2.created_at ASC LIMIT 1) as first_message
                             FROM sessions s
                             LEFT JOIN messages m ON s.session_id = m.session_id
                             WHERE s.user_id = :uid
@@ -371,10 +375,13 @@ class LongTermMemory:
                         "user_id": row["user_id"],
                         "channel": row["channel"],
                         "context_summary": row["context_summary"],
-                        "created_at": row["archived_at"].isoformat() if row["archived_at"] else "",
+                        "created_at": (row["session_created_at"].isoformat()
+                                       if row.get("session_created_at") and hasattr(row["session_created_at"], "isoformat")
+                                       else (row["archived_at"].isoformat() if row["archived_at"] else "")),
                         "updated_at": row["archived_at"].isoformat() if row["archived_at"] else "",
                         "message_count": row["message_count"],
                         "active_agents": [],
+                        "first_message": row["first_message"] or "",
                     })
 
                 return sessions
