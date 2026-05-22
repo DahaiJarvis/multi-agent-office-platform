@@ -3,11 +3,14 @@
 作为消息队列的消费者运行，定期扫描 Redis ZSET 中到期的定时任务，
 执行任务并通过渠道适配器推送结果。
 
+同时包含业务指标聚合定时任务，每小时从 Prometheus 采集数据写入 Redis 缓存。
+
 运行流程：
   1. 每秒扫描 Redis ZSET 中到期的任务
   2. 到期任务 -> 调用 route_and_execute 执行
   3. 执行结果 -> 通过渠道适配器推送
   4. 更新 next_run_at
+  5. 每小时聚合业务指标到 Redis 缓存
 """
 
 import asyncio
@@ -16,6 +19,9 @@ import logging
 from agent.core.message_queue import get_scheduled_task_manager, ScheduledTask
 
 logger = logging.getLogger(__name__)
+
+# 业务指标聚合间隔（秒）
+ANALYTICS_AGGREGATE_INTERVAL = 3600
 
 
 class SchedulerWorker:
@@ -28,6 +34,7 @@ class SchedulerWorker:
         self._poll_interval = poll_interval
         self._running = False
         self._task: asyncio.Task | None = None
+        self._analytics_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """启动扫描循环"""
@@ -36,17 +43,19 @@ class SchedulerWorker:
 
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())
+        self._analytics_task = asyncio.create_task(self._analytics_aggregate_loop())
         logger.info("定时任务扫描器已启动: poll_interval=%.1fs", self._poll_interval)
 
     async def stop(self) -> None:
         """停止扫描循环"""
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._task, self._analytics_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         logger.info("定时任务扫描器已停止")
 
     async def _poll_loop(self) -> None:
@@ -151,6 +160,27 @@ class SchedulerWorker:
             )
         except Exception as e:
             logger.warning("推送定时任务结果失败: channel=%s error=%s", task.channel, e)
+
+    async def _analytics_aggregate_loop(self) -> None:
+        """业务指标聚合循环
+
+        每小时从 Prometheus 采集业务指标数据，聚合后写入 Redis 缓存，
+        供业务分析 API 查询使用。
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(ANALYTICS_AGGREGATE_INTERVAL)
+            except asyncio.CancelledError:
+                break
+
+            if not self._running:
+                break
+
+            try:
+                from observability.business_analytics import aggregate_daily_metrics
+                await aggregate_daily_metrics()
+            except Exception as e:
+                logger.error("业务指标聚合失败: %s", e)
 
 
 # 全局调度器实例

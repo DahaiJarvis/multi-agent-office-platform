@@ -178,6 +178,11 @@ async def check_tool_call_guardrails(
     checks.append(whitelist_result["check_entry"])
     if not whitelist_result["passed"]:
         logger.warning("工具调用白名单拦截: tool=%s", tool_name)
+        try:
+            from observability.metrics import record_guardrail_block
+            record_guardrail_block("tool_whitelist", "block")
+        except Exception:
+            pass
         return GuardrailResult(
             passed=False,
             action=GuardrailAction.BLOCK,
@@ -196,6 +201,11 @@ async def check_tool_call_guardrails(
 
     if not perm_result.allowed:
         logger.warning("工具调用权限不足: role=%s tool=%s", user_role, tool_name)
+        try:
+            from observability.metrics import record_guardrail_block
+            record_guardrail_block("permission", "block")
+        except Exception:
+            pass
         return GuardrailResult(
             passed=False,
             action=GuardrailAction.BLOCK,
@@ -213,6 +223,11 @@ async def check_tool_call_guardrails(
 
         if perm_result.require_confirm:
             # 自动创建审批单
+            try:
+                from observability.metrics import record_guardrail_block
+                record_guardrail_block("sensitive_action", "confirm")
+            except Exception:
+                pass
             approval_id = await _create_approval_for_sensitive_action(
                 tool_name=tool_name,
                 tool_input=tool_input,
@@ -247,6 +262,11 @@ async def check_tool_call_guardrails(
         checks.append(schema_result["check_entry"])
         if not schema_result["passed"]:
             logger.warning("工具参数校验失败: tool=%s errors=%s", tool_name, schema_result["errors"])
+            try:
+                from observability.metrics import record_guardrail_block
+                record_guardrail_block("tool_schema", "block")
+            except Exception:
+                pass
             return GuardrailResult(
                 passed=False,
                 action=GuardrailAction.BLOCK,

@@ -433,10 +433,22 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
         execution.status = "completed"
         execution.results = context["results"]
 
+        try:
+            from observability.metrics import record_workflow_execution
+            record_workflow_execution(workflow_id, "success")
+        except Exception:
+            pass
+
     except Exception as e:
         execution.status = "failed"
         execution.error = str(e)
         logger.error("工作流执行失败: %s", e)
+
+        try:
+            from observability.metrics import record_workflow_execution
+            record_workflow_execution(workflow_id, "error")
+        except Exception:
+            pass
 
     execution.completed_at = time.time()
     await _store_execution(execution)

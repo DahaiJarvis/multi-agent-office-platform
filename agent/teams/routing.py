@@ -95,7 +95,7 @@ from agent.teams.team_factory import create_team
 from agent.teams.execution_controller import get_execution_controller
 from agent.core.session_manager import SessionState, get_session_manager
 from agent.core.event_bus import publish_event, EventType
-from observability.metrics import record_agent_call
+from observability.metrics import record_agent_call, record_business_task, record_intent_distribution, record_clarification
 from observability.tracing import langfuse_tracer, span_cache
 
 logger = logging.getLogger(__name__)
@@ -232,6 +232,12 @@ async def route_and_execute(
             intent.collaboration_mode.value,
         )
 
+    # 记录意图分布业务指标
+    try:
+        record_intent_distribution(intent.intent, intent.confidence)
+    except Exception:
+        pass
+
     # 记录意图分类 Span（用于 Langfuse 追踪）
     try:
         intent_duration = (time.time() - start_time) * 1000
@@ -277,6 +283,11 @@ async def route_and_execute(
     # 当置信度低于阈值时，不直接执行，而是请求用户澄清
     # 避免在意图不明确时执行错误操作（如误发邮件）
     if intent.confidence < CONFIDENCE_THRESHOLD:
+        # 记录需要用户澄清的业务指标
+        try:
+            record_clarification(intent.intent)
+        except Exception:
+            pass
         return {
             "status": "clarification_needed",
             "message": f"我不太确定您的意图（置信度: {intent.confidence:.0%}），请更详细地描述您的需求。",
@@ -348,6 +359,10 @@ async def route_and_execute(
             duration = time.time() - start_time
             record_agent_call(intent.target_agent, "error", duration)
             try:
+                record_business_task(intent.intent, intent.target_agent, "timeout", duration)
+            except Exception:
+                pass
+            try:
                 await publish_event(EventType.ERROR, session_id, {
                     "agent_name": intent.target_agent,
                     "error": "timeout",
@@ -366,6 +381,10 @@ async def route_and_execute(
         if exec_meta.status == "error" and result is None:
             duration = time.time() - start_time
             record_agent_call(intent.target_agent, "error", duration)
+            try:
+                record_business_task(intent.intent, intent.target_agent, "error", duration)
+            except Exception:
+                pass
             logger.error("任务执行失败: agent=%s error=%s", intent.target_agent, exec_meta.message)
             try:
                 await publish_event(EventType.ERROR, session_id, {
@@ -388,6 +407,10 @@ async def route_and_execute(
 
         duration = time.time() - start_time
         record_agent_call(intent.target_agent, "success", duration)
+        try:
+            record_business_task(intent.intent, intent.target_agent, "success", duration)
+        except Exception:
+            pass
 
         # 记录审计日志
         try:
@@ -465,6 +488,10 @@ async def route_and_execute(
     except Exception as e:
         duration = time.time() - start_time
         record_agent_call(intent.target_agent, "error", duration)
+        try:
+            record_business_task(intent.intent, intent.target_agent, "error", duration)
+        except Exception:
+            pass
         logger.error("任务执行失败: agent=%s error=%s", intent.target_agent, e)
 
         # 记录失败统计

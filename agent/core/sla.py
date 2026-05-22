@@ -20,6 +20,13 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+# Redis Key 定义
+LATENCY_SAMPLES_KEY = "sla:latency_samples"
+TOTAL_COUNT_KEY = "sla:total_count"
+ERROR_COUNT_KEY = "sla:error_count"
+START_TIME_KEY = "sla:start_time"
+MAX_SAMPLES = 10000
+
 
 class SLATier(str, Enum):
     """SLA 层级"""
@@ -233,34 +240,142 @@ def get_max_model_tier(tier: SLATier) -> str:
     return definition.max_model_tier
 
 
-# ==================== 指标采集 ====================
+# ==================== 指标采集（Redis + 内存降级） ====================
 
-_latency_samples: list[float] = []
-_error_count: int = 0
-_total_count: int = 0
-_start_time: float = time.time()
+_redis_client: Any = None
 
-
-def record_latency(duration_ms: float) -> None:
-    """记录延迟采样"""
-    global _total_count
-    _latency_samples.append(duration_ms)
-    _total_count += 1
-
-    if len(_latency_samples) > 10000:
-        _latency_samples[:] = _latency_samples[-5000:]
+# 内存降级存储
+_fallback_latency_samples: list[float] = []
+_fallback_error_count: int = 0
+_fallback_total_count: int = 0
+_fallback_start_time: float = time.time()
 
 
-def record_error() -> None:
-    """记录错误"""
-    global _error_count, _total_count
-    _error_count += 1
-    _total_count += 1
+async def _get_redis() -> Any:
+    """获取 Redis 客户端"""
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+    try:
+        from agent.core.redis_manager import get_redis_client
+        _redis_client = await get_redis_client()
+        return _redis_client
+    except Exception as e:
+        logger.debug("Redis 获取失败: %s", e)
+        return None
 
 
-def get_current_metrics() -> dict[str, float]:
-    """获取当前指标"""
-    if not _latency_samples:
+async def _ensure_start_time(redis: Any) -> None:
+    """确保 Redis 中存在启动时间记录"""
+    try:
+        exists = await redis.exists(START_TIME_KEY)
+        if not exists:
+            await redis.set(START_TIME_KEY, str(time.time()))
+    except Exception as e:
+        logger.debug("设置启动时间失败: %s", e)
+
+
+async def record_latency(duration_ms: float) -> None:
+    """记录延迟采样
+
+    优先写入 Redis List，Redis 不可用时降级到内存列表。
+    使用 RPUSH + LTRIM 原子操作保留最近 MAX_SAMPLES 条样本。
+
+    Args:
+        duration_ms: 延迟毫秒数
+    """
+    global _fallback_total_count
+    redis = await _get_redis()
+    if redis is not None:
+        try:
+            await redis.rpush(LATENCY_SAMPLES_KEY, str(duration_ms))
+            await redis.ltrim(LATENCY_SAMPLES_KEY, -MAX_SAMPLES, -1)
+            await redis.incr(TOTAL_COUNT_KEY)
+            await _ensure_start_time(redis)
+            return
+        except Exception as e:
+            logger.warning("记录延迟采样到 Redis 失败: %s", e)
+
+    _fallback_latency_samples.append(duration_ms)
+    _fallback_total_count += 1
+    if len(_fallback_latency_samples) > MAX_SAMPLES:
+        _fallback_latency_samples[:] = _fallback_latency_samples[-(MAX_SAMPLES // 2):]
+
+
+async def record_error() -> None:
+    """记录错误
+
+    优先写入 Redis 计数器，Redis 不可用时降级到内存计数器。
+    """
+    global _fallback_error_count, _fallback_total_count
+    redis = await _get_redis()
+    if redis is not None:
+        try:
+            await redis.incr(ERROR_COUNT_KEY)
+            await redis.incr(TOTAL_COUNT_KEY)
+            await _ensure_start_time(redis)
+            return
+        except Exception as e:
+            logger.warning("记录错误计数到 Redis 失败: %s", e)
+
+    _fallback_error_count += 1
+    _fallback_total_count += 1
+
+
+async def get_current_metrics() -> dict[str, float]:
+    """获取当前指标
+
+    优先从 Redis 读取延迟样本和计数器，Redis 不可用时从内存降级存储读取。
+    在应用层计算分位数（P50/P90/P99）和统计值。
+
+    Returns:
+        指标字典
+    """
+    redis = await _get_redis()
+    if redis is not None:
+        try:
+            samples_raw = await redis.lrange(LATENCY_SAMPLES_KEY, 0, -1)
+            samples = [float(s) for s in samples_raw]
+
+            total_count_raw = await redis.get(TOTAL_COUNT_KEY)
+            total_count = int(total_count_raw) if total_count_raw else 0
+
+            error_count_raw = await redis.get(ERROR_COUNT_KEY)
+            error_count = int(error_count_raw) if error_count_raw else 0
+
+            start_time_raw = await redis.get(START_TIME_KEY)
+            start_time = float(start_time_raw) if start_time_raw else time.time()
+
+            return _calculate_metrics(samples, total_count, error_count, start_time)
+        except Exception as e:
+            logger.warning("从 Redis 读取 SLA 指标失败: %s", e)
+
+    return _calculate_metrics(
+        _fallback_latency_samples,
+        _fallback_total_count,
+        _fallback_error_count,
+        _fallback_start_time,
+    )
+
+
+def _calculate_metrics(
+    samples: list[float],
+    total_count: int,
+    error_count: int,
+    start_time: float,
+) -> dict[str, float]:
+    """根据延迟样本和计数器计算指标
+
+    Args:
+        samples: 延迟采样列表
+        total_count: 总请求数
+        error_count: 错误数
+        start_time: 启动时间
+
+    Returns:
+        指标字典
+    """
+    if not samples:
         return {
             "latency_p50_ms": 0,
             "latency_p90_ms": 0,
@@ -270,10 +385,10 @@ def get_current_metrics() -> dict[str, float]:
             "latency_max_ms": 0,
             "error_rate": 0,
             "throughput_rps": 0,
-            "total_requests": _total_count,
+            "total_requests": total_count,
         }
 
-    sorted_samples = sorted(_latency_samples)
+    sorted_samples = sorted(samples)
     n = len(sorted_samples)
 
     return {
@@ -283,16 +398,16 @@ def get_current_metrics() -> dict[str, float]:
         "latency_mean_ms": statistics.mean(sorted_samples),
         "latency_min_ms": sorted_samples[0],
         "latency_max_ms": sorted_samples[-1],
-        "error_rate": (_error_count / _total_count * 100) if _total_count > 0 else 0,
-        "throughput_rps": _total_count / max(time.time() - _start_time, 1),
-        "total_requests": _total_count,
+        "error_rate": (error_count / total_count * 100) if total_count > 0 else 0,
+        "throughput_rps": total_count / max(time.time() - start_time, 1),
+        "total_requests": total_count,
     }
 
 
 # ==================== SLA 监控 ====================
 
 
-def check_sla_compliance(tier: SLATier = SLATier.PROFESSIONAL) -> SLAStatus:
+async def check_sla_compliance(tier: SLATier = SLATier.PROFESSIONAL) -> SLAStatus:
     """检查 SLA 合规性
 
     Args:
@@ -302,7 +417,7 @@ def check_sla_compliance(tier: SLATier = SLATier.PROFESSIONAL) -> SLAStatus:
         SLAStatus
     """
     definition = _SLA_DEFINITIONS[tier]
-    metrics = get_current_metrics()
+    metrics = await get_current_metrics()
 
     violations: list[dict[str, Any]] = []
 

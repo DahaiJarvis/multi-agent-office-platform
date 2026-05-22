@@ -36,13 +36,13 @@ async def api_get_sla_definition(tier: SLATier) -> SLADefinition:
 @router.get("/metrics", summary="获取SLA指标")
 async def api_get_current_metrics() -> dict:
     """获取当前性能指标"""
-    return get_current_metrics()
+    return await get_current_metrics()
 
 
 @router.get("/compliance", response_model=SLAStatus, summary="获取SLA合规状态")
 async def api_check_sla_compliance(tier: SLATier = Query(default=SLATier.PROFESSIONAL)) -> SLAStatus:
     """检查 SLA 合规性"""
-    return check_sla_compliance(tier)
+    return await check_sla_compliance(tier)
 
 
 @router.post("/benchmark", response_model=BenchmarkResult, summary="执行SLA基准测试")

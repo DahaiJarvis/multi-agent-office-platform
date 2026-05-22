@@ -9,9 +9,16 @@
   - 插件市场：插件发现、安装、评分
   - Hook 机制：在关键流程点注入插件逻辑
   - 权限控制：插件权限声明和校验
+
+持久化：
+  - 插件清单和实例状态同步到 Redis，多实例部署时数据共享
+  - Handler 不持久化（运行时 Python 函数引用），启动时从 Redis
+    加载清单后对 ENABLED 状态的插件重新执行 enable_plugin 触发注册
+  - 市场数据同步到 Redis，支持跨实例查询
 """
 
 import importlib
+import json
 import logging
 import time
 import uuid
@@ -21,6 +28,13 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+# Redis Key 前缀
+_REGISTRY_KEY_PREFIX = "plugin_registry:"
+_INSTANCE_KEY_PREFIX = "plugin_instance:"
+_REGISTRY_SET_KEY = "plugin_registry:all"
+_MARKET_KEY_PREFIX = "plugin_market:"
+_MARKET_SET_KEY = "plugin_market:all"
 
 
 class PluginStatus(str, Enum):
@@ -117,6 +131,96 @@ class HookResult(BaseModel):
     execution_time_ms: float = 0
 
 
+# ==================== Redis 持久化 ====================
+
+_redis_client: Any = None
+
+
+async def _get_redis() -> Any:
+    """获取 Redis 客户端"""
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+    try:
+        from agent.core.redis_manager import get_redis_client
+        _redis_client = await get_redis_client()
+        return _redis_client
+    except Exception as e:
+        logger.debug("Redis 获取失败: %s", e)
+        return None
+
+
+async def _persist_manifest(manifest: PluginManifest) -> None:
+    """持久化插件清单到 Redis"""
+    redis = await _get_redis()
+    if redis is None:
+        return
+    try:
+        key = f"{_REGISTRY_KEY_PREFIX}{manifest.plugin_id}"
+        await redis.set(key, manifest.model_dump_json(), ex=86400 * 30)
+        await redis.sadd(_REGISTRY_SET_KEY, manifest.plugin_id)
+    except Exception as e:
+        logger.debug("插件清单持久化失败: %s", e)
+
+
+async def _remove_manifest(plugin_id: str) -> None:
+    """从 Redis 删除插件清单"""
+    redis = await _get_redis()
+    if redis is None:
+        return
+    try:
+        await redis.delete(f"{_REGISTRY_KEY_PREFIX}{plugin_id}")
+        await redis.srem(_REGISTRY_SET_KEY, plugin_id)
+    except Exception as e:
+        logger.debug("插件清单删除失败: %s", e)
+
+
+async def _persist_instance(instance: PluginInstance) -> None:
+    """持久化插件实例状态到 Redis"""
+    redis = await _get_redis()
+    if redis is None:
+        return
+    try:
+        key = f"{_INSTANCE_KEY_PREFIX}{instance.plugin_id}"
+        await redis.set(key, instance.model_dump_json(), ex=86400 * 30)
+    except Exception as e:
+        logger.debug("插件实例持久化失败: %s", e)
+
+
+async def _remove_instance(plugin_id: str) -> None:
+    """从 Redis 删除插件实例"""
+    redis = await _get_redis()
+    if redis is None:
+        return
+    try:
+        await redis.delete(f"{_INSTANCE_KEY_PREFIX}{plugin_id}")
+    except Exception as e:
+        logger.debug("插件实例删除失败: %s", e)
+
+
+async def _persist_market_entry(entry: "MarketplaceEntry") -> None:
+    """持久化市场条目到 Redis
+
+    注意：MarketplaceEntry 在下方定义，此处使用前向引用。
+    """
+    redis = await _get_redis()
+    if redis is None:
+        return
+    try:
+        data = {
+            "manifest_json": entry.manifest.model_dump_json(),
+            "downloads": entry.downloads,
+            "rating": entry.rating,
+            "rating_count": entry.rating_count,
+            "category": entry.category,
+        }
+        key = f"{_MARKET_KEY_PREFIX}{entry.manifest.plugin_id}"
+        await redis.set(key, json.dumps(data, ensure_ascii=False), ex=86400 * 30)
+        await redis.sadd(_MARKET_SET_KEY, entry.manifest.plugin_id)
+    except Exception as e:
+        logger.debug("市场条目持久化失败: %s", e)
+
+
 # ==================== 插件注册表 ====================
 
 _registry: dict[str, PluginManifest] = {}
@@ -126,6 +230,8 @@ _handlers: dict[str, dict[HookPoint, Callable]] = {}
 
 def register_plugin(manifest: PluginManifest) -> PluginManifest:
     """注册插件
+
+    同时更新内存和 Redis。
 
     Args:
         manifest: 插件清单
@@ -140,11 +246,26 @@ def register_plugin(manifest: PluginManifest) -> PluginManifest:
     _instances[manifest.plugin_id] = PluginInstance(plugin_id=manifest.plugin_id)
 
     logger.info("插件已注册: id=%s name=%s", manifest.plugin_id, manifest.name)
+
+    # 异步持久化到 Redis
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_persist_manifest(manifest))
+        else:
+            loop.run_until_complete(_persist_manifest(manifest))
+    except Exception:
+        pass
+
     return manifest
 
 
 def unregister_plugin(plugin_id: str) -> bool:
-    """注销插件"""
+    """注销插件
+
+    同时删除内存和 Redis 中的数据。
+    """
     if plugin_id not in _registry:
         return False
 
@@ -157,6 +278,20 @@ def unregister_plugin(plugin_id: str) -> bool:
     _handlers.pop(plugin_id, None)
 
     logger.info("插件已注销: id=%s", plugin_id)
+
+    # 异步删除 Redis 数据
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_remove_manifest(plugin_id))
+            asyncio.ensure_future(_remove_instance(plugin_id))
+        else:
+            loop.run_until_complete(_remove_manifest(plugin_id))
+            loop.run_until_complete(_remove_instance(plugin_id))
+    except Exception:
+        pass
+
     return True
 
 
@@ -164,6 +299,7 @@ def enable_plugin(plugin_id: str, config: dict[str, Any] | None = None) -> Plugi
     """启用插件
 
     加载插件模块并注册 Hook 处理器。
+    同时更新 Redis 中的实例状态。
 
     Args:
         plugin_id: 插件ID
@@ -197,11 +333,25 @@ def enable_plugin(plugin_id: str, config: dict[str, Any] | None = None) -> Plugi
         instance.error_message = str(e)
         logger.error("插件启用失败: id=%s error=%s", plugin_id, e)
 
+    # 异步持久化实例状态
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_persist_instance(instance))
+        else:
+            loop.run_until_complete(_persist_instance(instance))
+    except Exception:
+        pass
+
     return instance
 
 
 def disable_plugin(plugin_id: str) -> PluginInstance | None:
-    """禁用插件"""
+    """禁用插件
+
+    同时更新 Redis 中的实例状态。
+    """
     instance = _instances.get(plugin_id)
     if not instance:
         return None
@@ -210,6 +360,18 @@ def disable_plugin(plugin_id: str) -> PluginInstance | None:
     _handlers.pop(plugin_id, None)
 
     logger.info("插件已禁用: id=%s", plugin_id)
+
+    # 异步持久化实例状态
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_persist_instance(instance))
+        else:
+            loop.run_until_complete(_persist_instance(instance))
+    except Exception:
+        pass
+
     return instance
 
 
@@ -382,10 +544,25 @@ _marketplace: dict[str, MarketplaceEntry] = {}
 
 
 def publish_to_marketplace(manifest: PluginManifest, category: str = "general") -> MarketplaceEntry:
-    """发布到插件市场"""
+    """发布到插件市场
+
+    同时持久化到 Redis。
+    """
     entry = MarketplaceEntry(manifest=manifest, category=category)
     _marketplace[manifest.plugin_id] = entry
     logger.info("插件已发布到市场: id=%s name=%s", manifest.plugin_id, manifest.name)
+
+    # 异步持久化
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_persist_market_entry(entry))
+        else:
+            loop.run_until_complete(_persist_market_entry(entry))
+    except Exception:
+        pass
+
     return entry
 
 
@@ -418,7 +595,102 @@ def install_from_marketplace(plugin_id: str) -> PluginManifest | None:
         return _registry[plugin_id]
 
     entry.downloads += 1
+
+    # 异步持久化市场条目（更新下载量）
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_persist_market_entry(entry))
+        else:
+            loop.run_until_complete(_persist_market_entry(entry))
+    except Exception:
+        pass
+
     return register_plugin(entry.manifest.model_copy())
+
+
+# ==================== 启动恢复 ====================
+
+
+async def restore_from_redis() -> int:
+    """从 Redis 恢复插件注册表和实例状态
+
+    应用启动时调用，从 Redis 加载所有已注册插件清单，
+    对状态为 ENABLED 的插件自动执行 enable_plugin 触发 Handler 注册。
+
+    Returns:
+        恢复的插件数量
+    """
+    redis = await _get_redis()
+    if redis is None:
+        logger.info("Redis 不可用，跳过插件恢复")
+        return 0
+
+    restored = 0
+
+    try:
+        plugin_ids = await redis.smembers(_REGISTRY_SET_KEY)
+        if not plugin_ids:
+            return 0
+
+        for plugin_id in plugin_ids:
+            try:
+                # 加载插件清单
+                manifest_raw = await redis.get(f"{_REGISTRY_KEY_PREFIX}{plugin_id}")
+                if not manifest_raw:
+                    continue
+                manifest = PluginManifest.model_validate_json(manifest_raw)
+
+                # 跳过已存在的插件（如官方插件已在内存中）
+                if manifest.plugin_id in _registry:
+                    continue
+
+                _registry[manifest.plugin_id] = manifest
+
+                # 加载实例状态
+                instance_raw = await redis.get(f"{_INSTANCE_KEY_PREFIX}{plugin_id}")
+                if instance_raw:
+                    instance = PluginInstance.model_validate_json(instance_raw)
+                    _instances[manifest.plugin_id] = instance
+                else:
+                    _instances[manifest.plugin_id] = PluginInstance(plugin_id=manifest.plugin_id)
+
+                # 对 ENABLED 状态的插件重新执行 enable_plugin（触发 Handler 注册）
+                instance = _instances[manifest.plugin_id]
+                if instance.status == PluginStatus.ENABLED:
+                    enable_plugin(manifest.plugin_id, instance.config)
+
+                restored += 1
+            except Exception as e:
+                logger.warning("恢复插件失败: id=%s error=%s", plugin_id, e)
+
+        # 恢复市场数据
+        market_ids = await redis.smembers(_MARKET_SET_KEY)
+        for plugin_id in market_ids:
+            try:
+                market_raw = await redis.get(f"{_MARKET_KEY_PREFIX}{plugin_id}")
+                if not market_raw:
+                    continue
+                data = json.loads(market_raw)
+                manifest = PluginManifest.model_validate_json(data["manifest_json"])
+                entry = MarketplaceEntry(
+                    manifest=manifest,
+                    downloads=data.get("downloads", 0),
+                    rating=data.get("rating", 0.0),
+                    rating_count=data.get("rating_count", 0),
+                    category=data.get("category", "general"),
+                )
+                _marketplace[plugin_id] = entry
+            except Exception as e:
+                logger.warning("恢复市场条目失败: id=%s error=%s", plugin_id, e)
+
+        logger.info("从 Redis 恢复了 %d 个插件", restored)
+
+    except Exception as e:
+        logger.warning("插件恢复失败: %s", e)
+
+    return restored
 
 
 # ==================== 初始化官方插件 ====================

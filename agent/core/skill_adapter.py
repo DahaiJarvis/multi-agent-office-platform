@@ -470,6 +470,14 @@ class SkillRegistry:
         if not skills:
             return ""
 
+        # 记录技能使用业务指标
+        for doc in skills:
+            try:
+                from observability.metrics import record_skill_usage
+                record_skill_usage(doc.manifest.name, agent_name)
+            except Exception:
+                pass
+
         parts = []
         for doc in skills:
             instruction = sanitize_prompt(doc.instruction)
