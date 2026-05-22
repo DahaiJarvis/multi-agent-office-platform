@@ -74,21 +74,114 @@
           class="message-row"
           :class="[msg.role]"
         >
-          <div v-if="msg.role === 'assistant'" class="msg-avatar assistant">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM5.5 7a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2zm-5.13 2.84a.5.5 0 01.76-.66A3.5 3.5 0 008 10.5a3.5 3.5 0 002.87-1.32.5.5 0 01.76.66A4.5 4.5 0 018 11.5a4.5 4.5 0 01-3.63-1.66z" />
-            </svg>
+          <!-- 用户消息：右侧气泡 -->
+          <div v-if="msg.role === 'user'" class="msg-content user-content">
+            <div class="msg-bubble user">
+              <div class="msg-text" v-html="renderMarkdown(msg.content)" />
+            </div>
           </div>
 
-          <div class="msg-content">
-            <div class="msg-bubble" :class="[msg.role, { streaming: msg.streaming }]">
+          <!-- AI 消息：左侧 Trae 风格流式展示 -->
+          <div v-if="msg.role === 'assistant'" class="msg-content assistant-content">
+            <!-- AI 文字回复区域 -->
+            <div v-if="msg.content.trim()" class="assistant-reply">
               <div class="msg-text" v-html="renderMarkdown(msg.content)" />
               <div v-if="msg.streaming" class="streaming-cursor">
                 <span /><span /><span />
               </div>
             </div>
 
-            <div v-if="msg.role === 'assistant' && !msg.streaming" class="msg-meta">
+            <!-- 穿插时间线：任务看板 + 文字交替显示 -->
+            <template v-if="isLastAssistantMsg(msg.id) && interleavedTimeline.length > 0">
+              <template v-for="(item, tIdx) in interleavedTimeline" :key="tIdx">
+                <!-- 任务看板快照 -->
+                <div v-if="item.type === 'board'" class="task-board-card">
+                  <div class="task-board-header">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" class="board-icon">
+                      <path d="M1 2.5A1.5 1.5 0 012.5 1h3A1.5 1.5 0 017 2.5v3A1.5 1.5 0 015.5 7h-3A1.5 1.5 0 011 5.5v-3zm2 0v3h3v-3h-3zm8-1.5A1.5 1.5 0 009.5 2.5v3A1.5 1.5 0 0011 7h3a1.5 1.5 0 001.5-1.5v-3A1.5 1.5 0 0014 1h-3zm0 1.5h3v3h-3v-3zM1 10.5A1.5 1.5 0 012.5 9h3A1.5 1.5 0 017 10.5v3A1.5 1.5 0 015.5 15h-3A1.5 1.5 0 011 13.5v-3zm2 0v3h3v-3h-3z" />
+                    </svg>
+                    <span class="board-title">任务看板</span>
+                    <span class="board-progress">{{ item.completedCount }}/{{ item.totalCount }} 已完成</span>
+                    <span class="task-status-badge" :class="item.taskStatus || 'running'">
+                      {{ getBoardStatusLabel(item.taskStatus) }}
+                    </span>
+                  </div>
+                  <div class="board-steps">
+                    <div
+                      v-for="step in item.steps"
+                      :key="step.step_index"
+                      class="board-step"
+                      :class="step.status"
+                    >
+                      <div class="board-step-indicator">
+                        <svg v-if="step.status === 'completed'" width="12" height="12" viewBox="0 0 16 16" fill="currentColor" class="step-icon-done">
+                          <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" />
+                        </svg>
+                        <svg v-else-if="step.status === 'failed'" width="12" height="12" viewBox="0 0 16 16" fill="currentColor" class="step-icon-fail">
+                          <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z" />
+                        </svg>
+                        <span v-else-if="step.status === 'running'" class="step-spinner"></span>
+                        <span v-else class="step-dot"></span>
+                      </div>
+                      <span class="board-step-name">{{ step.step_name || ('步骤 ' + step.step_index) }}</span>
+                      <span v-if="step.agent_name" class="board-step-agent">{{ step.agent_name }}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 文字内容：思考/工具调用等 -->
+                <div v-else-if="item.type === 'text'" class="timeline-text-item" :class="'text-type-' + item.activity.type">
+                  <div v-if="item.activity.type === 'thought'" class="thought-inline">
+                    <svg class="thought-icon" width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8zm6.5-.5A1.5 1.5 0 118 6a1.5 1.5 0 01-1.5 1.5zm3.5 0A1.5 1.5 0 1111.5 6 1.5 1.5 0 0110 7.5zM5.17 9.84a.5.5 0 01.73-.68A3.5 3.5 0 008 10.5a3.5 3.5 0 002.1-.34.5.5 0 11.4.92A4.5 4.5 0 018 11.5a4.5 4.5 0 01-2.83-1.66z" />
+                    </svg>
+                    <span v-if="item.activity.agentName" class="text-agent">{{ item.activity.agentName }}</span>
+                    <span class="thought-content">{{ item.activity.content }}</span>
+                  </div>
+                  <div v-else-if="item.activity.type === 'tool_call'" class="tool-inline">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" class="tool-icon">
+                      <path d="M9.5 1.1l3.4 3.4L4.8 12.6 1.4 9.2 9.5 1.1zm3.9-.5l1.9 1.9a1 1 0 010 1.4l-1.1 1.1-3.4-3.4 1.1-1.1a1 1 0 011.5 0zM.4 13.9l2.5-1 1.6 1.6-1 2.5a.5.5 0 01-.8.2l-2.5-2.5a.5.5 0 01.2-.8z" />
+                    </svg>
+                    <span v-if="item.activity.agentName" class="text-agent">{{ item.activity.agentName }}</span>
+                    <span class="tool-content">{{ item.activity.content }}</span>
+                  </div>
+                  <div v-else-if="item.activity.type === 'tool_result'" class="result-inline" :class="{ 'result-failed': item.activity.status === 'failed' }">
+                    <svg v-if="item.activity.status === 'failed'" width="12" height="12" viewBox="0 0 16 16" fill="currentColor" class="result-icon-fail">
+                      <path d="M8 15A7 7 0 118 1a7 7 0 010 14zm0 1A8 8 0 108 0a8 8 0 000 16zM3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z" />
+                    </svg>
+                    <svg v-else width="12" height="12" viewBox="0 0 16 16" fill="currentColor" class="result-icon-ok">
+                      <path d="M8 15A7 7 0 118 1a7 7 0 010 14zm0 1A8 8 0 108 0a8 8 0 000 16zM6.97 11.03a.75.75 0 01-1.06 0L3.72 8.84a.75.75 0 011.06-1.06l1.66 1.66 5.08-5.08a.75.75 0 111.06 1.06l-5.61 5.61z" />
+                    </svg>
+                    <span class="result-content">{{ item.activity.content }}</span>
+                  </div>
+                  <div v-else-if="item.activity.type === 'handoff'" class="handoff-inline">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" class="handoff-icon">
+                      <path d="M8 0a8 8 0 100 16A8 8 0 008 0zM4.5 7.5a.75.75 0 000 1.5h5.19l-1.72 1.72a.75.75 0 101.06 1.06l3-3a.75.75 0 000-1.06l-3-3a.75.75 0 00-1.06 1.06L9.69 7.5H4.5z" />
+                    </svg>
+                    <span class="handoff-content">{{ item.activity.content }}</span>
+                  </div>
+                  <div v-else class="generic-inline">
+                    <span v-if="item.activity.agentName" class="text-agent">{{ item.activity.agentName }}</span>
+                    <span class="generic-content">{{ item.activity.content }}</span>
+                  </div>
+                </div>
+              </template>
+            </template>
+
+            <!-- 任务最终结果 -->
+            <div v-if="isLastAssistantMsg(msg.id) && taskFinalResult" class="task-result-block">
+              <div class="task-result-header">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M8 16A8 8 0 108 0a8 8 0 000 16zm3.78-9.72a.75.75 0 00-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 00-1.06 1.06l2 2a.75.75 0 001.06 0l4.5-4.5z" />
+                </svg>
+                <span class="task-result-title">执行结果</span>
+                <span v-if="taskFinalResult.agentName" class="task-result-agent">{{ taskFinalResult.agentName }}</span>
+              </div>
+              <div class="task-result-content" v-html="renderMarkdown(taskFinalResult.content)" />
+            </div>
+
+            <!-- 消息元信息 -->
+            <div v-if="!msg.streaming" class="msg-meta">
               <span v-if="msg.agentName" class="meta-agent">{{ msg.agentName }}</span>
               <span v-if="msg.collaborationMode" class="meta-mode">{{ msg.collaborationMode }}</span>
               <div class="msg-feedback">
@@ -115,102 +208,12 @@
               </div>
             </div>
           </div>
-
-          <div v-if="msg.role === 'user'" class="msg-avatar user">
-            {{ authStore.userId.charAt(0).toUpperCase() }}
-          </div>
-        </div>
-
-        <!-- 任务进度面板 - 跟在消息后面 -->
-        <div v-if="showTaskProgress" class="message-row assistant">
-          <div class="msg-avatar assistant">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM5.5 7a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2zm-5.13 2.84a.5.5 0 01.76-.66A3.5 3.5 0 008 10.5a3.5 3.5 0 002.87-1.32.5.5 0 01.76.66A4.5 4.5 0 018 11.5a4.5 4.5 0 01-3.63-1.66z" />
-            </svg>
-          </div>
-          <div class="msg-content">
-            <div class="msg-bubble assistant task-progress-panel">
-              <div class="task-progress-header">
-                <span class="task-progress-title">任务执行进度</span>
-                <span class="task-status-badge" :class="chatStore.taskStatus || 'running'">
-                  {{ activityStatusLabel }}
-                </span>
-              </div>
-
-              <!-- 实时活动流 -->
-              <div v-if="sortedActivities.length > 0" class="activity-stream">
-                <div
-                  v-for="act in sortedActivities"
-                  :key="act.id"
-                  class="activity-item"
-                  :class="getActivityClass(act)"
-                >
-                  <span class="activity-icon">{{ getActivityIcon(act) }}</span>
-                  <span class="activity-content">
-                    <span v-if="act.agentName && act.type !== 'intent'" class="activity-agent">{{ act.agentName }}</span>
-                    <span class="activity-text">{{ act.content }}</span>
-                    <span v-if="act.detail" class="activity-detail">{{ act.detail }}</span>
-                  </span>
-                </div>
-              </div>
-
-              <!-- 任务步骤列表（来自任务引擎，补充活动流未覆盖的信息） -->
-              <div v-if="sortedTaskSteps.length > 0" class="task-steps-list">
-                <div
-                  v-for="(step, idx) in sortedTaskSteps"
-                  :key="idx"
-                  class="task-step-item"
-                  :class="getStepDisplayClass(step)"
-                >
-                  <span class="step-status-tag" :class="getStepDisplayClass(step)">
-                    {{ getStepStatusTag(step) }}
-                  </span>
-                  <span class="step-name-text">{{ step.step_name }}</span>
-                  <span v-if="step.agent_name" class="step-agent-tag">{{ step.agent_name }}</span>
-                  <div v-if="step.error" class="step-error-inline">{{ step.error }}</div>
-                  <!-- 暂停步骤的内联提示 -->
-                  <div v-if="isStepInterrupted(step)" class="step-interrupted-hint">
-                    任务已暂停 - 可补充需求后继续
-                  </div>
-                </div>
-              </div>
-
-              <!-- 空状态 -->
-              <div v-if="sortedActivities.length === 0 && sortedTaskSteps.length === 0" class="task-empty-state">
-                <span class="empty-spinner"></span>
-                <span>正在处理中...</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 任务最终结果 - 显示在任务看板下方 -->
-        <div v-if="taskFinalResult" class="message-row assistant">
-          <div class="msg-avatar assistant">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM5.5 7a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2zm-5.13 2.84a.5.5 0 01.76-.66A3.5 3.5 0 008 10.5a3.5 3.5 0 002.87-1.32.5.5 0 01.76.66A4.5 4.5 0 018 11.5a4.5 4.5 0 01-3.63-1.66z" />
-            </svg>
-          </div>
-          <div class="msg-content">
-            <div class="msg-bubble assistant task-result-bubble">
-              <div class="task-result-header">
-                <span class="task-result-title">执行结果</span>
-                <span v-if="taskFinalResult.agentName" class="task-result-agent">{{ taskFinalResult.agentName }}</span>
-              </div>
-              <div class="task-result-content" v-html="renderMarkdown(taskFinalResult.content)" />
-            </div>
-          </div>
         </div>
 
         <!-- 人工确认 - 内联显示在对话流中 -->
         <div v-if="chatStore.waitingConfirm && chatStore.confirmInfo" class="message-row assistant">
-          <div class="msg-avatar assistant">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM5.5 7a1 1 0 110-2 1 1 0 010 2zm5 0a1 1 0 110-2 1 1 0 010 2zm-5.13 2.84a.5.5 0 01.76-.66A3.5 3.5 0 008 10.5a3.5 3.5 0 002.87-1.32.5.5 0 01.76.66A4.5 4.5 0 018 11.5a4.5 4.5 0 01-3.63-1.66z" />
-            </svg>
-          </div>
-          <div class="msg-content">
-            <div class="msg-bubble assistant confirm-inline-card">
+          <div class="msg-content assistant-content">
+            <div class="confirm-inline-card">
               <div class="confirm-inline-header">
                 <span class="confirm-type-badge" :class="chatStore.confirmInfo.confirmType">
                   {{ confirmTypeLabel }}
@@ -349,6 +352,19 @@ const showTaskProgress = computed(() => {
   return chatStore.isStreaming || chatStore.taskActivities.length > 0 || (chatStore.executionId && chatStore.taskSteps.length > 0) || runningStepInfo.value !== null
 })
 
+const lastAssistantMsgId = computed(() => {
+  for (let i = chatStore.messages.length - 1; i >= 0; i--) {
+    if (chatStore.messages[i].role === 'assistant') {
+      return chatStore.messages[i].id
+    }
+  }
+  return ''
+})
+
+function isLastAssistantMsg(msgId: string): boolean {
+  return msgId === lastAssistantMsgId.value
+}
+
 const isTaskInterrupted = computed(() => {
   return chatStore.taskStatus === 'interrupted'
 })
@@ -357,6 +373,106 @@ const sortedActivities = computed(() => {
   return chatStore.taskActivities.filter(
     (a) => a.type !== 'step_start' && a.type !== 'step_done',
   )
+})
+
+const thoughtActivities = computed(() => {
+  return chatStore.taskActivities.filter((a) => a.type === 'thought')
+})
+
+const nonThoughtActivities = computed(() => {
+  return chatStore.taskActivities.filter(
+    (a) => a.type !== 'step_start' && a.type !== 'step_done' && a.type !== 'thought',
+  )
+})
+
+const thoughtExpanded = ref(true)
+
+function toggleThinking() {
+  thoughtExpanded.value = !thoughtExpanded.value
+}
+
+interface BoardStepSnapshot {
+  step_index: number
+  step_name: string
+  agent_name: string
+  status: string
+}
+
+interface TimelineBoardItem {
+  type: 'board'
+  completedCount: number
+  totalCount: number
+  steps: BoardStepSnapshot[]
+  taskStatus: string
+}
+
+interface TimelineTextItem {
+  type: 'text'
+  activity: TaskActivity
+}
+
+type TimelineItem = TimelineBoardItem | TimelineTextItem
+
+const interleavedTimeline = computed(() => {
+  const timeline: TimelineItem[] = []
+  const allSteps = sortedTaskSteps.value
+  const totalCount = allSteps.length || chatStore.totalSteps || 0
+
+  if (totalCount === 0 && chatStore.taskActivities.length === 0) {
+    return timeline
+  }
+
+  const completedStepIndices = new Set<number>()
+
+  const buildBoardSnapshot = (): TimelineBoardItem => {
+    const steps: BoardStepSnapshot[] = allSteps.map((s) => ({
+      step_index: s.step_index,
+      step_name: s.step_name,
+      agent_name: s.agent_name || '',
+      status: completedStepIndices.has(s.step_index) ? 'completed' : s.status,
+    }))
+    if (steps.length === 0 && totalCount > 0) {
+      for (let i = 1; i <= totalCount; i++) {
+        steps.push({
+          step_index: i,
+          step_name: '',
+          agent_name: '',
+          status: completedStepIndices.has(i) ? 'completed' : 'pending',
+        })
+      }
+    }
+    return {
+      type: 'board',
+      completedCount: completedStepIndices.size,
+      totalCount,
+      steps,
+      taskStatus: chatStore.taskStatus || 'running',
+    }
+  }
+
+  timeline.push(buildBoardSnapshot())
+
+  for (const act of chatStore.taskActivities) {
+    if (act.type === 'step_done') {
+      if (act.stepIndex != null) {
+        completedStepIndices.add(act.stepIndex)
+      }
+      timeline.push(buildBoardSnapshot())
+    } else if (act.type === 'step_start') {
+      // step_start 不单独显示文字，但触发看板更新（步骤变为 running）
+      timeline.push(buildBoardSnapshot())
+    } else if (act.type === 'thought') {
+      timeline.push({ type: 'text', activity: act })
+    } else if (act.type === 'tool_call' || act.type === 'tool_result') {
+      timeline.push({ type: 'text', activity: act })
+    } else if (act.type === 'handoff') {
+      timeline.push({ type: 'text', activity: act })
+    } else if (act.type === 'intent') {
+      timeline.push({ type: 'text', activity: act })
+    }
+  }
+
+  return timeline
 })
 
 const sortedTaskSteps = computed(() => {
@@ -401,6 +517,14 @@ const activityStatusLabel = computed(() => {
   if (chatStore.isStreaming || chatStore.taskActivities.length > 0) return '执行中'
   return chatStore.taskStatus || '执行中'
 })
+
+function getBoardStatusLabel(status: string): string {
+  if (status === 'completed') return '已完成'
+  if (status === 'failed') return '执行失败'
+  if (status === 'paused') return '已暂停'
+  if (status === 'interrupted') return '已中断'
+  return '执行中'
+}
 
 function getActivityIcon(act: TaskActivity): string {
   if (act.type === 'step_start') {
@@ -555,6 +679,21 @@ async function handleSend() {
     (data) => {
       if (data.event === 'session_id') {
         chatStore.setSessionId(data.data)
+        // 乐观地将新会话添加到本地列表，避免等待服务端刷新延迟
+        const newSid = data.data
+        const alreadyExists = sessionList.value.some((s: SessionInfo) => s.session_id === newSid)
+        if (!alreadyExists) {
+          sessionList.value.unshift({
+            session_id: newSid,
+            user_id: authStore.userId,
+            channel: 'web',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            message_count: 1,
+            active_agents: [],
+            first_message: text,
+          })
+        }
         refreshSessionList()
       } else if (data.event === 'intent') {
         try {
@@ -659,6 +798,14 @@ async function handleSend() {
               agent_name: stepData.agent_name || '',
               total_steps: stepData.total_steps || 0,
             }
+            chatStore.addTaskActivity({
+              type: 'step_start',
+              agentName: stepData.agent_name || agentName,
+              content: stepData.step_name,
+              status: 'running',
+              stepIndex: stepData.step_index,
+              totalSteps: stepData.total_steps,
+            })
             scrollToBottom()
           }
         } catch { /* ignore */ }
@@ -677,6 +824,15 @@ async function handleSend() {
             }
             chatStore.appendToStreamingMessage(streamingId, stepMsg + '\n')
             runningStepInfo.value = null
+
+            chatStore.addTaskActivity({
+              type: 'step_done',
+              agentName: stepData.agent_name || agentName,
+              content: stepData.step_name,
+              status: stepData.status === 'completed' ? 'completed' : stepData.status === 'failed' ? 'failed' : 'completed',
+              stepIndex: stepData.step_index,
+              totalSteps: stepData.total_steps,
+            })
 
             // 关键步骤（裁判裁决、汇总等）完成时，将结果存储到 taskFinalResult，在任务看板下方独立展示
             if (stepData.message && stepData.status === 'completed') {
@@ -1508,9 +1664,7 @@ onUnmounted(() => {
 }
 
 .message-row {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 24px;
   padding: 0 4px;
   animation: slideIn 0.3s ease-out;
 }
@@ -1521,251 +1675,370 @@ onUnmounted(() => {
 }
 
 .message-row.user {
+  display: flex;
   justify-content: flex-end;
 }
 
-.msg-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-full);
+.message-row.assistant {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  font-size: 13px;
-  font-weight: 700;
+  justify-content: flex-start;
 }
 
-.msg-avatar.assistant {
-  background: var(--color-primary-bg);
-  color: var(--color-primary);
-}
-
-.msg-avatar.user {
-  background: var(--color-primary);
-  color: white;
-}
-
-.msg-content {
-  max-width: 72%;
+/* 用户消息：右侧气泡 */
+.user-content {
+  max-width: 65%;
   min-width: 0;
-}
-
-.msg-bubble {
-  padding: 12px 16px;
-  border-radius: var(--radius-lg);
-  font-size: 14px;
-  line-height: 1.65;
-  word-wrap: break-word;
 }
 
 .msg-bubble.user {
   background: var(--color-primary);
   color: white;
-  border-bottom-right-radius: var(--radius-sm);
+  padding: 10px 16px;
+  border-radius: 16px 16px 4px 16px;
+  font-size: 14px;
+  line-height: 1.65;
+  word-wrap: break-word;
 }
 
-.msg-bubble.assistant {
-  background: var(--color-bg-elevated);
-  color: var(--color-text);
-  border: 1px solid var(--color-border-light);
-  border-bottom-left-radius: var(--radius-sm);
-}
-
-.msg-bubble.streaming {
-  border-color: var(--color-primary-light);
-}
-
-/* 任务进度面板 - 内联在消息气泡中 */
-.task-progress-panel {
-  border: 1px solid var(--color-border-light);
-  background: var(--color-bg-elevated) !important;
-}
-
-.task-result-bubble {
-  border: 1px solid var(--color-border-light);
-  background: var(--color-bg-elevated) !important;
-}
-
-.task-result-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--color-border-light);
-}
-
-.task-result-title {
+.msg-bubble.user :deep(code) {
+  background: rgba(255,255,255,0.15);
+  font-family: var(--font-mono);
   font-size: 13px;
-  font-weight: 700;
-  color: var(--color-text);
-}
-
-.task-result-agent {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  background: var(--color-bg-secondary, #f0f2f5);
-  padding: 1px 6px;
+  padding: 2px 6px;
   border-radius: 4px;
 }
 
-.task-result-content {
-  font-size: 14px;
-  line-height: 1.7;
-  color: var(--color-text);
-  max-height: 500px;
-  overflow-y: auto;
-  word-break: break-word;
-}
-
-.task-result-content :deep(h1),
-.task-result-content :deep(h2),
-.task-result-content :deep(h3) {
-  margin-top: 12px;
-  margin-bottom: 6px;
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.task-result-content :deep(p) {
-  margin: 4px 0;
-}
-
-.task-result-content :deep(ul),
-.task-result-content :deep(ol) {
-  padding-left: 20px;
-  margin: 4px 0;
-}
-
-.activity-stream {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 320px;
-  overflow-y: auto;
-}
-
-.activity-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: var(--radius-md);
-  background: var(--color-bg);
-  font-size: 13px;
-  line-height: 1.5;
-  animation: activityFadeIn 0.3s ease-out;
-}
-
-@keyframes activityFadeIn {
-  from { opacity: 0; transform: translateX(-6px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-.activity-item.activity-running {
-  background: #e6f7ff;
-  border-left: 3px solid #1890ff;
-}
-
-.activity-item.activity-waiting {
-  background: #fff7e6;
-  border-left: 3px solid #fa8c16;
-}
-
-.activity-item.activity-failed {
-  background: #fff1f0;
-  border-left: 3px solid #f5222d;
-}
-
-.activity-item.activity-completed {
-  border-left: 3px solid transparent;
-}
-
-.activity-icon {
-  font-size: 14px;
-  flex-shrink: 0;
-  line-height: 1.5;
-}
-
-.activity-content {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+/* AI 消息：左侧 Trae 风格，无边框气泡 */
+.assistant-content {
+  max-width: 85%;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.activity-agent {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-primary);
-  background: var(--color-primary-bg);
-  padding: 1px 6px;
-  border-radius: 3px;
-  display: inline-block;
-  width: fit-content;
-}
-
-.activity-text {
+.assistant-reply {
+  font-size: 14px;
+  line-height: 1.75;
   color: var(--color-text);
+  word-wrap: break-word;
+}
+
+.assistant-reply :deep(p) {
+  margin: 4px 0;
+}
+
+.assistant-reply :deep(p:first-child) {
+  margin-top: 0;
+}
+
+.assistant-reply :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.assistant-reply :deep(code) {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: rgba(0,0,0,0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.assistant-reply :deep(pre) {
+  margin: 8px 0;
+  padding: 12px;
+  background: #1e293b;
+  color: #e2e8f0;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+
+.assistant-reply :deep(pre code) {
+  background: none;
+  padding: 0;
+  color: inherit;
+}
+
+/* 任务看板卡片 - 穿插显示 */
+.task-board-card {
+  border: 1px solid var(--color-border-light);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--color-bg);
+  animation: boardFadeIn 0.3s ease-out;
+}
+
+@keyframes boardFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.task-board-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.board-icon {
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.board-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.board-progress {
+  font-size: 12px;
+  color: var(--color-text-secondary);
   font-weight: 500;
 }
 
-.activity-detail {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
+.board-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.task-empty-state {
+.board-step {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  color: var(--color-text-secondary);
-  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  transition: background var(--transition-fast);
 }
 
-.empty-spinner {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
+.board-step.completed {
+  background: transparent;
+}
+
+.board-step.running {
+  background: #e6f7ff;
+}
+
+.board-step.failed {
+  background: #fff1f0;
+}
+
+.board-step.waiting_confirm {
+  background: #fff7e6;
+}
+
+.board-step.pending {
+  opacity: 0.55;
+}
+
+.board-step-indicator {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.step-icon-done {
+  color: #52c41a;
+}
+
+.step-icon-fail {
+  color: #f5222d;
+}
+
+.step-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-border);
+  display: block;
+}
+
+.board-step.pending .step-dot {
+  background: #d9d9d9;
+}
+
+.step-spinner {
+  display: block;
+  width: 12px;
+  height: 12px;
   border: 2px solid #e6f7ff;
   border-top-color: #1890ff;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-.task-progress-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.task-progress-title {
-  font-size: 14px;
-  font-weight: 700;
+.board-step-name {
+  font-size: 12px;
+  font-weight: 500;
   color: var(--color-text);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.task-progress-summary {
+.board-step.pending .board-step-name {
+  color: var(--color-text-tertiary);
+}
+
+.board-step-agent {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  background: var(--color-bg-elevated);
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--color-border-light);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 穿插文字内容 */
+.timeline-text-item {
+  padding: 2px 0;
+  animation: textFadeIn 0.25s ease-out;
+}
+
+@keyframes textFadeIn {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.text-agent {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  margin-right: 4px;
+}
+
+/* 思考内容 - 内联 */
+.thought-inline {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
   font-size: 12px;
   color: var(--color-text-secondary);
-  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(0,0,0,0.02);
 }
 
-.task-status-badge {
+.thought-icon {
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.thought-content {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+/* 工具调用 - 内联 */
+.tool-inline {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-size: 12px;
-  padding: 2px 10px;
-  border-radius: var(--radius-full);
+  color: var(--color-text-secondary);
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #f0f5ff;
+}
+
+.tool-icon {
+  color: #1890ff;
+  flex-shrink: 0;
+}
+
+.tool-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 工具结果 - 内联 */
+.result-inline {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #52c41a;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #f6ffed;
+}
+
+.result-inline.result-failed {
+  color: #f5222d;
+  background: #fff1f0;
+}
+
+.result-icon-ok {
+  color: #52c41a;
+  flex-shrink: 0;
+}
+
+.result-icon-fail {
+  color: #f5222d;
+  flex-shrink: 0;
+}
+
+.result-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Agent 切换 - 内联 */
+.handoff-inline {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(0,0,0,0.02);
+}
+
+.handoff-icon {
+  color: #722ed1;
+  flex-shrink: 0;
+}
+
+.handoff-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 通用文字内容 */
+.generic-inline {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  padding: 3px 8px;
+}
+
+.generic-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 任务状态标签 */
+.task-status-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
   font-weight: 500;
   margin-left: auto;
 }
@@ -1800,125 +2073,75 @@ onUnmounted(() => {
   color: #999;
 }
 
-.task-steps-list {
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 任务最终结果块 */
+.task-result-block {
+  border: 1px solid #b7eb8f;
+  border-radius: 10px;
+  padding: 12px;
+  background: #f6ffed;
+}
+
+.task-result-header {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 6px;
-}
-
-.task-step-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: var(--radius-md);
-  background: var(--color-bg);
-  transition: background var(--transition-fast);
-  flex-wrap: wrap;
-}
-
-.task-step-item.running {
-  background: #e6f7ff;
-}
-
-.task-step-item.failed {
-  background: #fff1f0;
-}
-
-.task-step-item.waiting_confirm {
-  background: #fff7e6;
-}
-
-.step-status-tag {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 3px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.step-status-tag.completed {
-  background: #f0f9eb;
+  margin-bottom: 8px;
   color: #52c41a;
 }
 
-.step-status-tag.skipped {
-  background: #f5f5f5;
-  color: #999;
-}
-
-.step-status-tag.running {
-  background: #e6f7ff;
-  color: #1890ff;
-}
-
-.step-status-tag.interrupted {
-  background: #fff1f0;
-  color: #f5222d;
-}
-
-.step-status-tag.waiting_confirm {
-  background: #fff7e6;
-  color: #fa8c16;
-}
-
-.step-status-tag.failed {
-  background: #fff1f0;
-  color: #f5222d;
-}
-
-.step-status-tag.pending {
-  background: #f5f5f5;
-  color: #bbb;
-}
-
-.step-name-text {
+.task-result-title {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 700;
   color: var(--color-text);
 }
 
-.task-step-item.pending .step-name-text {
-  color: var(--color-text-tertiary);
-}
-
-.task-step-item.interrupted {
-  border-left: 3px solid #f5222d;
-  padding-left: 9px;
-  background: #fff7f7;
-}
-
-.step-interrupted-hint {
-  margin-top: 4px;
-  padding: 4px 8px;
-  font-size: 12px;
-  color: #f5222d;
-  background: #fff1f0;
-  border-radius: 4px;
-}
-
-.step-agent-tag {
+.task-result-agent {
   font-size: 11px;
   color: var(--color-text-tertiary);
-  background: var(--color-bg);
+  background: white;
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: 4px;
   border: 1px solid var(--color-border-light);
 }
 
-.step-error-inline {
-  font-size: 12px;
-  color: #f5222d;
-  width: 100%;
-  margin-top: 2px;
-  padding-left: 0;
+.task-result-content {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text);
+  max-height: 500px;
+  overflow-y: auto;
+  word-break: break-word;
 }
 
-/* 人工确认 - 内联卡片 */
+.task-result-content :deep(h1),
+.task-result-content :deep(h2),
+.task-result-content :deep(h3) {
+  margin-top: 12px;
+  margin-bottom: 6px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.task-result-content :deep(p) {
+  margin: 4px 0;
+}
+
+.task-result-content :deep(ul),
+.task-result-content :deep(ol) {
+  padding-left: 20px;
+  margin: 4px 0;
+}
+
+/* 人工确认卡片 */
 .confirm-inline-card {
   border: 1px solid #ffd591;
-  background: #fffbe6 !important;
+  background: #fffbe6;
+  border-radius: 10px;
+  padding: 12px;
 }
 
 .confirm-inline-header {
@@ -2346,8 +2569,12 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .msg-content {
-    max-width: 85%;
+  .user-content {
+    max-width: 80%;
+  }
+
+  .assistant-content {
+    max-width: 95%;
   }
 }
 </style>

@@ -58,9 +58,17 @@ async def execute_tool(
     params = params or {}
 
     if tool_name.startswith("native_"):
-        return await _execute_native_tool(tool_name, params)
+        result = await _execute_native_tool(tool_name, params)
+    else:
+        result = await _execute_mcp_tool(tool_name, params)
 
-    return await _execute_mcp_tool(tool_name, params)
+    try:
+        from observability.metrics import record_tool_usage
+        record_tool_usage(tool_name, result.get("status", "unknown"))
+    except Exception:
+        pass
+
+    return result
 
 
 async def _execute_native_tool(

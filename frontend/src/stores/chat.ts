@@ -10,6 +10,8 @@ export interface TaskActivity {
   timestamp: number
   status?: string
   detail?: string
+  stepIndex?: number
+  totalSteps?: number
 }
 
 export interface Message {

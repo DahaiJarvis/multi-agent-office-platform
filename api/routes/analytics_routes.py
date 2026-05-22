@@ -142,3 +142,31 @@ async def api_business_trend(
 
     result = await get_business_trend(period=period, days=days)
     return result.model_dump()
+
+
+@router.get("/skill-usage", summary="获取技能使用统计")
+async def api_skill_usage(
+    date: Optional[str] = Query(default=None, description="日期(YYYY-MM-DD)，默认今日"),
+) -> dict:
+    """获取技能使用统计
+
+    返回各技能的调用次数和按 Agent 的使用分布。
+    """
+    from observability.business_analytics import get_skill_usage_stats
+
+    result = await get_skill_usage_stats(date)
+    return result.model_dump()
+
+
+@router.get("/workflow-execution", summary="获取工作流执行统计")
+async def api_workflow_execution(
+    date: Optional[str] = Query(default=None, description="日期(YYYY-MM-DD)，默认今日"),
+) -> dict:
+    """获取工作流执行统计
+
+    返回各工作流的执行次数、成功率和错误数。
+    """
+    from observability.business_analytics import get_workflow_execution_stats
+
+    result = await get_workflow_execution_stats(date)
+    return result.model_dump()

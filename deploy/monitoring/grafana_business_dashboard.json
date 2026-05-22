@@ -1,0 +1,337 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "业务概览",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}
+    },
+    {
+      "title": "今日任务总数",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(business_task_total)",
+          "legendFormat": "任务总数"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 500},
+              {"color": "red", "value": 2000}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "任务成功率",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(business_task_total{status=\"success\"}) / sum(business_task_total) * 100",
+          "legendFormat": "成功率"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 80},
+              {"color": "green", "value": 95}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "平均响应时间",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(rate(business_task_duration_seconds_sum[5m])) / sum(rate(business_task_duration_seconds_count[5m])) * 1000",
+          "legendFormat": "平均耗时"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 3000},
+              {"color": "red", "value": 10000}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "活跃用户数",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(business_active_users)",
+          "legendFormat": "活跃用户"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "意图分布",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5}
+    },
+    {
+      "title": "意图分类占比",
+      "type": "piechart",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "targets": [
+        {
+          "expr": "sum(business_intent_distribution) by (intent)",
+          "legendFormat": "{{intent}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "title": "置信度分布",
+      "type": "barchart",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "targets": [
+        {
+          "expr": "sum(business_intent_distribution) by (confidence_level)",
+          "legendFormat": "{{confidence_level}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"}
+        }
+      }
+    },
+    {
+      "title": "Agent 性能",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14}
+    },
+    {
+      "title": "Agent 性能排行",
+      "type": "table",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+      "targets": [
+        {
+          "expr": "sum(business_task_total) by (agent, status)",
+          "legendFormat": "{{agent}} - {{status}}",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "transformations": []
+    },
+    {
+      "title": "Agent 调用量趋势",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
+      "targets": [
+        {
+          "expr": "sum(rate(business_task_total[5m])) by (agent)",
+          "legendFormat": "{{agent}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    },
+    {
+      "title": "工具使用",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23}
+    },
+    {
+      "title": "工具使用频率排行",
+      "type": "barchart",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "targets": [
+        {
+          "expr": "topk(10, sum(business_tool_usage_total) by (tool_name))",
+          "legendFormat": "{{tool_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "options": {
+        "orientation": "horizontal"
+      }
+    },
+    {
+      "title": "工具调用热力图",
+      "type": "heatmap",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "targets": [
+        {
+          "expr": "sum(rate(business_tool_usage_total[5m])) by (tool_name)",
+          "legendFormat": "{{tool_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {}
+      }
+    },
+    {
+      "title": "安全与质量",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 32}
+    },
+    {
+      "title": "安全拦截总数",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 33},
+      "targets": [
+        {
+          "expr": "sum(business_guardrail_block_total)",
+          "legendFormat": "拦截总数"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 50},
+              {"color": "red", "value": 200}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "护栏拦截分类统计",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 33},
+      "targets": [
+        {
+          "expr": "sum(rate(business_guardrail_block_total[5m])) by (check_type, action)",
+          "legendFormat": "{{check_type}} - {{action}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    },
+    {
+      "title": "业务趋势",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 41}
+    },
+    {
+      "title": "任务量趋势（按意图分组）",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 42},
+      "targets": [
+        {
+          "expr": "sum(rate(business_task_total[5m])) by (intent)",
+          "legendFormat": "{{intent}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    },
+    {
+      "title": "技能使用趋势",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 42},
+      "targets": [
+        {
+          "expr": "sum(rate(business_skill_usage_total[5m])) by (skill_name)",
+          "legendFormat": "{{skill_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    },
+    {
+      "title": "工作流执行趋势",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 50},
+      "targets": [
+        {
+          "expr": "sum(rate(business_workflow_execution_total[5m])) by (workflow_id, status)",
+          "legendFormat": "{{workflow_id}} - {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    },
+    {
+      "title": "审批操作统计",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 50},
+      "targets": [
+        {
+          "expr": "sum(rate(business_approval_action_total[5m])) by (action_type)",
+          "legendFormat": "{{action_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps"}
+      }
+    }
+  ],
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["agent-platform", "business", "production"],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "企业级多Agent办公平台 - 业务仪表盘",
+  "uid": "agent-platform-business",
+  "version": 1
+}

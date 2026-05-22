@@ -291,6 +291,12 @@ class ApprovalFlowManager:
             approval.status = ApprovalStatus.APPROVED
             logger.info("审批单已通过: id=%s approver=%s", approval_id, approver)
 
+            try:
+                from observability.metrics import record_approval_action
+                record_approval_action("approve")
+            except Exception:
+                pass
+
         # 更新 Redis
         await self._update_approval(approval)
         return approval
@@ -324,6 +330,12 @@ class ApprovalFlowManager:
         approval.resolved_at = time.time()
 
         await self._update_approval(approval)
+
+        try:
+            from observability.metrics import record_approval_action
+            record_approval_action("reject")
+        except Exception:
+            pass
 
         logger.info("审批单已拒绝: id=%s approver=%s reason=%s", approval_id, approver, reason)
         return approval

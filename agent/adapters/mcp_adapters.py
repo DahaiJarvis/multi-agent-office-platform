@@ -288,7 +288,16 @@ class EmailAdapter(BaseAdapter):
         if attachments:
             payload["attachments"] = attachments
 
-        return await self._request("POST", "/api/mails/send", json_data=payload)
+        resp = await self._request("POST", "/api/mails/send", json_data=payload)
+
+        if resp.success:
+            try:
+                from observability.metrics import record_email_sent
+                record_email_sent("EmailAgent", has_attachment=bool(attachments))
+            except Exception:
+                pass
+
+        return resp
 
     async def search_mails(
         self,

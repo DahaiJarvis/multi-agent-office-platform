@@ -290,6 +290,14 @@ class SessionManager:
             self._memory_index[index_key][session.session_id] = time.time()
 
         logger.info("创建会话: %s, 用户: %s", session.session_id, user_id)
+
+        try:
+            from observability.metrics import set_active_users
+            active_count = await self._count_active_users(tenant_id)
+            set_active_users(tenant_id or "default", active_count)
+        except Exception:
+            pass
+
         return session
 
     async def get_session(self, session_id: str) -> SessionState | None:
@@ -478,6 +486,14 @@ class SessionManager:
             return
 
         try:
+            from observability.metrics import record_session_duration
+            duration = (datetime.now() - session.created_at).total_seconds()
+            user_tier = session.metadata.get("user_tier", "standard")
+            record_session_duration(user_tier, duration)
+        except Exception:
+            pass
+
+        try:
             from agent.core.long_term_memory import get_long_term_memory
 
             ltm = get_long_term_memory()
@@ -496,16 +512,13 @@ class SessionManager:
                 logger.warning("L3 归档失败，保留 L2 数据: session_id=%s", session_id)
                 return False
 
-            # 从 L2 删除
+            # 从 L2 删除会话数据（保留用户会话索引，确保历史列表可查到归档会话）
             redis = await self._redis_or_fallback()
             if redis:
                 keys = await redis.keys(f"session:*:{session_id}")
                 keys.append(f"session:{session_id}")
                 if keys:
                     await redis.delete(*keys)
-                # 从用户会话索引中移除，避免查询时触发不必要的 L3 恢复
-                index_key = self._user_sessions_key(session.user_id, session.tenant_id)
-                await redis.zrem(index_key, session_id)
             else:
                 keys_to_delete = [
                     k
@@ -514,10 +527,6 @@ class SessionManager:
                 ]
                 for k in keys_to_delete:
                     del self._memory_store[k]
-                # 从内存索引中移除
-                index_key = self._user_sessions_key(session.user_id, session.tenant_id)
-                if index_key in self._memory_index:
-                    self._memory_index[index_key].pop(session_id, None)
 
             logger.info("归档会话: session_id=%s", session_id)
             return True
@@ -647,6 +656,7 @@ class SessionManager:
                         "active_agents": session.active_agents,
                     })
                 else:
+                    # L2和L3都找不到会话时才从索引中清理
                     if redis:
                         await redis.zrem(index_key, sid)
 
@@ -753,6 +763,35 @@ class SessionManager:
         if tenant_id:
             return f"user_sessions:{tenant_id}:{user_id}"
         return f"user_sessions:{user_id}"
+
+    async def _count_active_users(self, tenant_id: str = "") -> float:
+        """统计活跃用户数
+
+        通过扫描 Redis 中 user_sessions:* 键的数量来估算活跃用户数。
+
+        Args:
+            tenant_id: 租户ID
+
+        Returns:
+            活跃用户数
+        """
+        redis = await self._redis_or_fallback()
+        if redis:
+            if tenant_id:
+                pattern = f"user_sessions:{tenant_id}:*"
+            else:
+                pattern = "user_sessions:*"
+            keys = []
+            async for key in redis.scan_iter(match=pattern, count=100):
+                keys.append(key)
+            return float(len(keys))
+        else:
+            if tenant_id:
+                prefix = f"user_sessions:{tenant_id}:"
+            else:
+                prefix = "user_sessions:"
+            count = sum(1 for k in self._memory_index if k.startswith(prefix))
+            return float(count)
 
 
 # 全局会话管理器单例
