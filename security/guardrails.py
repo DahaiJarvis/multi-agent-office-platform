@@ -258,8 +258,9 @@ def check_tool_call_guardrails(
 def _check_tool_whitelist(tool_name: str) -> dict[str, Any]:
     """工具白名单校验
 
-    检查工具是否在 MCP 注册表中注册。
+    检查工具是否在 MCP 注册表或原生工具注册表中注册。
     对于 "资源:操作" 格式的工具名，只校验资源部分是否在注册表中。
+    对于 "native_" 前缀的工具名，校验原生工具注册表。
 
     Args:
         tool_name: 工具名称
@@ -272,16 +273,36 @@ def _check_tool_whitelist(tool_name: str) -> dict[str, Any]:
     # 提取资源前缀（如 "approval:approve" -> "approval"）
     resource_prefix = tool_name.split(":")[0] if ":" in tool_name else tool_name
 
-    registered = resource_prefix in MCP_SERVER_REGISTRY
+    registered_in_mcp = resource_prefix in MCP_SERVER_REGISTRY
+
+    # 检查原生工具注册表
+    registered_in_native = False
+    tool_source = "unknown"
+    if tool_name.startswith("native_"):
+        try:
+            from agent.tools.registry import get_native_tool_registry
+            native_registry = get_native_tool_registry()
+            registered_in_native = native_registry.get_meta(tool_name) is not None
+        except Exception:
+            pass
+
+    registered = registered_in_mcp or registered_in_native
+
+    if registered:
+        if registered_in_native:
+            tool_source = "native"
+        elif registered_in_mcp:
+            tool_source = "mcp"
 
     return {
         "passed": registered,
-        "reason": "" if registered else f"工具 {tool_name} 未在 MCP 注册表中注册，不允许调用",
+        "reason": "" if registered else f"工具 {tool_name} 未在注册表中注册，不允许调用",
         "check_entry": {
             "check": "tool_whitelist",
             "result": "pass" if registered else "blocked",
             "tool_name": tool_name,
             "resource_prefix": resource_prefix,
+            "source": tool_source,
         },
     }
 

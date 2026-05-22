@@ -81,6 +81,18 @@ class ErrorCode(str, Enum):
     REDIS_ERROR = "70002"
     CACHE_MISS = "70003"
 
+    # 80xxx - Skills 相关
+    SKILL_NOT_FOUND = "80001"
+    SKILL_PARSE_ERROR = "80002"
+    SKILL_VALIDATION_ERROR = "80003"
+    SKILL_ALREADY_EXISTS = "80004"
+    SKILL_BIND_FAILED = "80005"
+
+    # 81xxx - 原生工具相关
+    NATIVE_TOOL_NOT_FOUND = "81001"
+    NATIVE_TOOL_DISABLED = "81002"
+    NATIVE_TOOL_EXECUTION_FAILED = "81003"
+
 
 class ErrorCodeMeta:
     """错误码元信息注册表"""
@@ -130,6 +142,16 @@ class ErrorCodeMeta:
         ErrorCode.DATABASE_ERROR: {"error": "database_error", "status": 500, "message": "数据库错误"},
         ErrorCode.REDIS_ERROR: {"error": "redis_error", "status": 500, "message": "缓存服务错误"},
         ErrorCode.CACHE_MISS: {"error": "cache_miss", "status": 404, "message": "缓存未命中"},
+
+        ErrorCode.SKILL_NOT_FOUND: {"error": "skill_not_found", "status": 404, "message": "Skill 不存在"},
+        ErrorCode.SKILL_PARSE_ERROR: {"error": "skill_parse_error", "status": 400, "message": "SKILL.md 解析失败"},
+        ErrorCode.SKILL_VALIDATION_ERROR: {"error": "skill_validation_error", "status": 400, "message": "Skill 校验失败"},
+        ErrorCode.SKILL_ALREADY_EXISTS: {"error": "skill_already_exists", "status": 409, "message": "Skill 已存在"},
+        ErrorCode.SKILL_BIND_FAILED: {"error": "skill_bind_failed", "status": 400, "message": "Skill 绑定失败"},
+
+        ErrorCode.NATIVE_TOOL_NOT_FOUND: {"error": "native_tool_not_found", "status": 404, "message": "原生工具不存在"},
+        ErrorCode.NATIVE_TOOL_DISABLED: {"error": "native_tool_disabled", "status": 403, "message": "原生工具已禁用"},
+        ErrorCode.NATIVE_TOOL_EXECUTION_FAILED: {"error": "native_tool_execution_failed", "status": 500, "message": "原生工具执行失败"},
     }
 
     @classmethod

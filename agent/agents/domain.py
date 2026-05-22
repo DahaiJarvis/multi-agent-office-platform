@@ -74,7 +74,8 @@ from pydantic import BaseModel, Field
 from autogen_agentchat.agents import AssistantAgent
 
 from agent.core.model_client import get_domain_agent_client
-from agent.core.mcp_integration import load_agent_tools, AGENT_TOOL_BINDINGS
+from agent.core.mcp_integration import AGENT_TOOL_BINDINGS
+from agent.tools.loader import load_all_tools
 
 logger = logging.getLogger(__name__)
 
@@ -345,7 +346,18 @@ async def _create_single_agent(agent_name: str) -> AssistantAgent:
     prompt = await _get_agent_prompt(agent_name)
     if prompt is None:
         raise ValueError(f"不支持的 Agent: {agent_name}，可选: {list(AGENT_PROMPTS.keys())}")
-    tools = await load_agent_tools(agent_name)
+
+    # 追加 Skill 指令到 System Prompt
+    try:
+        from agent.core.skill_adapter import SkillRegistry
+        skill_registry = SkillRegistry.get_instance()
+        skill_extensions = skill_registry.get_agent_prompt_extensions(agent_name)
+        if skill_extensions:
+            prompt += "\n\n" + skill_extensions
+    except Exception as e:
+        logger.debug("Skill Prompt 追加失败（非致命）: %s", e)
+
+    tools = await load_all_tools(agent_name)
     if not tools:
         bound_servers = AGENT_TOOL_BINDINGS.get(agent_name, [])
         prompt += (
