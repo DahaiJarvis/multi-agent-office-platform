@@ -10,6 +10,7 @@
   - 版本管理：工作流的保存、加载、版本控制
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 # 工作流执行最大步数限制，防止死循环
 MAX_EXECUTION_STEPS = 1000
+
+_human_input_waiters: dict[str, asyncio.Event] = {}
+_human_input_results: dict[str, dict[str, Any]] = {}
 
 
 class NodeType(str, Enum):
@@ -117,22 +121,22 @@ class WorkflowExecution(BaseModel):
 
 # ==================== 存储 ====================
 
-_workflow_redis: Any = None
 _WORKFLOW_KEY_PREFIX = "workflow:"
 _EXECUTION_KEY_PREFIX = "workflow_exec:"
 
 
 async def _get_workflow_redis() -> Any:
-    """获取工作流存储用的 Redis 客户端（使用统一连接管理器）"""
-    global _workflow_redis
-    if _workflow_redis is None:
-        try:
-            from agent.core.redis_manager import get_redis_client
-            _workflow_redis = await get_redis_client()
-        except Exception as e:
-            logger.warning("工作流引擎 Redis 连接失败: %s", e)
-            return None
-    return _workflow_redis
+    """获取工作流存储用的 Redis 客户端
+
+    直接使用全局统一连接管理器，不本地缓存，
+    由 redis_manager 内部管理连接生命周期。
+    """
+    try:
+        from agent.core.redis_manager import get_redis_client
+        return await get_redis_client()
+    except Exception as e:
+        logger.warning("工作流引擎 Redis 连接失败: %s", e)
+        return None
 
 
 async def _store_workflow(workflow: Workflow) -> None:
@@ -391,7 +395,7 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
             visited.add(current_node.node_id)
 
             execution.current_node_id = current_node.node_id
-            node_result = await _execute_node(current_node, context)
+            node_result = await _execute_node(current_node, context, execution)
             context["results"][current_node.node_id] = node_result
 
             next_edges = [e for e in workflow.edges if e.source_node_id == current_node.node_id]
@@ -428,7 +432,7 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
     return execution
 
 
-async def _execute_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
+async def _execute_node(node: WorkflowNode, context: dict[str, Any], execution: WorkflowExecution | None = None) -> dict[str, Any]:
     """执行单个节点
 
     根据节点类型调用对应的执行器，将结果写入上下文。
@@ -452,7 +456,7 @@ async def _execute_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str
         return await _execute_delay_node(node)
 
     elif node.type == NodeType.HUMAN_INPUT:
-        return _execute_human_input_node(node)
+        return await _execute_human_input_node(node, context, execution)
 
     elif node.type == NodeType.PARALLEL:
         return await _execute_parallel_node(node, context)
@@ -532,14 +536,70 @@ async def _execute_delay_node(node: WorkflowNode) -> dict[str, Any]:
     return {"status": "delayed", "seconds": seconds}
 
 
-def _execute_human_input_node(node: WorkflowNode) -> dict[str, Any]:
-    """执行人工输入节点：标记等待人工输入
+async def _execute_human_input_node(
+    node: WorkflowNode,
+    context: dict[str, Any],
+    execution: WorkflowExecution,
+) -> dict[str, Any]:
+    """执行人工输入节点：暂停工作流等待人工输入
 
-    实际场景中应通过 WebSocket 推送提示并等待回复，
-    此处返回等待状态，由上层处理中断逻辑。
+    通过事件总线发布 HUMAN_CONFIRM_REQUIRED 事件通知前端，
+    同时创建 asyncio.Event 阻塞当前协程，直到外部调用
+    resume_workflow_with_input() 提交输入后唤醒继续执行。
+
+    Args:
+        node: 人工输入节点
+        context: 工作流上下文
+        execution: 当前执行记录
+
+    Returns:
+        包含用户输入结果的字典
     """
     prompt = node.config.get("prompt", "请输入:")
-    return {"status": "waiting_for_input", "prompt": prompt}
+    timeout_seconds = node.config.get("timeout_seconds", 3600)
+    user_id = context.get("input", {}).get("user_id", "")
+    session_id = context.get("input", {}).get("session_id", "")
+
+    confirm_key = f"{execution.execution_id}:{node.node_id}"
+
+    waiter = asyncio.Event()
+    _human_input_waiters[confirm_key] = waiter
+
+    try:
+        from agent.core.event_bus import publish_event, EventType
+
+        await publish_event(
+            event_type=EventType.HUMAN_CONFIRM_REQUIRED,
+            session_id=session_id,
+            data={
+                "execution_id": execution.execution_id,
+                "node_id": node.node_id,
+                "node_name": node.name,
+                "prompt": prompt,
+                "confirm_key": confirm_key,
+                "user_id": user_id,
+            },
+        )
+    except Exception as e:
+        logger.warning("人工输入事件发布失败: %s", e)
+
+    execution.status = "waiting_for_input"
+    await _store_execution(execution)
+
+    try:
+        await asyncio.wait_for(waiter.wait(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        _human_input_waiters.pop(confirm_key, None)
+        _human_input_results.pop(confirm_key, None)
+        return {"status": "input_timeout", "prompt": prompt}
+
+    user_input = _human_input_results.pop(confirm_key, {})
+    _human_input_waiters.pop(confirm_key, None)
+
+    execution.status = "running"
+    await _store_execution(execution)
+
+    return {"status": "input_received", "prompt": prompt, "user_input": user_input}
 
 
 async def _execute_parallel_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
@@ -837,3 +897,34 @@ async def publish_workflow(workflow_id: str) -> Workflow | None:
     workflow.updated_at = time.time()
     await _store_workflow(workflow)
     return workflow
+
+
+async def resume_workflow_with_input(
+    execution_id: str,
+    node_id: str,
+    user_input: dict[str, Any],
+) -> bool:
+    """向等待中的人工输入节点提交用户输入，唤醒工作流继续执行
+
+    当工作流执行到 HUMAN_INPUT 节点时会暂停并等待，
+    前端通过此接口提交用户输入后，工作流自动恢复执行。
+
+    Args:
+        execution_id: 工作流执行ID
+        node_id: 人工输入节点ID
+        user_input: 用户输入数据
+
+    Returns:
+        是否成功唤醒
+    """
+    confirm_key = f"{execution_id}:{node_id}"
+
+    waiter = _human_input_waiters.get(confirm_key)
+    if waiter is None:
+        logger.warning("未找到等待中的人工输入: execution=%s node=%s", execution_id, node_id)
+        return False
+
+    _human_input_results[confirm_key] = user_input
+    waiter.set()
+    logger.info("人工输入已提交: execution=%s node=%s", execution_id, node_id)
+    return True

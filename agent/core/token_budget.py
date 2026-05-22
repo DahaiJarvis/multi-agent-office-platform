@@ -497,8 +497,18 @@ _budget_manager: TokenBudgetManager | None = None
 
 
 def get_token_budget_manager() -> TokenBudgetManager:
-    """获取全局 Token 预算管理器"""
+    """获取全局 Token 预算管理器
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _budget_manager
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_token_budget_manager() is not None:
+            return ctx.get_token_budget_manager()
+    except Exception:
+        pass
     if _budget_manager is None:
         _budget_manager = TokenBudgetManager()
     return _budget_manager

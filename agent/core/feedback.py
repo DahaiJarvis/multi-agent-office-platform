@@ -278,8 +278,18 @@ _feedback_service: FeedbackService | None = None
 
 
 def get_feedback_service() -> FeedbackService:
-    """获取全局反馈服务"""
+    """获取全局反馈服务
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _feedback_service
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_feedback_service() is not None:
+            return ctx.get_feedback_service()
+    except Exception:
+        pass
     if _feedback_service is None:
         _feedback_service = FeedbackService()
     return _feedback_service

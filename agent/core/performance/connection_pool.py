@@ -161,8 +161,18 @@ _pool_manager: ConnectionPoolManager | None = None
 
 
 def get_pool_manager() -> ConnectionPoolManager:
-    """获取全局连接池管理器"""
+    """获取全局连接池管理器
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _pool_manager
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_pool_manager() is not None:
+            return ctx.get_pool_manager()
+    except Exception:
+        pass
     if _pool_manager is None:
         from agent.core.config import get_settings
         settings = get_settings()

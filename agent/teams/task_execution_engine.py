@@ -1786,8 +1786,18 @@ _task_execution_engine: TaskExecutionEngine | None = None
 
 
 def get_task_execution_engine() -> TaskExecutionEngine:
-    """获取全局任务编排引擎实例"""
+    """获取全局任务编排引擎实例
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _task_execution_engine
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_task_execution_engine() is not None:
+            return ctx.get_task_execution_engine()
+    except Exception:
+        pass
     if _task_execution_engine is None:
         _task_execution_engine = TaskExecutionEngine()
     return _task_execution_engine

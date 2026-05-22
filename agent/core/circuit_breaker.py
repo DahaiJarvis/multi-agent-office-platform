@@ -261,13 +261,23 @@ class CircuitBreaker:
             当前熔断器状态
         """
         async with self._lock:
-            if self._state == CircuitState.OPEN:
-                elapsed = time.time() - self._last_failure_time
-                if elapsed >= self._config.recovery_timeout:
-                    self._transition_to(CircuitState.HALF_OPEN)
-                    self._half_open_calls = 0
-                    self._success_count = 0
-            return self._state
+            return self._check_state_internal()
+
+    def _check_state_internal(self) -> CircuitState:
+        """内部状态检查（不加锁，由调用方保证线程安全）
+
+        供 call() 等已持有锁的方法内部调用，避免嵌套获取锁导致死锁。
+
+        Returns:
+            当前熔断器状态
+        """
+        if self._state == CircuitState.OPEN:
+            elapsed = time.time() - self._last_failure_time
+            if elapsed >= self._config.recovery_timeout:
+                self._transition_to(CircuitState.HALF_OPEN)
+                self._half_open_calls = 0
+                self._success_count = 0
+        return self._state
 
     @property
     def config(self) -> CircuitBreakerConfig:
@@ -293,10 +303,14 @@ class CircuitBreaker:
             half_open_calls=self._half_open_calls,
         )
 
-    async def _allow_request(self) -> bool:
+    def _allow_request(self) -> bool:
         """判断是否允许请求通过
 
         内部方法，根据当前状态判断是否允许请求。
+        使用 _check_state_internal() 避免嵌套获取锁。
+
+        注意：此方法由 call() 在持有锁的上下文中调用，
+        因此自身不再获取锁，也不需要是异步方法。
 
         判断逻辑：
         - CLOSED: 允许
@@ -307,7 +321,7 @@ class CircuitBreaker:
             True: 允许请求
             False: 拒绝请求
         """
-        current_state = await self.check_state()
+        current_state = self._check_state_internal()
 
         if current_state == CircuitState.CLOSED:
             return True
@@ -350,7 +364,7 @@ class CircuitBreaker:
             result = await cb.call(fetch_data, "query", timeout=10)
         """
         async with self._lock:
-            allowed = await self._allow_request()
+            allowed = self._allow_request()
             if not allowed:
                 raise CircuitOpenError(self._name, self._config.recovery_timeout)
 

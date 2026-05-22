@@ -834,8 +834,18 @@ _scheduled_task_manager: ScheduledTaskManager | None = None
 
 
 def get_scheduled_task_manager() -> ScheduledTaskManager:
-    """获取全局定时任务管理器"""
+    """获取全局定时任务管理器
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _scheduled_task_manager
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_scheduled_task_manager() is not None:
+            return ctx.get_scheduled_task_manager()
+    except Exception:
+        pass
     if _scheduled_task_manager is None:
         _scheduled_task_manager = ScheduledTaskManager()
     return _scheduled_task_manager

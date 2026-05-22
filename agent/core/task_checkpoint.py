@@ -467,8 +467,18 @@ _task_checkpoint_store: TaskCheckpointStore | None = None
 
 
 def get_task_checkpoint_store() -> TaskCheckpointStore:
-    """获取全局任务检查点存储管理器"""
+    """获取全局任务检查点存储管理器
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _task_checkpoint_store
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_task_checkpoint_store() is not None:
+            return ctx.get_task_checkpoint_store()
+    except Exception:
+        pass
     if _task_checkpoint_store is None:
         _task_checkpoint_store = TaskCheckpointStore()
     return _task_checkpoint_store

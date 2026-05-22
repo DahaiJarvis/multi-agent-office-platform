@@ -25,8 +25,6 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
-from agent.core.config import get_settings
-
 logger = logging.getLogger(__name__)
 
 
@@ -156,13 +154,13 @@ class ApprovalFlowManager:
         self._redis: aioredis.Redis | None = None
 
     async def _get_redis(self) -> aioredis.Redis:
-        """获取 Redis 连接"""
+        """获取 Redis 连接
+
+        复用全局统一连接管理器，避免重复创建连接。
+        """
         if self._redis is None:
-            settings = get_settings()
-            self._redis = aioredis.from_url(
-                settings.redis_url,
-                decode_responses=True,
-            )
+            from agent.core.redis_manager import get_redis_client
+            self._redis = await get_redis_client()
         return self._redis
 
     async def create_approval(
@@ -483,8 +481,18 @@ _approval_flow_manager: ApprovalFlowManager | None = None
 
 
 def get_approval_flow_manager() -> ApprovalFlowManager:
-    """获取全局审批流管理器"""
+    """获取全局审批流管理器
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _approval_flow_manager
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_approval_flow_manager() is not None:
+            return ctx.get_approval_flow_manager()
+    except Exception:
+        pass
     if _approval_flow_manager is None:
         _approval_flow_manager = ApprovalFlowManager()
     return _approval_flow_manager

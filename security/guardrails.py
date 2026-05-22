@@ -145,7 +145,7 @@ def check_input_guardrails(
     return GuardrailResult(passed=True, checks=checks)
 
 
-def check_tool_call_guardrails(
+async def check_tool_call_guardrails(
     user_role: str,
     tool_name: str,
     tool_input: dict[str, Any] | None = None,
@@ -159,6 +159,8 @@ def check_tool_call_guardrails(
     3. 敏感操作是否需要二次确认
     4. 工具参数深度校验（基于 JSON Schema）
     5. 工具调用配额检查
+
+    注意：此方法为异步方法，因为配额检查和审批单创建需要异步访问 Redis。
 
     Args:
         user_role: 用户角色
@@ -211,7 +213,7 @@ def check_tool_call_guardrails(
 
         if perm_result.require_confirm:
             # 自动创建审批单
-            approval_id = _create_approval_for_sensitive_action(
+            approval_id = await _create_approval_for_sensitive_action(
                 tool_name=tool_name,
                 tool_input=tool_input,
             )
@@ -242,7 +244,7 @@ def check_tool_call_guardrails(
             )
 
     # 5. 工具调用配额检查
-    quota_result = _check_tool_quota(tool_name)
+    quota_result = await _check_tool_quota(tool_name)
     checks.append(quota_result["check_entry"])
     if quota_result["action"] == "warn":
         return GuardrailResult(
@@ -374,10 +376,11 @@ def _check_tool_schema(
     }
 
 
-def _check_tool_quota(tool_name: str) -> dict[str, Any]:
+async def _check_tool_quota(tool_name: str) -> dict[str, Any]:
     """工具调用配额检查
 
     从 Redis 读取该工具当天的调用次数，超限则警告。
+    异步方法，复用全局统一 Redis 连接管理器。
 
     Args:
         tool_name: 工具名称
@@ -395,66 +398,50 @@ def _check_tool_quota(tool_name: str) -> dict[str, Any]:
         quota = 1000
 
     try:
-        import redis.asyncio as aioredis
-        from agent.core.config import get_settings
+        from agent.core.redis_manager import get_redis_client
 
-        settings = get_settings()
-        r = aioredis.from_url(settings.redis_url, decode_responses=True)
-
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            # 在异步上下文中，无法同步调用，跳过配额检查
+        redis = await get_redis_client()
+        if redis is None:
             return {
                 "passed": True,
                 "action": "pass",
                 "reason": "",
-                "check_entry": {"check": "tool_quota", "result": "pass", "note": "异步上下文跳过"},
+                "check_entry": {"check": "tool_quota", "result": "pass", "note": "Redis不可用跳过"},
             }
 
-        # 同步上下文：直接查询
-        async def _check() -> dict[str, Any]:
-            date_key = time.strftime("%Y-%m-%d")
-            redis_key = f"tool_quota:{tool_name}:{date_key}"
-            current = await r.get(redis_key)
-            count = int(current) if current else 0
+        date_key = time.strftime("%Y-%m-%d")
+        redis_key = f"tool_quota:{tool_name}:{date_key}"
+        current = await redis.get(redis_key)
+        count = int(current) if current else 0
 
-            if count >= quota:
-                return {
-                    "passed": True,
-                    "action": "warn",
-                    "reason": f"工具 {tool_name} 今日调用次数已达配额上限 ({quota})",
-                    "check_entry": {
-                        "check": "tool_quota",
-                        "result": "warn",
-                        "tool_name": tool_name,
-                        "current": count,
-                        "quota": quota,
-                    },
-                }
-
+        if count >= quota:
             return {
                 "passed": True,
-                "action": "pass",
-                "reason": "",
+                "action": "warn",
+                "reason": f"工具 {tool_name} 今日调用次数已达配额上限 ({quota})",
                 "check_entry": {
                     "check": "tool_quota",
-                    "result": "pass",
+                    "result": "warn",
                     "tool_name": tool_name,
                     "current": count,
                     "quota": quota,
                 },
             }
 
-        result = asyncio.run(_check())
-        return result
+        return {
+            "passed": True,
+            "action": "pass",
+            "reason": "",
+            "check_entry": {
+                "check": "tool_quota",
+                "result": "pass",
+                "tool_name": tool_name,
+                "current": count,
+                "quota": quota,
+            },
+        }
 
     except Exception:
-        # Redis 不可用时跳过配额检查
         return {
             "passed": True,
             "action": "pass",
@@ -617,7 +604,7 @@ def _check_hallucination_sync(
         }
 
 
-def _create_approval_for_sensitive_action(
+async def _create_approval_for_sensitive_action(
     tool_name: str,
     tool_input: dict[str, Any] | None = None,
 ) -> str | None:
@@ -625,6 +612,9 @@ def _create_approval_for_sensitive_action(
 
     在 Guardrails 检测到敏感操作需要确认时调用。
     审批单创建失败不阻断主流程，仅记录警告。
+
+    异步方法，直接调用审批流管理器创建审批单，
+    不再使用 asyncio.run() 或线程池绕过异步限制。
 
     Args:
         tool_name: 敏感操作工具名称
@@ -634,7 +624,6 @@ def _create_approval_for_sensitive_action(
         审批单ID，创建失败时返回 None
     """
     try:
-        import asyncio
         from agent.core.approval_flow import get_approval_flow_manager
 
         # 获取当前上下文信息
@@ -642,20 +631,13 @@ def _create_approval_for_sensitive_action(
         user_id = ""
         try:
             from agent.core.session_manager import get_session_manager
-
-            async def _get_context() -> tuple[str, str]:
-                await get_session_manager()
-                return "", ""
-
+            mgr = await get_session_manager()
+            # 尝试从上下文获取 session_id 和 user_id
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop and loop.is_running():
+                from security.tenant import get_current_tenant_id
+                get_current_tenant_id()
+            except Exception:
                 pass
-            else:
-                session_id, user_id = asyncio.run(_get_context())
         except Exception:
             pass
 
@@ -666,33 +648,17 @@ def _create_approval_for_sensitive_action(
         for role in require_roles:
             approval_chain.append({"role": str(role), "name": ""})
 
-        async def _create() -> str | None:
-            mgr = get_approval_flow_manager()
-            approval = await mgr.create_approval(
-                session_id=session_id,
-                user_id=user_id,
-                agent_name="",
-                tool_name=tool_name,
-                tool_input=tool_input or {},
-                reason=f"敏感操作: {tool_name}",
-                approval_chain=approval_chain if approval_chain else None,
-            )
-            return approval.approval_id
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            # 异步上下文：使用线程池执行
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, _create())
-                return future.result(timeout=5)
-        else:
-            return asyncio.run(_create())
+        approval_flow_mgr = get_approval_flow_manager()
+        approval = await approval_flow_mgr.create_approval(
+            session_id=session_id,
+            user_id=user_id,
+            agent_name="",
+            tool_name=tool_name,
+            tool_input=tool_input or {},
+            reason=f"敏感操作: {tool_name}",
+            approval_chain=approval_chain if approval_chain else None,
+        )
+        return approval.approval_id
 
     except Exception as e:
         logger.warning("创建审批单失败（非致命）: tool=%s error=%s", tool_name, e)

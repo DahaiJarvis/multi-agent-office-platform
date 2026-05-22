@@ -156,7 +156,7 @@ async def extract_and_store_knowledge(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=500,
         )
-        result_text = response.choices[0].message.content or ""
+        result_text = response.content if isinstance(response.content, str) else str(response.content)
 
         # 解析提取结果
         for line in result_text.strip().split("\n"):
@@ -243,7 +243,7 @@ async def _generate_summary(messages: list[dict[str, Any]]) -> str:
         response = await client.create(
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.choices[0].message.content or ""
+        return response.content if isinstance(response.content, str) else str(response.content)
     except Exception as e:
         logger.error("生成对话摘要失败: %s", e)
         fallback_parts = []

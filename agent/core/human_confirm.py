@@ -494,8 +494,18 @@ _human_confirm_manager: HumanConfirmManager | None = None
 
 
 def get_human_confirm_manager() -> HumanConfirmManager:
-    """获取全局人工确认管理器"""
+    """获取全局人工确认管理器
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _human_confirm_manager
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_human_confirm_manager() is not None:
+            return ctx.get_human_confirm_manager()
+    except Exception:
+        pass
     if _human_confirm_manager is None:
         _human_confirm_manager = HumanConfirmManager()
     return _human_confirm_manager

@@ -86,11 +86,7 @@ from typing import Any
 import redis.asyncio as aioredis
 from pydantic import BaseModel, Field
 
-from agent.core.config import get_settings
-
 logger = logging.getLogger(__name__)
-
-_settings = get_settings()
 
 
 class SessionState(BaseModel):
@@ -170,16 +166,14 @@ class SessionManager:
     async def _get_redis(self) -> aioredis.Redis:
         """获取 Redis 连接
 
-        懒加载模式，首次调用时创建连接。
+        复用全局统一连接管理器，避免重复创建连接。
 
         Returns:
             Redis 客户端实例
         """
         if self._redis is None:
-            self._redis = aioredis.from_url(
-                _settings.redis_url,
-                decode_responses=True,
-            )
+            from agent.core.redis_manager import get_redis_client
+            self._redis = await get_redis_client()
         return self._redis
 
     async def _redis_or_fallback(self) -> aioredis.Redis | None:
@@ -216,19 +210,39 @@ class SessionManager:
         """恢复回调：切换回 Redis 存储
 
         由 DegradationManager 调用，实现自动恢复。
-        恢复时会将内存数据迁移到 Redis。
+        采用写双策略：先将所有内存数据写入 Redis，确认全部成功后再清空内存，
+        避免迁移过程中 Redis 写入失败导致数据丢失。
         """
         if self._use_memory_fallback:
             try:
                 redis = await self._get_redis()
                 await redis.ping()
-                logger.info("SessionManager 恢复 Redis 存储，迁移内存数据")
-                # 将内存数据迁移到 Redis
+                logger.info("SessionManager 恢复 Redis 存储，迁移内存数据 (共 %d 条)", len(self._memory_store))
+
+                migrated = 0
+                failed_keys: list[str] = []
                 for key, value in self._memory_store.items():
-                    await redis.setex(key, self.SESSION_TTL, value)
+                    try:
+                        await redis.setex(key, self.SESSION_TTL, value)
+                        migrated += 1
+                    except Exception as e:
+                        failed_keys.append(key)
+                        logger.warning("迁移 key 到 Redis 失败: key=%s error=%s", key, e)
+
+                if failed_keys:
+                    logger.warning(
+                        "部分内存数据迁移失败 (%d/%d)，保留失败数据在内存中",
+                        len(failed_keys), len(self._memory_store),
+                    )
+                    for key in failed_keys:
+                        self._memory_store.pop(key, None)
+                    self._use_memory_fallback = False
+                    return
+
                 self._memory_store.clear()
                 self._memory_index.clear()
                 self._use_memory_fallback = False
+                logger.info("内存数据迁移完成: %d 条", migrated)
             except Exception as e:
                 logger.warning("恢复 Redis 失败，继续使用内存存储: %s", e)
 
@@ -701,10 +715,12 @@ class SessionManager:
         logger.info("转移会话: session_id=%s -> %s", session_id, target_agent)
 
     async def close(self) -> None:
-        """关闭 Redis 连接"""
-        if self._redis:
-            await self._redis.close()
-            self._redis = None
+        """释放 Redis 连接引用
+
+        注意：Redis 连接由全局 redis_manager 统一管理，
+        此处仅释放本地引用，不关闭底层连接。
+        """
+        self._redis = None
 
     def _session_key(self, session_id: str, tenant_id: str = "") -> str:
         """生成会话存储键
@@ -744,11 +760,20 @@ _session_manager: SessionManager | None = None
 
 
 async def get_session_manager() -> SessionManager:
-    """获取全局会话管理器"""
+    """获取全局会话管理器
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _session_manager
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_session_manager() is not None:
+            return ctx.get_session_manager()
+    except Exception:
+        pass
     if _session_manager is None:
         _session_manager = SessionManager()
-        # 注册 Redis 降级回调
         try:
             from deploy.ha_manager import DegradationManager
             DegradationManager.register_handler(

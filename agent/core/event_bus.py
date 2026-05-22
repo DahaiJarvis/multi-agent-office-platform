@@ -19,8 +19,6 @@ from collections.abc import AsyncGenerator
 from enum import Enum
 from typing import Any
 
-from agent.core.config import get_settings
-
 logger = logging.getLogger(__name__)
 
 
@@ -131,16 +129,14 @@ class EventBus:
         self._listener_task: asyncio.Task | None = None
 
     async def _get_redis(self) -> Any:
-        """获取 Redis 客户端"""
+        """获取 Redis 客户端
+
+        复用全局统一连接管理器，避免重复创建连接。
+        """
         if self._redis is None:
             try:
-                import redis.asyncio as aioredis
-
-                settings = get_settings()
-                self._redis = aioredis.from_url(
-                    settings.redis_url,
-                    decode_responses=True,
-                )
+                from agent.core.redis_manager import get_redis_client
+                self._redis = await get_redis_client()
             except Exception as e:
                 logger.warning("事件总线 Redis 连接失败: %s", e)
         return self._redis
@@ -352,8 +348,18 @@ _event_bus: EventBus | None = None
 
 
 def get_event_bus() -> EventBus:
-    """获取全局事件总线实例"""
+    """获取全局事件总线实例
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _event_bus
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_event_bus() is not None:
+            return ctx.get_event_bus()
+    except Exception:
+        pass
     if _event_bus is None:
         _event_bus = EventBus()
     return _event_bus

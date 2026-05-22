@@ -8,13 +8,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent.core.config import get_settings
-from agent.core.session_manager import get_session_manager
+from agent.core.app_context import get_app_context
 from agent.core.mcp_integration import close_all_connections
 from api.middleware.auth import AuthMiddleware
 from api.middleware.csrf import CSRFMiddleware
 from api.middleware.rate_limit import DistributedRateLimitMiddleware
 from api.middleware.tracing import TracingMiddleware
-from api.routes import agent_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes, jwks_routes, approval_routes, debug_routes, scheduler_routes, token_monitor_routes, skill_routes, native_tool_routes
+from api.routes import chat_routes, feedback_routes, task_routes, session_routes, admin_routes, auth_routes, tenant_routes, compliance_routes, agent_builder_routes, embed_routes, multimodal_routes, search_routes, analytics_routes, prompt_template_routes, workflow_routes, plugin_routes, sla_routes, region_routes, knowledge_proxy_routes, jwks_routes, approval_routes, debug_routes, scheduler_routes, token_monitor_routes, skill_routes, native_tool_routes
 from api.errors import AppException, app_exception_handler, generic_exception_handler
 from observability.logging_config import setup_logging
 from observability.tracing import setup_tracing
@@ -79,7 +79,11 @@ async def _audit_flush_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
+    """应用生命周期管理
+
+    通过 AppContext 统一管理核心组件的初始化和关闭，
+    安全相关组件（SSO/加密/数据驻留/多租户）仍在此处按条件初始化。
+    """
     setup_logging(log_level=settings.log_level)
     logger.info("应用启动中...")
 
@@ -89,19 +93,9 @@ async def lifespan(app: FastAPI):
         enabled=settings.otel_enabled,
     )
 
-    session_mgr = await get_session_manager()
-    logger.info("会话管理器初始化完成")
+    app_ctx = get_app_context()
+    await app_ctx.initialize()
 
-    # 初始化连接池管理器
-    try:
-        from agent.core.performance.connection_pool import get_pool_manager
-        pool_mgr = get_pool_manager()
-        await pool_mgr.initialize()
-        logger.info("连接池管理器初始化完成")
-    except Exception as e:
-        logger.warning("连接池管理器初始化失败（非致命）: %s", e)
-
-    # 初始化 SSO 提供者
     if settings.sso_enabled:
         try:
             from security.sso import init_sso_providers_from_config
@@ -110,7 +104,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("SSO 提供者初始化失败（非致命）: %s", e)
 
-    # 初始化静态数据加密
     if settings.encryption_enabled:
         try:
             from security.encryption import init_encryption
@@ -122,7 +115,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("静态数据加密初始化失败（非致命）: %s", e)
 
-    # 初始化数据驻留控制
     try:
         from security.data_residency import get_data_residency_manager, DataRegion
         residency_mgr = get_data_residency_manager()
@@ -132,7 +124,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("数据驻留控制初始化失败（非致命）: %s", e)
 
-    # 初始化多租户管理器
     if settings.multi_tenant_enabled:
         try:
             from security.tenant import get_tenant_manager
@@ -141,7 +132,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("多租户管理器初始化失败（非致命）: %s", e)
 
-    # 注册已发布的自定义 Agent
     try:
         from agent.agents.agent_builder import register_all_published_agents
         register_all_published_agents()
@@ -149,13 +139,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("自定义 Agent 注册失败（非致命）: %s", e)
 
-    # 智能文档助手兼容性检查
     try:
         await check_ida_compatibility()
     except Exception as e:
         logger.warning("智能文档助手兼容性检查失败（非致命）: %s", e)
 
-    # 探测 IDA REST API 路径前缀
     try:
         from api.routes.knowledge_proxy_routes import detect_ida_api_prefix
         prefix = await detect_ida_api_prefix()
@@ -163,7 +151,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("IDA API 路径前缀探测失败（非致命）: %s", e)
 
-    # 初始化用户凭证存储（数据库持久化）
     try:
         from security.user_store import get_user_store
         user_store = get_user_store()
@@ -180,85 +167,13 @@ async def lifespan(app: FastAPI):
         API_VERSION,
     )
 
-    # 启动审计日志后台刷新任务
-    global _audit_flush_task
-    _audit_flush_task = asyncio.create_task(_audit_flush_loop())
-
-    # 启动定时任务扫描器
-    try:
-        from agent.core.scheduler import get_scheduler_worker
-        scheduler = get_scheduler_worker()
-        await scheduler.start()
-        logger.info("定时任务扫描器已启动")
-    except Exception as e:
-        logger.warning("定时任务扫描器启动失败（非致命）: %s", e)
-
-    # 注册长任务处理器到消息队列
-    try:
-        from agent.core.message_queue import register_long_task_handler
-        await register_long_task_handler()
-        logger.info("长任务处理器已注册")
-    except Exception as e:
-        logger.warning("长任务处理器注册失败（非致命）: %s", e)
-
-    # 启动事件总线 Redis 监听器
-    try:
-        from agent.core.event_bus import get_event_bus
-        bus = get_event_bus()
-        await bus.start_redis_listener()
-        logger.info("事件总线 Redis 监听器已启动")
-    except Exception as e:
-        logger.warning("事件总线 Redis 监听器启动失败（非致命）: %s", e)
-
     yield
 
-    # 停止审计日志刷新任务
-    if _audit_flush_task:
-        _audit_flush_task.cancel()
-        try:
-            await _audit_flush_task
-        except asyncio.CancelledError:
-            pass
+    await app_ctx.shutdown()
 
-    # 停止定时任务扫描器
-    try:
-        from agent.core.scheduler import get_scheduler_worker
-        scheduler = get_scheduler_worker()
-        await scheduler.stop()
-    except Exception:
-        pass
-
-    # 停止事件总线 Redis 监听器
-    try:
-        from agent.core.event_bus import get_event_bus
-        bus = get_event_bus()
-        await bus.stop_redis_listener()
-    except Exception:
-        pass
-
-    # 关闭前最后一次刷新审计日志
-    try:
-        from agent.core.audit import get_audit_logger
-        audit = get_audit_logger()
-        await audit.flush_buffer()
-    except Exception:
-        pass
-
-    await session_mgr.close()
-    await close_all_connections()
-
-    # 关闭知识库代理 HTTP 客户端，释放连接池资源
     try:
         from api.routes.knowledge_proxy_routes import close_knowledge_proxy_client
         await close_knowledge_proxy_client()
-    except Exception:
-        pass
-
-    # 关闭连接池管理器
-    try:
-        from agent.core.performance.connection_pool import get_pool_manager
-        pool_mgr = get_pool_manager()
-        await pool_mgr.shutdown()
     except Exception:
         pass
 
@@ -301,7 +216,9 @@ def create_app() -> FastAPI:
     # 注册路由 - 使用配置化的 API 版本前缀
     api_prefix = f"/api/{API_VERSION}"
     app.include_router(auth_routes.router, prefix=api_prefix)
-    app.include_router(agent_routes.router, prefix=api_prefix)
+    app.include_router(chat_routes.router, prefix=api_prefix)
+    app.include_router(feedback_routes.router, prefix=api_prefix)
+    app.include_router(task_routes.router, prefix=api_prefix)
     app.include_router(session_routes.router, prefix=api_prefix)
     app.include_router(admin_routes.router, prefix=api_prefix)
     app.include_router(tenant_routes.router, prefix=api_prefix)

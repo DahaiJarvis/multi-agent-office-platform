@@ -18,6 +18,7 @@ from agent.core.workflow_engine import (
     execute_workflow,
     get_workflow_visualization,
     publish_workflow,
+    resume_workflow_with_input,
     Workflow,
     WorkflowNode,
     WorkflowEdge,
@@ -201,3 +202,29 @@ async def api_list_node_types() -> dict:
             {"id": "delay", "name": "延迟节点", "description": "延迟指定时间"},
         ]
     }
+
+
+class ResumeWorkflowInputRequest(BaseModel):
+    """工作流人工输入提交请求"""
+
+    execution_id: str = Field(..., description="工作流执行ID")
+    node_id: str = Field(..., description="人工输入节点ID")
+    user_input: dict = Field(default_factory=dict, description="用户输入数据")
+
+
+@router.post("/human-input", summary="提交工作流人工输入")
+async def api_resume_workflow_with_input(request: ResumeWorkflowInputRequest) -> dict:
+    """向等待中的人工输入节点提交用户输入
+
+    当工作流执行到 HUMAN_INPUT 节点时会暂停等待，
+    前端通过此接口提交用户输入后，工作流自动恢复执行。
+    """
+    success = await resume_workflow_with_input(
+        execution_id=request.execution_id,
+        node_id=request.node_id,
+        user_input=request.user_input,
+    )
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.RESOURCE_NOT_FOUND, message="未找到等待中的人工输入节点，可能已超时或不存在")
+    return {"status": "ok", "message": "输入已提交，工作流继续执行"}

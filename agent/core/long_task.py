@@ -562,8 +562,18 @@ _long_task_manager: LongTaskManager | None = None
 
 
 def get_long_task_manager() -> LongTaskManager:
-    """获取全局长任务管理器"""
+    """获取全局长任务管理器
+
+    优先从 AppContext 获取，兼容旧的模块级单例模式。
+    """
     global _long_task_manager
+    try:
+        from agent.core.app_context import get_app_context
+        ctx = get_app_context()
+        if ctx.initialized and ctx.get_long_task_manager() is not None:
+            return ctx.get_long_task_manager()
+    except Exception:
+        pass
     if _long_task_manager is None:
         _long_task_manager = LongTaskManager()
     return _long_task_manager

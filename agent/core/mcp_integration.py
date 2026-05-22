@@ -113,7 +113,7 @@ AGENT_TOOL_BINDINGS: dict[str, list[str]] = {
     "HRAgent": ["hr"],
     "FinanceAgent": ["finance"],
     "Reviewer": ["oa", "approval", "hr", "finance"],
-    "KnowledgeAgent": ["knowledge"],
+    "KnowledgeAgent": ["knowledge", "web_search"],
 }
 
 # 工具缓存

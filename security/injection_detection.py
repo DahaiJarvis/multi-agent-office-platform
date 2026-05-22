@@ -284,14 +284,13 @@ async def _ai_detection_check(content: str) -> DetectionResult:
             f"用户输入:\n{content[:2000]}"
         )
 
-        from autogen_agentchat.messages import TextMessage
-        result = await client.create([TextMessage(content=detection_prompt, source="system")])
+        from autogen_core.models import SystemMessage, UserMessage
+        result = await client.create([
+            SystemMessage(source="system", content="你是安全检测系统，仅输出 JSON 格式的检测结果。"),
+            UserMessage(source="user", content=detection_prompt),
+        ])
 
-        response_text = ""
-        for choice in result.choices:
-            if choice.message and choice.message.content:
-                response_text = choice.message.content
-                break
+        response_text = result.content if isinstance(result.content, str) else str(result.content)
 
         import json
         json_match = re.search(r'\{[^}]+\}', response_text)
