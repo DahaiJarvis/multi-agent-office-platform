@@ -230,7 +230,18 @@ async def check_tool_call_guardrails(
 
     checks.append({"check": "sensitive_action", "result": "pass"})
 
-    # 4. 工具参数深度校验
+    # 4. 资源冲突检测（分布式锁）
+    conflict_result = await _check_resource_conflict(tool_name, tool_input)
+    checks.append(conflict_result["check_entry"])
+    if conflict_result["action"] == "confirm":
+        return GuardrailResult(
+            passed=True,
+            action=GuardrailAction.CONFIRM,
+            reason=conflict_result["reason"],
+            checks=checks,
+        )
+
+    # 5. 工具参数深度校验
     if tool_schema and tool_input is not None:
         schema_result = _check_tool_schema(tool_name, tool_input, tool_schema)
         checks.append(schema_result["check_entry"])
@@ -243,7 +254,7 @@ async def check_tool_call_guardrails(
                 checks=checks,
             )
 
-    # 5. 工具调用配额检查
+    # 6. 工具调用配额检查
     quota_result = await _check_tool_quota(tool_name)
     checks.append(quota_result["check_entry"])
     if quota_result["action"] == "warn":
@@ -255,6 +266,99 @@ async def check_tool_call_guardrails(
         )
 
     return GuardrailResult(passed=True, checks=checks)
+
+
+async def _check_resource_conflict(
+    tool_name: str,
+    tool_input: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """资源冲突检测
+
+    从工具调用参数中提取资源标识，检查该资源是否已被其他操作锁定。
+    对写操作（send/approve/reject/delete 等）自动检测，读操作不检测。
+
+    Args:
+        tool_name: 工具名称
+        tool_input: 工具输入参数
+
+    Returns:
+        包含 passed、action、reason、check_entry 的字典
+    """
+    if not tool_input:
+        return {
+            "passed": True,
+            "action": "pass",
+            "reason": "",
+            "check_entry": {"check": "resource_conflict", "result": "pass", "note": "无参数跳过"},
+        }
+
+    try:
+        from agent.core.distributed_lock import extract_resource_key, DistributedLock
+
+        resource_key_mapping = _get_tool_resource_key_mapping()
+        lock_key = extract_resource_key(tool_name, tool_input, resource_key_mapping)
+
+        if lock_key is None:
+            return {
+                "passed": True,
+                "action": "pass",
+                "reason": "",
+                "check_entry": {"check": "resource_conflict", "result": "pass", "note": "非写操作跳过"},
+            }
+
+        lock = DistributedLock(lock_key=lock_key, ttl_ms=30000, retry_count=0)
+        is_locked = await lock.is_locked()
+
+        if is_locked:
+            holder = await lock.get_holder()
+            return {
+                "passed": True,
+                "action": "confirm",
+                "reason": f"资源 {lock_key} 正在被其他操作使用(holder={holder})，请稍后重试",
+                "check_entry": {
+                    "check": "resource_conflict",
+                    "result": "conflict",
+                    "lock_key": lock_key,
+                    "holder": holder,
+                },
+            }
+
+        return {
+            "passed": True,
+            "action": "pass",
+            "reason": "",
+            "check_entry": {
+                "check": "resource_conflict",
+                "result": "pass",
+                "lock_key": lock_key,
+            },
+        }
+
+    except Exception as e:
+        logger.warning("资源冲突检测失败（非致命）: tool=%s error=%s", tool_name, e)
+        return {
+            "passed": True,
+            "action": "pass",
+            "reason": "",
+            "check_entry": {"check": "resource_conflict", "result": "pass", "note": f"检测失败跳过: {e}"},
+        }
+
+
+def _get_tool_resource_key_mapping() -> dict[str, str]:
+    """获取工具参数到资源标识的映射配置
+
+    从全局配置中读取 TOOL_RESOURCE_KEY_MAPPING，
+    定义工具参数名到资源标识字段的映射关系。
+
+    Returns:
+        映射字典，key 为 "资源:操作"，value 为参数名
+    """
+    try:
+        from agent.core.config import get_settings
+        settings = get_settings()
+        return getattr(settings, "tool_resource_key_mapping", {})
+    except Exception:
+        return {}
 
 
 def _check_tool_whitelist(tool_name: str) -> dict[str, Any]:
@@ -450,7 +554,7 @@ async def _check_tool_quota(tool_name: str) -> dict[str, Any]:
         }
 
 
-def check_output_guardrails(
+async def check_output_guardrails(
     content: str,
     user_roles: list[str] | None = None,
     knowledge_context: list[str] | None = None,
@@ -518,7 +622,7 @@ def check_output_guardrails(
 
     # 3. 幻觉检测（仅知识库场景）
     if knowledge_context:
-        hallucination_result = _check_hallucination_sync(content, knowledge_context, query)
+        hallucination_result = await _check_hallucination(content, knowledge_context, query)
         checks.append(hallucination_result["check_entry"])
         if not hallucination_result["passed"]:
             return GuardrailResult(
@@ -531,14 +635,16 @@ def check_output_guardrails(
     return GuardrailResult(passed=True, checks=checks)
 
 
-def _check_hallucination_sync(
+async def _check_hallucination(
     content: str,
     knowledge_context: list[str],
     query: str,
 ) -> dict[str, Any]:
-    """同步执行幻觉检测（在输出护栏中调用）
+    """异步执行幻觉检测（在输出护栏中调用）
 
     幻觉检测不阻断正常输出，仅附加警告和置信度。
+    直接 await HallucinationDetector.check()，避免在已有事件循环中使用
+    asyncio.run() 导致的 RuntimeError。
 
     Args:
         content: Agent 输出内容
@@ -548,30 +654,11 @@ def _check_hallucination_sync(
     Returns:
         包含 passed、reason、check_entry 的字典
     """
-    import asyncio
-
     try:
         from security.hallucination_detection import HallucinationDetector
 
         detector = HallucinationDetector()
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            # 在异步上下文中，使用 create_task
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    asyncio.run,
-                    detector.check(content, knowledge_context, query),
-                )
-                result = future.result(timeout=10)
-        else:
-            result = asyncio.run(detector.check(content, knowledge_context, query))
+        result = await detector.check(content, knowledge_context, query)
 
         return {
             "passed": result.passed,

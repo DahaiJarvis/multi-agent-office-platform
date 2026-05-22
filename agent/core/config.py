@@ -224,6 +224,22 @@ class Settings(BaseSettings):
         alias="PLATFORM_ROLE_MAPPING",
     )
 
+    # 分布式锁 - 工具参数到资源标识的映射
+    # 定义工具调用时从哪个参数提取资源ID，用于构造分布式锁 Key
+    # key 格式: "资源:操作"，value 格式: 参数名
+    tool_resource_key_mapping: dict[str, str] = Field(
+        default={
+            "approval:approve": "approval_id",
+            "approval:reject": "approval_id",
+            "email:send": "draft_id",
+            "calendar:create": "time_slot",
+            "calendar:cancel": "event_id",
+            "document:update": "document_id",
+            "document:delete": "document_id",
+        },
+        description="工具参数到资源标识的映射，用于分布式锁",
+    )
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @model_validator(mode="after")

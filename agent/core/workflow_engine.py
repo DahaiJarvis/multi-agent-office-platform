@@ -403,6 +403,17 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
             if current_node.type == NodeType.END:
                 break
 
+            if current_node.type == NodeType.PARALLEL:
+                # 并行节点执行完成后，所有分支的输出边应汇聚到同一个后续节点
+                # 查找汇聚节点：并行节点的所有出边指向的同一个目标节点
+                parallel_next_edges = [e for e in workflow.edges if e.source_node_id == current_node.node_id]
+                if parallel_next_edges:
+                    next_node = _find_node(workflow, parallel_next_edges[0].target_node_id)
+                else:
+                    next_node = None
+                current_node = next_node
+                continue
+
             if current_node.type == NodeType.CONDITION and next_edges:
                 condition_result = _evaluate_condition(current_node.condition_expr, context)
                 matched_edge = None
@@ -602,17 +613,39 @@ async def _execute_human_input_node(
     return {"status": "input_received", "prompt": prompt, "user_input": user_input}
 
 
-async def _execute_parallel_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
-    """执行并行节点：同时执行多个分支"""
-    import asyncio
+# 并行节点默认最大并发分支数
+DEFAULT_MAX_CONCURRENT_BRANCHES = 5
 
+# 并行节点默认超时时间（秒）
+DEFAULT_PARALLEL_TIMEOUT_SECONDS = 60
+
+
+async def _execute_parallel_node(node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
+    """执行并行节点：同时执行多个分支
+
+    使用 asyncio.gather 并发执行所有分支，支持：
+      - 信号量控制最大并发分支数，防止资源耗尽
+      - 超时控制，超时后取消未完成的分支
+      - 异常隔离，单个分支失败不影响其他分支
+      - 结果聚合，将所有分支结果以 {branch_name: result} 格式返回
+
+    Args:
+        node: 并行节点
+        context: 工作流上下文
+
+    Returns:
+        包含所有分支执行结果的字典
+    """
     branches = node.config.get("branches", [])
     if not branches:
         return {"status": "parallel_completed", "results": {}}
 
-    tasks = []
-    branch_names = []
-    for branch in branches:
+    max_concurrent = node.config.get("max_concurrent_branches", DEFAULT_MAX_CONCURRENT_BRANCHES)
+    timeout_seconds = node.config.get("timeout_seconds", DEFAULT_PARALLEL_TIMEOUT_SECONDS)
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _run_branch(branch: dict[str, Any], sem: asyncio.Semaphore) -> dict[str, Any]:
+        """在信号量控制下执行单个分支"""
         branch_node = WorkflowNode(
             node_id=branch.get("node_id", str(uuid.uuid4())),
             name=branch.get("name", ""),
@@ -621,19 +654,42 @@ async def _execute_parallel_node(node: WorkflowNode, context: dict[str, Any]) ->
             agent_name=branch.get("agent_name"),
             tool_name=branch.get("tool_name"),
         )
-        tasks.append(_execute_node(branch_node, context))
-        branch_names.append(branch.get("name", branch_node.node_id))
+        async with sem:
+            return await _execute_node(branch_node, context)
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    tasks = []
+    branch_names = []
+    for branch in branches:
+        branch_name = branch.get("name", branch.get("node_id", str(uuid.uuid4())[:8]))
+        branch_names.append(branch_name)
+        tasks.append(_run_branch(branch, semaphore))
 
-    branch_results: dict[str, Any] = {}
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "并行节点执行超时(%ds)，部分分支可能未完成: node=%s",
+            timeout_seconds, node.node_id,
+        )
+        branch_results: dict[str, Any] = {}
+        for name in branch_names:
+            branch_results[name] = {"status": "timeout", "error": f"分支执行超过{timeout_seconds}秒"}
+        return {"status": "parallel_timeout", "results": branch_results}
+
+    branch_results = {}
     for name, result in zip(branch_names, results):
         if isinstance(result, Exception):
-            branch_results[name] = {"status": "failed", "error": str(result)}
+            branch_results[name] = {"status": "branch_failed", "error": str(result)}
         else:
             branch_results[name] = result
 
-    return {"status": "parallel_completed", "results": branch_results}
+    failed_count = sum(1 for r in branch_results.values() if r.get("status", "").endswith("_failed"))
+    overall_status = "parallel_completed" if failed_count < len(branches) else "parallel_failed"
+
+    return {"status": overall_status, "results": branch_results}
 
 
 def _render_template(template: str, context: dict[str, Any]) -> str:
@@ -816,6 +872,29 @@ def _validate_workflow(workflow: Workflow) -> None:
     duplicates = [nid for nid, count in node_id_counts.items() if count > 1]
     if duplicates:
         raise ValueError(f"节点ID重复: {duplicates}")
+
+    # 并行节点校验
+    parallel_nodes = [n for n in workflow.nodes if n.type == NodeType.PARALLEL]
+    for pnode in parallel_nodes:
+        branches = pnode.config.get("branches", [])
+        if len(branches) < 2:
+            raise ValueError(f"并行节点 {pnode.node_id} 必须至少有2个分支，当前: {len(branches)}")
+
+        # 检查并行节点嵌套：分支中不允许包含 PARALLEL 类型
+        for branch in branches:
+            branch_type = branch.get("type", "agent")
+            if branch_type == NodeType.PARALLEL.value:
+                raise ValueError(f"并行节点 {pnode.node_id} 的分支不允许嵌套并行节点")
+
+        # 检查并行节点是否有汇聚出边
+        parallel_out_edges = [e for e in workflow.edges if e.source_node_id == pnode.node_id]
+        if not parallel_out_edges:
+            raise ValueError(f"并行节点 {pnode.node_id} 缺少汇聚出边，所有分支结果需要汇聚到一个后续节点")
+
+        # 检查所有出边是否汇聚到同一个目标节点
+        target_node_ids = {e.target_node_id for e in parallel_out_edges}
+        if len(target_node_ids) > 1:
+            raise ValueError(f"并行节点 {pnode.node_id} 的出边必须汇聚到同一个后续节点，当前指向: {target_node_ids}")
 
 
 # ==================== 可视化数据 ====================
