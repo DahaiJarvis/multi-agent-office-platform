@@ -16,6 +16,19 @@ supported_actions:
   - summarize
   - delete
 
+capability_keywords:
+  - "邮件"
+  - "收件箱"
+  - "发邮件"
+  - "发送邮件"
+  - "抄送"
+  - "附件"
+  - "邮件摘要"
+
+limitations:
+  - "不支持邮件模板管理"
+  - "不支持邮件规则配置"
+
 required_services:
   - email
 

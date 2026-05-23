@@ -16,6 +16,18 @@ supported_actions:
   - cancel
   - conflict_check
 
+capability_keywords:
+  - "日程"
+  - "会议"
+  - "日历"
+  - "预约"
+  - "会议室"
+  - "时间冲突"
+
+limitations:
+  - "不支持会议室资源管理"
+  - "不支持跨组织日程共享"
+
 required_services:
   - calendar
 

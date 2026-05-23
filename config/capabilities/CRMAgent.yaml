@@ -13,6 +13,18 @@ supported_actions:
   - update_customer
   - analyze
 
+capability_keywords:
+  - "客户"
+  - "商机"
+  - "CRM"
+  - "销售"
+  - "联系人"
+  - "合同"
+
+limitations:
+  - "不支持客户数据导出"
+  - "不支持批量数据修改"
+
 required_services:
   - crm
 

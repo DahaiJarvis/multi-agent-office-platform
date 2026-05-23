@@ -68,6 +68,7 @@ class CapabilityCard(BaseModel):
 
     supported_intents: list[str] = Field(default_factory=list, description="支持的意图列表")
     supported_actions: list[str] = Field(default_factory=list, description="支持的操作列表")
+    capability_keywords: list[str] = Field(default_factory=list, description="能力关键词列表，用于补充需求的能力匹配检测")
 
     intent_configs: list[IntentConfig] = Field(default_factory=list, description="意图级路由配置")
 
@@ -244,6 +245,104 @@ class CapabilityRegistry:
             "review": review_required,
         }
 
+    def check_agent_capability(
+        self,
+        agent_name: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """检测Agent是否具备处理指定消息的能力
+
+        通过能力关键词匹配和限制声明，判断Agent是否能处理
+        用户消息中包含的需求。用于步骤执行前的能力预检测。
+
+        Args:
+            agent_name: Agent名称
+            message: 用户消息（包含原始需求和补充需求）
+
+        Returns:
+            检测结果字典:
+            - can_handle: bool, 是否能处理
+            - matched_keywords: list[str], 匹配到的能力关键词
+            - unmatched_keywords: list[str], 未匹配到的需求关键词
+            - limitations: list[str], Agent的限制说明
+            - suggested_agents: list[str], 建议的替代Agent
+        """
+        self._ensure_loaded()
+
+        card = self._cards.get(agent_name)
+        if card is None:
+            return {
+                "can_handle": False,
+                "matched_keywords": [],
+                "unmatched_keywords": [],
+                "limitations": [],
+                "suggested_agents": [],
+            }
+
+        matched_keywords: list[str] = []
+        for kw in card.capability_keywords:
+            if kw in message:
+                matched_keywords.append(kw)
+
+        all_capability_keywords: set[str] = set()
+        for c in self._cards.values():
+            if c.enabled:
+                all_capability_keywords.update(c.capability_keywords)
+
+        unmatched_keywords: list[str] = []
+        for kw in all_capability_keywords:
+            if kw in message and kw not in card.capability_keywords:
+                unmatched_keywords.append(kw)
+
+        can_handle = len(unmatched_keywords) == 0
+
+        suggested_agents: list[str] = []
+        if not can_handle:
+            for other_card in self._cards.values():
+                if not other_card.enabled or other_card.agent_name == agent_name:
+                    continue
+                for ukw in unmatched_keywords:
+                    if ukw in other_card.capability_keywords:
+                        if other_card.agent_name not in suggested_agents:
+                            suggested_agents.append(other_card.agent_name)
+
+        return {
+            "can_handle": can_handle,
+            "matched_keywords": matched_keywords,
+            "unmatched_keywords": unmatched_keywords,
+            "limitations": card.limitations,
+            "suggested_agents": suggested_agents,
+        }
+
+    def find_agent_by_keywords(
+        self,
+        message: str,
+        exclude_agent: str | None = None,
+    ) -> list[tuple[str, int]]:
+        """根据消息中的关键词查找最匹配的Agent
+
+        按匹配到的能力关键词数量排序，返回最合适的Agent列表。
+
+        Args:
+            message: 用户消息
+            exclude_agent: 排除的Agent名称
+
+        Returns:
+            [(agent_name, match_count), ...] 按匹配数降序排列
+        """
+        self._ensure_loaded()
+
+        results: list[tuple[str, int]] = []
+        for card in self._cards.values():
+            if not card.enabled or card.agent_name == exclude_agent:
+                continue
+            match_count = sum(1 for kw in card.capability_keywords if kw in message)
+            if match_count > 0:
+                results.append((card.agent_name, match_count))
+
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results
+
     def _ensure_loaded(self) -> None:
         """确保能力卡片已加载"""
         if self._loaded:
@@ -375,6 +474,7 @@ class CapabilityRegistry:
                     category=data.get("category", "domain"),
                     supported_intents=data.get("supported_intents", []),
                     supported_actions=data.get("supported_actions", []),
+                    capability_keywords=data.get("capability_keywords", []),
                     intent_configs=intent_configs,
                     required_services=data.get("required_services", []),
                     required_tools=data.get("required_tools", []),
@@ -416,6 +516,8 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             category="supervisor",
             supported_intents=["greeting", "general_query", "help"],
             supported_actions=["route", "classify", "summarize"],
+            capability_keywords=["路由", "分类", "调度", "规划"],
+            limitations=["不执行具体业务操作", "不直接调用MCP工具"],
             required_services=[],
             priority=0,
         ),
@@ -425,6 +527,8 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             category="domain",
             supported_intents=["approval_query", "approval_action", "approval_track"],
             supported_actions=["query_list", "approve", "reject", "transfer"],
+            capability_keywords=["审批", "待审批", "OA", "同意", "拒绝", "转审", "审批单"],
+            limitations=["仅处理审批相关操作", "不支持创建审批流程"],
             required_services=["oa", "approval"],
             security_constraints=["仅处理本人权限范围内的审批", "超过5000元需特别确认"],
             priority=10,
@@ -435,6 +539,8 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             category="domain",
             supported_intents=["email_query", "email_send", "email_classify", "email_summary"],
             supported_actions=["search", "send", "classify", "summarize", "delete"],
+            capability_keywords=["邮件", "收件箱", "发邮件", "发送邮件", "抄送", "附件", "邮件摘要"],
+            limitations=["不支持邮件模板管理", "不支持邮件规则配置"],
             required_services=["email"],
             security_constraints=["不得发送含敏感数据的邮件", "群发需确认范围"],
             priority=10,
@@ -445,6 +551,8 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             category="domain",
             supported_intents=["calendar_query", "calendar_create", "calendar_update", "calendar_conflict"],
             supported_actions=["query", "create", "update", "cancel", "conflict_check"],
+            capability_keywords=["日程", "会议", "日历", "预约", "会议室", "时间冲突", "日历"],
+            limitations=["不支持会议室资源管理", "不支持跨组织日程共享"],
             required_services=["calendar"],
             security_constraints=["创建日程需确认参与者是否冲突", "删除他人日程需特别确认"],
             priority=10,
@@ -455,6 +563,8 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             category="domain",
             supported_intents=["crm_query", "crm_update", "crm_analysis"],
             supported_actions=["query_customer", "update_customer", "analyze"],
+            capability_keywords=["客户", "商机", "CRM", "销售", "联系人", "合同"],
+            limitations=["不支持客户数据导出", "不支持批量数据修改"],
             required_services=["crm"],
             priority=10,
         ),
@@ -464,6 +574,8 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             category="domain",
             supported_intents=["hr_query", "hr_leave", "hr_attendance"],
             supported_actions=["query_info", "apply_leave", "check_attendance"],
+            capability_keywords=["考勤", "请假", "薪资", "假期", "HR", "加班", "打卡", "人事"],
+            limitations=["不支持薪资修改", "不支持人事档案管理"],
             required_services=["hr"],
             security_constraints=["仅查看本人人事信息"],
             priority=10,
@@ -474,6 +586,8 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             category="domain",
             supported_intents=["finance_query", "finance_reimburse", "finance_budget"],
             supported_actions=["query", "reimburse", "budget_check"],
+            capability_keywords=["报销", "预算", "发票", "财务", "付款", "费用", "对账"],
+            limitations=["不支持财务报表生成", "不支持银行对账操作"],
             required_services=["finance"],
             security_constraints=["报销需确认金额和凭证"],
             priority=10,
@@ -484,6 +598,8 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             category="domain",
             supported_intents=["knowledge_search", "knowledge_qa", "document_query"],
             supported_actions=["search", "qa", "summarize"],
+            capability_keywords=["知识库", "文档", "搜索", "问答", "摘要", "解析", "对比", "报告", "网络搜索", "图片分析"],
+            limitations=["不支持视频处理", "不支持音频处理", "不支持代码执行"],
             required_services=["knowledge"],
             priority=10,
         ),
@@ -493,6 +609,8 @@ def _register_default_cards(registry: CapabilityRegistry) -> None:
             category="utility",
             supported_intents=["review", "compliance_check"],
             supported_actions=["review", "check", "validate"],
+            capability_keywords=["审核", "合规", "检查", "安全"],
+            limitations=["不执行业务操作", "仅做审核判断"],
             required_services=["oa", "approval", "hr", "finance"],
             priority=5,
         ),

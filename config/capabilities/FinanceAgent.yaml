@@ -13,6 +13,19 @@ supported_actions:
   - reimburse
   - budget_check
 
+capability_keywords:
+  - "报销"
+  - "预算"
+  - "发票"
+  - "财务"
+  - "付款"
+  - "费用"
+  - "对账"
+
+limitations:
+  - "不支持财务报表生成"
+  - "不支持银行对账操作"
+
 required_services:
   - finance
 

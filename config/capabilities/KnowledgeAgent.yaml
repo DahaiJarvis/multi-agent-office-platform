@@ -19,6 +19,23 @@ supported_actions:
   - compare
   - generate_report
 
+capability_keywords:
+  - "知识库"
+  - "文档"
+  - "搜索"
+  - "问答"
+  - "摘要"
+  - "解析"
+  - "对比"
+  - "报告"
+  - "网络搜索"
+  - "图片分析"
+
+limitations:
+  - "不支持视频处理"
+  - "不支持音频处理"
+  - "不支持代码执行"
+
 required_services:
   - knowledge
 

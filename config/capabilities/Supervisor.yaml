@@ -13,6 +13,16 @@ supported_actions:
   - classify
   - summarize
 
+capability_keywords:
+  - "路由"
+  - "分类"
+  - "调度"
+  - "规划"
+
+limitations:
+  - "不执行具体业务操作"
+  - "不直接调用MCP工具"
+
 required_services: []
 
 priority: 0

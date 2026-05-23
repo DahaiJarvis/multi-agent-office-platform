@@ -16,6 +16,20 @@ supported_actions:
   - coordinate
   - chat
 
+capability_keywords:
+  - "通用"
+  - "汇总"
+  - "整理"
+  - "网络搜索"
+  - "图片分析"
+  - "跨系统"
+  - "闲聊"
+  - "问候"
+
+limitations:
+  - "不处理专业领域深度操作"
+  - "复杂任务建议使用专业Agent"
+
 required_services: []
 
 priority: 5

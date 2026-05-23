@@ -13,6 +13,20 @@ supported_actions:
   - apply_leave
   - check_attendance
 
+capability_keywords:
+  - "考勤"
+  - "请假"
+  - "薪资"
+  - "假期"
+  - "HR"
+  - "加班"
+  - "打卡"
+  - "人事"
+
+limitations:
+  - "不支持薪资修改"
+  - "不支持人事档案管理"
+
 required_services:
   - hr
 

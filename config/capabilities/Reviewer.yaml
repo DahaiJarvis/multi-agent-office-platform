@@ -12,6 +12,16 @@ supported_actions:
   - check
   - validate
 
+capability_keywords:
+  - "审核"
+  - "合规"
+  - "检查"
+  - "安全"
+
+limitations:
+  - "不执行业务操作"
+  - "仅做审核判断"
+
 required_services:
   - oa
   - approval

@@ -469,6 +469,15 @@ class TaskExecutionEngine:
             )
             user_message = f"{execution.original_message}\n\n{supplement_parts}"
 
+        # 补充需求触发的重新路由检测
+        # 如果补充需求导致意图发生变化，重新规划未执行的步骤
+        if supplementary_message and supplementary_message.strip():
+            reclassify_result = await self._try_reclassify_on_resume(
+                execution, user_message,
+            )
+            if reclassify_result is not None:
+                execution = reclassify_result
+
         # 恢复为运行状态
         execution.status = TaskStatus.RUNNING
         execution.error = ""
@@ -869,6 +878,143 @@ class TaskExecutionEngine:
                 return True
         return False
 
+    async def _check_step_capability(
+        self,
+        agent_name: str,
+        user_message: str,
+    ) -> dict[str, Any]:
+        """步骤执行前的能力预检测
+
+        通过CapabilityRegistry检查Agent是否具备处理当前消息的能力。
+        如果Agent能力不足，返回建议的替代Agent。
+
+        Args:
+            agent_name: 待检测的Agent名称
+            user_message: 包含原始需求和补充需求的完整消息
+
+        Returns:
+            能力检测结果字典:
+            - can_handle: bool, 是否能处理
+            - matched_keywords: list[str], 匹配到的能力关键词
+            - unmatched_keywords: list[str], 未匹配到的需求关键词
+            - limitations: list[str], Agent的限制说明
+            - suggested_agents: list[str], 建议的替代Agent
+        """
+        try:
+            from agent.core.capability_card import get_capability_registry
+            registry = get_capability_registry()
+            return registry.check_agent_capability(agent_name, user_message)
+        except Exception as e:
+            logger.warning("能力预检测异常(非致命，跳过检测): agent=%s error=%s", agent_name, e)
+            return {"can_handle": True, "matched_keywords": [], "unmatched_keywords": [], "limitations": [], "suggested_agents": []}
+
+    async def _try_reclassify_on_resume(
+        self,
+        execution: TaskExecution,
+        full_message: str,
+    ) -> TaskExecution | None:
+        """补充需求触发的重新路由检测
+
+        当用户在恢复任务时追加了补充需求，检测补充需求是否导致
+        意图发生变化。如果意图改变，重新规划未执行的步骤。
+
+        重新路由策略：
+          1. 对完整消息（原始需求+补充需求）重新进行意图分类
+          2. 比较新意图与原始意图是否一致
+          3. 如果意图改变，重新规划未执行的步骤
+          4. 保留已完成的步骤不变
+
+        Args:
+            execution: 当前任务执行记录
+            full_message: 包含原始需求和补充需求的完整消息
+
+        Returns:
+            更新后的TaskExecution（意图改变时），或None（意图未改变时）
+        """
+        try:
+            from agent.agents.supervisor import classify_intent
+
+            new_intent = await classify_intent(full_message)
+
+            original_intent = execution.intent_result.get("intent", "")
+            new_intent_label = new_intent.intent
+
+            if new_intent_label == original_intent:
+                logger.info(
+                    "重新路由检测-意图未变: original=%s new=%s",
+                    original_intent, new_intent_label,
+                )
+                return None
+
+            logger.info(
+                "重新路由检测-意图变化: original=%s -> new=%s confidence=%.2f",
+                original_intent, new_intent_label, new_intent.confidence,
+            )
+
+            # 意图变化，重新规划未执行的步骤
+            # 保留已完成的步骤（current_step之前的步骤不变）
+            new_steps = self._plan_steps(new_intent)
+
+            # 找到未执行的步骤范围
+            old_steps_count = len(execution.steps)
+            completed_steps_count = execution.current_step - 1  # -1 因为步骤0是意图分类
+
+            # 替换未执行的步骤
+            if completed_steps_count < old_steps_count:
+                execution.steps = execution.steps[:completed_steps_count] + new_steps
+            else:
+                execution.steps = execution.steps + new_steps
+
+            # 更新意图结果
+            execution.intent_result = {
+                "intent": new_intent.intent,
+                "confidence": new_intent.confidence,
+                "target_agent": new_intent.target_agent,
+                "collaboration_mode": new_intent.collaboration_mode.value,
+                "review_required": new_intent.review_required,
+                "sub_tasks": new_intent.sub_tasks,
+                "reclassified_from": original_intent,
+            }
+            execution.collaboration_mode = new_intent.collaboration_mode.value
+
+            # 保存重新路由的检查点
+            reclassify_checkpoint = StepCheckpoint(
+                step_index=execution.current_step,
+                step_type=StepType.INTENT_CLASSIFY,
+                step_name="重新意图分类",
+                status=StepStatus.COMPLETED,
+                output_data={
+                    "original_intent": original_intent,
+                    "new_intent": new_intent_label,
+                    "confidence": new_intent.confidence,
+                    "target_agent": new_intent.target_agent,
+                    "collaboration_mode": new_intent.collaboration_mode.value,
+                    "reason": "补充需求导致意图变化",
+                },
+                fallback_used="reclassify_on_resume",
+            )
+            execution.checkpoints.append(reclassify_checkpoint)
+
+            await self._store.update_execution(execution)
+
+            await publish_event(
+                EventType.TASK_STEP_START,
+                execution.session_id,
+                {
+                    "execution_id": execution.execution_id,
+                    "event": "intent_reclassified",
+                    "original_intent": original_intent,
+                    "new_intent": new_intent_label,
+                    "new_steps_count": len(new_steps),
+                },
+            )
+
+            return execution
+
+        except Exception as e:
+            logger.warning("重新路由检测异常(非致命，保持原步骤): execution=%s error=%s", execution.execution_id, e)
+            return None
+
     async def _execute_step(
         self,
         execution: TaskExecution,
@@ -912,6 +1058,46 @@ class TaskExecutionEngine:
 
         # 发布步骤开始事件
         await self._publish_step_event(execution, "task_step_start", checkpoint)
+
+        # 能力预检测：在执行前检查Agent是否具备处理当前消息的能力
+        if step_type == StepType.AGENT_CALL and agent_name:
+            capability_result = await self._check_step_capability(
+                agent_name, user_message,
+            )
+            if not capability_result.get("can_handle", True):
+                unmatched = capability_result.get("unmatched_keywords", [])
+                suggested = capability_result.get("suggested_agents", [])
+                limitations = capability_result.get("limitations", [])
+
+                if suggested:
+                    replacement = suggested[0]
+                    logger.info(
+                        "能力预检测-替换Agent: %s -> %s (未匹配关键词: %s)",
+                        agent_name, replacement, unmatched,
+                    )
+                    step["agent_name"] = replacement
+                    checkpoint.agent_name = replacement
+                    checkpoint.fallback_used = f"capability_redirect:{agent_name}->{replacement}"
+                else:
+                    logger.warning(
+                        "能力预检测-Agent能力不足且无替代: agent=%s unmatched=%s limitations=%s",
+                        agent_name, unmatched, limitations,
+                    )
+                    checkpoint.status = StepStatus.FAILED
+                    limitation_msg = "、".join(limitations) if limitations else "超出能力范围"
+                    checkpoint.error = (
+                        f"当前Agent({agent_name})无法处理需求中的: {', '.join(unmatched)}。"
+                        f"限制说明: {limitation_msg}"
+                    )
+                    checkpoint.output_data = {
+                        "status": "error",
+                        "message": checkpoint.error,
+                        "unmatched_keywords": unmatched,
+                        "limitations": limitations,
+                        "agent_name": agent_name,
+                    }
+                    await self._publish_step_event(execution, "step_failed", checkpoint)
+                    return checkpoint
 
         if step_type == StepType.AGENT_CALL:
             result = await self._execute_agent_call(

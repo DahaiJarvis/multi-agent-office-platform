@@ -14,6 +14,19 @@ supported_actions:
   - reject
   - transfer
 
+capability_keywords:
+  - "审批"
+  - "待审批"
+  - "OA"
+  - "同意"
+  - "拒绝"
+  - "转审"
+  - "审批单"
+
+limitations:
+  - "仅处理审批相关操作"
+  - "不支持创建审批流程"
+
 required_services:
   - oa
   - approval
