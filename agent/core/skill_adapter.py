@@ -88,6 +88,21 @@ class SkillValidationError(Exception):
         super().__init__(f"Skill 校验失败: {skill_name}: {reason}")
 
 
+class SkillDependencyError(Exception):
+    """Skill 依赖不满足错误"""
+
+    def __init__(self, skill_name: str, missing_required: list[str], missing_optional: list[str] | None = None):
+        self.skill_name = skill_name
+        self.missing_required = missing_required
+        self.missing_optional = missing_optional or []
+        parts = [f"Skill 依赖不满足: {skill_name}"]
+        if missing_required:
+            parts.append(f"缺少必需依赖: {', '.join(missing_required)}")
+        if self.missing_optional:
+            parts.append(f"缺少可选依赖: {', '.join(self.missing_optional)}")
+        super().__init__("; ".join(parts))
+
+
 PROMPT_INJECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"ignore\s+(previous|above|all)\s+instructions?", re.IGNORECASE),
     re.compile(r"you\s+are\s+now\s+", re.IGNORECASE),
@@ -97,6 +112,163 @@ PROMPT_INJECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"new\s+instructions?\s*:", re.IGNORECASE),
     re.compile(r"override\s+(previous|default|safety)", re.IGNORECASE),
 ]
+
+# 语义重叠判定阈值：两个 Skill 声明的工具交集占比超过此值时判定为语义重叠
+_TOOL_OVERLAP_THRESHOLD = 0.5
+
+
+class SkillConflictItem(BaseModel):
+    """Skill 冲突项"""
+
+    conflict_type: str = Field(description="冲突类型: name_exact / name_normalized / semantic_overlap")
+    builtin_skill_id: str = Field(description="内置技能 ID")
+    builtin_skill_name: str = Field(description="内置技能名称")
+    skill_name: str = Field(description="SKILL.md 技能名称")
+    detail: str = Field(default="", description="冲突详情")
+
+
+def _detect_skill_conflict(skill_name: str, suggested_tools: list[str]) -> list[SkillConflictItem]:
+    """检测 SKILL.md 技能与内置技能的名称/语义冲突
+
+    检测两层冲突：
+      1. 精确名称冲突：SKILL.md 名称规范化后与内置技能 ID 相同
+      2. 语义重叠：SKILL.md 声明的工具与内置技能的工具交集占比超过阈值
+
+    Args:
+        skill_name: SKILL.md 技能名称（已规范化）
+        suggested_tools: SKILL.md 声明的工具列表
+
+    Returns:
+        冲突项列表，无冲突时返回空列表
+    """
+    conflicts: list[SkillConflictItem] = []
+
+    try:
+        from agent.agents.domain import BUILTIN_SKILLS
+    except Exception:
+        return conflicts
+
+    # 规范化名称：连字符转下划线
+    normalized_name = skill_name.replace("-", "_")
+
+    for builtin_id, builtin_config in BUILTIN_SKILLS.items():
+        # 第一层：精确名称冲突
+        if normalized_name == builtin_id:
+            conflicts.append(SkillConflictItem(
+                conflict_type="name_exact",
+                builtin_skill_id=builtin_id,
+                builtin_skill_name=builtin_config.name,
+                skill_name=skill_name,
+                detail=f"SKILL.md 名称 '{skill_name}' 规范化后与内置技能 ID '{builtin_id}' 相同",
+            ))
+            continue
+
+        # 第二层：语义重叠检测
+        if suggested_tools and builtin_config.required_tools:
+            builtin_tools = set(builtin_config.required_tools)
+            skill_tools = set(suggested_tools)
+            if not skill_tools:
+                continue
+            overlap = skill_tools & builtin_tools
+            overlap_ratio = len(overlap) / len(skill_tools)
+            if overlap_ratio >= _TOOL_OVERLAP_THRESHOLD:
+                conflicts.append(SkillConflictItem(
+                    conflict_type="semantic_overlap",
+                    builtin_skill_id=builtin_id,
+                    builtin_skill_name=builtin_config.name,
+                    skill_name=skill_name,
+                    detail=f"工具重叠率 {overlap_ratio:.0%}，重叠工具: {', '.join(sorted(overlap))}",
+                ))
+
+    return conflicts
+
+
+# ==================== 指令矛盾检测 ====================
+
+# 矛盾关键词对：(模式A, 模式B, 严重等级)
+# 模式A 和 模式B 分别匹配不同 Skill 的指令时，判定为矛盾
+CONTRADICTION_PATTERNS: list[tuple[re.Pattern, re.Pattern, str]] = [
+    (
+        re.compile(r"必须确认|需要确认|务必确认|确认后", re.IGNORECASE),
+        re.compile(r"无需确认|直接发送|跳过确认|自动发送", re.IGNORECASE),
+        "high",
+    ),
+    (
+        re.compile(r"禁止|不允许|不可|不得", re.IGNORECASE),
+        re.compile(r"可以|允许|直接|随意", re.IGNORECASE),
+        "high",
+    ),
+    (
+        re.compile(r"必须脱敏|需脱敏|脱敏后|敏感信息.*隐藏", re.IGNORECASE),
+        re.compile(r"原文|原始数据|完整数据|完整展示", re.IGNORECASE),
+        "high",
+    ),
+    (
+        re.compile(r"严格|严谨|精确|务必", re.IGNORECASE),
+        re.compile(r"宽松|灵活|大致|随意", re.IGNORECASE),
+        "medium",
+    ),
+]
+
+
+class InstructionConflict(BaseModel):
+    """指令矛盾项"""
+
+    skill_a: str = Field(description="Skill A 名称")
+    skill_b: str = Field(description="Skill B 名称")
+    pattern_a_text: str = Field(description="Skill A 中的矛盾文本")
+    pattern_b_text: str = Field(description="Skill B 中的矛盾文本")
+    severity: str = Field(description="严重等级: high / medium / low")
+
+
+def _detect_instruction_conflicts(skills: list["SkillDocument"]) -> list[InstructionConflict]:
+    """检测多个 Skill 之间的指令矛盾
+
+    对每对 Skill 的指令文本，检查是否同时匹配矛盾关键词对的两端。
+
+    Args:
+        skills: Skill 列表
+
+    Returns:
+        矛盾项列表，无矛盾时返回空列表
+    """
+    if len(skills) < 2:
+        return []
+
+    conflicts: list[InstructionConflict] = []
+
+    for i in range(len(skills)):
+        for j in range(i + 1, len(skills)):
+            skill_a = skills[i]
+            skill_b = skills[j]
+            instruction_a = skill_a.instruction or ""
+            instruction_b = skill_b.instruction or ""
+
+            for pattern_a, pattern_b, severity in CONTRADICTION_PATTERNS:
+                # 正向匹配：A 匹配模式A，B 匹配模式B
+                match_a = pattern_a.search(instruction_a)
+                match_b = pattern_b.search(instruction_b)
+                name_a = skill_a.manifest.name
+                name_b = skill_b.manifest.name
+
+                if not (match_a and match_b):
+                    # 反向匹配：B 匹配模式A，A 匹配模式B
+                    match_a = pattern_a.search(instruction_b)
+                    match_b = pattern_b.search(instruction_a)
+                    if match_a and match_b:
+                        name_a, name_b = name_b, name_a
+                    else:
+                        continue
+
+                conflicts.append(InstructionConflict(
+                    skill_a=name_a,
+                    skill_b=name_b,
+                    pattern_a_text=match_a.group(),
+                    pattern_b_text=match_b.group(),
+                    severity=severity,
+                ))
+
+    return conflicts
 
 
 class SkillManifest(BaseModel):
@@ -812,10 +984,12 @@ class SkillRegistry:
         skills.sort(key=lambda d: d.manifest.priority, reverse=True)
         return skills
 
-    def get_agent_prompt_extensions(self, agent_name: str) -> str:
+    async def get_agent_prompt_extensions(self, agent_name: str) -> str:
         """获取 Agent 绑定的 Skill 指令拼接文本
 
         将所有绑定的 Skill 指令拼接为一段文本，用于追加到 Agent 的 System Prompt。
+        同时检查 Skill 声明的工具是否在运行时可用，不可用时追加提示。
+        检测与内置技能的冲突，冲突时在指令前加注释说明。
 
         Args:
             agent_name: Agent 名称
@@ -835,13 +1009,161 @@ class SkillRegistry:
             except Exception:
                 pass
 
+        # 获取该 Agent 绑定的内置技能 ID 集合，用于冲突提示
+        agent_builtin_ids = self._get_agent_builtin_skill_ids(agent_name)
+
         parts = []
         for doc in skills:
             instruction = sanitize_prompt(doc.instruction)
             if instruction:
-                parts.append(f"## Skill: {doc.manifest.name}\n\n{instruction}")
+                skill_section = f"## Skill: {doc.manifest.name}\n\n"
+
+                # 检测与该 Agent 内置技能的冲突
+                suggested_tools = doc.manifest.suggested_tools or []
+                conflicts = _detect_skill_conflict(doc.manifest.name, suggested_tools)
+                relevant_conflicts = [c for c in conflicts if c.builtin_skill_id in agent_builtin_ids]
+                if relevant_conflicts:
+                    conflict_names = ", ".join(
+                        f"{c.builtin_skill_name}({c.builtin_skill_id})" for c in relevant_conflicts
+                    )
+                    skill_section += (
+                        f"[注意] 此技能与内置技能 {conflict_names} 存在功能重叠，"
+                        f"以下指令作为补充，当内置技能指令与以下指令矛盾时，以优先级更高的为准。\n\n"
+                    )
+
+                skill_section += instruction
+                parts.append(skill_section)
+
+        # 运行时工具可用性校验
+        unavailable_hint = await self._build_unavailable_tools_hint(agent_name, skills)
+        if unavailable_hint:
+            parts.append(unavailable_hint)
+
+        # 指令矛盾检测
+        contradiction_hint = self._build_contradiction_hint(skills)
+        if contradiction_hint:
+            parts.append(contradiction_hint)
 
         return "\n\n".join(parts) if parts else ""
+
+    @staticmethod
+    def _get_agent_builtin_skill_ids(agent_name: str) -> set[str]:
+        """获取 Agent 绑定的内置技能 ID 集合
+
+        Args:
+            agent_name: Agent 名称
+
+        Returns:
+            内置技能 ID 集合
+        """
+        try:
+            from agent.agents.domain import AGENT_SKILL_BINDINGS
+            return set(AGENT_SKILL_BINDINGS.get(agent_name, []))
+        except Exception:
+            return set()
+
+    @staticmethod
+    def _build_contradiction_hint(skills: list[SkillDocument]) -> str:
+        """构建指令矛盾提示文本
+
+        检测多个 Skill 之间的指令矛盾，根据严重等级生成不同级别的提示。
+
+        Args:
+            skills: Skill 列表
+
+        Returns:
+            矛盾提示文本，无矛盾时返回空字符串
+        """
+        try:
+            conflicts = _detect_instruction_conflicts(skills)
+        except Exception as e:
+            logger.debug("指令矛盾检测异常（非致命）: %s", e)
+            return ""
+
+        if not conflicts:
+            return ""
+
+        # 按严重等级分组
+        high_conflicts = [c for c in conflicts if c.severity == "high"]
+        medium_conflicts = [c for c in conflicts if c.severity == "medium"]
+
+        if not high_conflicts and not medium_conflicts:
+            # 只有 low 级别，仅日志 WARNING，不修改 Prompt
+            for c in conflicts:
+                logger.warning(
+                    "Skill 指令低级矛盾: %s(%s) vs %s(%s)",
+                    c.skill_a, c.pattern_a_text, c.skill_b, c.pattern_b_text,
+                )
+            return ""
+
+        lines = ["[指令冲突提示]"]
+        for c in high_conflicts:
+            lines.append(
+                f"Skill \"{c.skill_a}\" 指示\"{c.pattern_a_text}\"，"
+                f"但 Skill \"{c.skill_b}\" 指示\"{c.pattern_b_text}\"。"
+            )
+
+        if medium_conflicts:
+            lines.append("以下为次要冲突：")
+            for c in medium_conflicts:
+                lines.append(
+                    f"- \"{c.skill_a}\"({c.pattern_a_text}) vs \"{c.skill_b}\"({c.pattern_b_text})"
+                )
+
+        lines.append("以优先级更高的 Skill 为准。")
+        return "\n".join(lines)
+
+    async def _build_unavailable_tools_hint(self, agent_name: str, skills: list[SkillDocument]) -> str:
+        """构建不可用工具提示文本
+
+        对比 Skill 声明的 suggested_tools 与运行时实际可用工具，
+        不可用时生成提示让 LLM 知道边界。
+
+        Args:
+            agent_name: Agent 名称
+            skills: Agent 绑定的 Skill 列表
+
+        Returns:
+            不可用工具提示文本，全部可用时返回空字符串
+        """
+        # 收集所有 Skill 声明的工具
+        declared_tools: set[str] = set()
+        for doc in skills:
+            pack = self._skill_packs.get(doc.manifest.name)
+            if pack and pack.dependencies and pack.dependencies.tools:
+                for dep_info in pack.dependencies.tools:
+                    tool_name = dep_info.get("name", "")
+                    if tool_name:
+                        declared_tools.add(tool_name)
+            # 也从 manifest 的 suggested_tools 收集
+            if doc.manifest.suggested_tools:
+                for t in doc.manifest.suggested_tools:
+                    if t:
+                        declared_tools.add(t)
+
+        if not declared_tools:
+            return ""
+
+        # 获取运行时实际可用的工具名称
+        try:
+            from agent.tools.loader import get_available_tool_names
+            available_tools = await get_available_tool_names(agent_name)
+        except Exception as e:
+            logger.debug("获取可用工具名称失败（非致命）: %s", e)
+            return ""
+
+        # 找出不可用工具
+        unavailable = declared_tools - available_tools
+        if not unavailable:
+            return ""
+
+        unavailable_list = "\n".join(f"- {t}" for t in sorted(unavailable))
+        return (
+            "[工具可用性提示]\n"
+            "以下工具当前不可用，请勿尝试调用：\n"
+            f"{unavailable_list}\n\n"
+            "你可以使用其他可用工具完成相关任务，或告知用户该功能暂不可用。"
+        )
 
     def enable(self, skill_name: str) -> bool:
         """启用 Skill
@@ -879,14 +1201,16 @@ class SkillRegistry:
         logger.info("禁用 Skill: %s", skill_name)
         return True
 
-    def save_skill(self, skill_name: str, content: str) -> SkillDocument:
+    def save_skill(self, skill_name: str, content: str, check_dependencies: bool = True) -> SkillDocument:
         """保存 SKILL.md（新建或更新）
 
         执行 Prompt 注入检测，高风险时拒绝保存。
+        本地保存时检查依赖，依赖不满足时标记 review_required 而非拒绝。
 
         Args:
             skill_name: Skill 名称
             content: SKILL.md 完整内容
+            check_dependencies: 是否检查依赖（市场安装时由调用方单独检查）
 
         Returns:
             SkillDocument 实例
@@ -930,8 +1254,126 @@ class SkillRegistry:
         # 重新加载 SkillPack 扩展数据
         self._load_skill_pack(skill_name)
 
+        # 本地保存时检查依赖，依赖不满足时标记 review_required（软提示，不阻断开发流程）
+        if check_dependencies:
+            self._check_dependencies_on_save(skill_name, doc)
+
+        # 检测与内置技能的名称/语义冲突
+        self._check_skill_conflict_on_save(skill_name, doc)
+
         logger.info("保存 Skill: %s (version=%s)", skill_name, doc.manifest.version)
         return doc
+
+    def _check_dependencies_on_save(self, skill_name: str, doc: SkillDocument) -> None:
+        """本地保存时检查依赖，依赖不满足时标记 review_required
+
+        与市场安装的硬拦截不同，本地保存采用软提示策略，
+        不阻断开发流程，但标记需要审核。
+
+        Args:
+            skill_name: Skill 名称
+            doc: SkillDocument 实例
+        """
+        try:
+            dependency = self.get_pack_dependencies(skill_name)
+            if not dependency.tools and not dependency.mcp_servers and not dependency.skills:
+                return
+
+            missing: list[str] = []
+
+            for dep_info in dependency.skills:
+                dep_name = dep_info.get("name", "")
+                required = dep_info.get("required", True)
+                if required and self.get(dep_name) is None:
+                    missing.append(f"技能:{dep_name}")
+
+            for dep_info in dependency.tools:
+                tool_name = dep_info.get("name", "")
+                required = dep_info.get("required", True)
+                if required and not self._is_tool_available(tool_name):
+                    missing.append(f"工具:{tool_name}")
+
+            for server_name in dependency.mcp_servers:
+                if not self._is_mcp_server_available(server_name):
+                    missing.append(f"MCP服务:{server_name}")
+
+            if missing:
+                doc.manifest.review_required = True
+                logger.warning(
+                    "Skill %s 依赖不满足，已标记 review-required: %s",
+                    skill_name, ", ".join(missing),
+                )
+        except Exception as e:
+            logger.debug("Skill %s 依赖检查异常（非致命）: %s", skill_name, e)
+
+    def _check_skill_conflict_on_save(self, skill_name: str, doc: SkillDocument) -> None:
+        """保存时检测与内置技能的名称/语义冲突
+
+        检测到冲突时标记 review_required 并记录日志，不阻断保存流程。
+
+        Args:
+            skill_name: Skill 名称
+            doc: SkillDocument 实例
+        """
+        try:
+            suggested_tools = doc.manifest.suggested_tools or []
+            conflicts = _detect_skill_conflict(skill_name, suggested_tools)
+            if conflicts:
+                doc.manifest.review_required = True
+                for c in conflicts:
+                    logger.warning(
+                        "Skill %s 与内置技能 %s(%s) 存在冲突 [%s]: %s",
+                        skill_name, c.builtin_skill_id, c.builtin_skill_name,
+                        c.conflict_type, c.detail,
+                    )
+        except Exception as e:
+            logger.debug("Skill %s 冲突检测异常（非致命）: %s", skill_name, e)
+
+    @staticmethod
+    def _is_tool_available(tool_name: str) -> bool:
+        """检查工具是否在原生工具注册表或 MCP 工具缓存中可用
+
+        Args:
+            tool_name: 工具名称
+
+        Returns:
+            是否可用
+        """
+        try:
+            from agent.tools.registry import get_native_tool_registry
+            tool_reg = get_native_tool_registry()
+            if tool_reg and tool_reg.get(tool_name):
+                return True
+        except Exception:
+            pass
+
+        try:
+            from agent.core.mcp_integration import _tool_cache
+            for server_tools in _tool_cache.values():
+                for t in server_tools:
+                    tool_fn_name = getattr(t, "name", None) or getattr(t, "__name__", "")
+                    if tool_fn_name == tool_name:
+                        return True
+        except Exception:
+            pass
+
+        return False
+
+    @staticmethod
+    def _is_mcp_server_available(server_name: str) -> bool:
+        """检查 MCP Server 是否在注册表中可用
+
+        Args:
+            server_name: MCP Server 名称
+
+        Returns:
+            是否可用
+        """
+        try:
+            from agent.core.mcp_integration import MCP_SERVER_REGISTRY
+            return server_name in MCP_SERVER_REGISTRY
+        except Exception:
+            return False
 
     def delete(self, skill_name: str) -> bool:
         """删除 Skill
@@ -1491,17 +1933,22 @@ class SkillRegistry:
 
         return entries
 
-    async def install_from_marketplace(self, skill_name: str, target_version: str = "") -> SkillDocument | None:
+    async def install_from_marketplace(self, skill_name: str, target_version: str = "", skip_dependency_check: bool = False) -> SkillDocument | None:
         """从市场安装技能
 
         增加下载量计数，将技能注册到本地仓库。
+        安装前会检查依赖是否满足，必需依赖不满足时拒绝安装。
 
         Args:
             skill_name: Skill 名称
             target_version: 目标版本号（空表示最新版本）
+            skip_dependency_check: 跳过依赖检查（仅用于内部降级场景）
 
         Returns:
             SkillDocument 实例，失败时返回 None
+
+        Raises:
+            SkillDependencyError: 必需依赖不满足时抛出
         """
         skill_name = _normalize_skill_name(skill_name)
 
@@ -1537,16 +1984,57 @@ class SkillRegistry:
                 version_key = f"{_SKILL_VERSION_PREFIX}{skill_name}"
                 version_content = await redis.hget(version_key, version_to_install)
                 if version_content:
-                    doc = self.save_skill(skill_name=skill_name, content=version_content)
+                    # 先保存到本地（依赖检查需要读取 SkillPack 文件）
+                    # check_dependencies=False: 市场安装的依赖检查由本方法自行处理
+                    doc = self.save_skill(skill_name=skill_name, content=version_content, check_dependencies=False)
+
+                    # 安装前依赖检查
+                    if not skip_dependency_check:
+                        dep_result = await self._check_dependencies_before_install(skill_name)
+                        if not dep_result.resolvable:
+                            # 必需依赖不满足，回滚：删除已保存的技能
+                            self.delete(skill_name)
+                            raise SkillDependencyError(
+                                skill_name=skill_name,
+                                missing_required=dep_result.missing_required,
+                                missing_optional=dep_result.missing_optional,
+                            )
+                        if dep_result.missing_optional:
+                            logger.warning(
+                                "Skill %s 缺少可选依赖: %s，将降级运行",
+                                skill_name, ", ".join(dep_result.missing_optional),
+                            )
+
                     logger.info("从市场安装技能成功: %s (version=%s)", skill_name, version_to_install)
                     return doc
                 else:
                     logger.warning("市场安装失败: Skill %s@%s 版本内容不存在", skill_name, version_to_install)
+            except SkillDependencyError:
+                raise
             except Exception as e:
                 logger.error("从市场安装技能异常: %s - %s", skill_name, e)
 
         logger.warning("从市场安装技能失败: %s (version=%s)", skill_name, target_version or entry.version)
         return None
+
+    async def _check_dependencies_before_install(self, skill_name: str) -> "DependencyResolutionResult":
+        """安装前检查技能依赖是否满足
+
+        复用 skill_resolver 的 resolve_dependencies 进行依赖解析。
+
+        Args:
+            skill_name: Skill 名称
+
+        Returns:
+            DependencyResolutionResult 依赖解析结果
+        """
+        try:
+            from agent.core.skill_resolver import resolve_dependencies
+            return await resolve_dependencies(skill_name)
+        except Exception as e:
+            logger.warning("Skill %s 依赖检查异常，视为无依赖: %s", skill_name, e)
+            from agent.core.skill_resolver import DependencyResolutionResult
+            return DependencyResolutionResult(skill_name=skill_name, resolvable=True)
 
     async def rate_skill(self, skill_name: str, user_id: str, score: float, comment: str = "") -> bool:
         """为技能评分

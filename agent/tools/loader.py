@@ -186,3 +186,39 @@ def unbind_native_tool(agent_name: str, tool_name: str) -> None:
         if tool_name in bindings:
             bindings.remove(tool_name)
             logger.info("解除 Agent %s 的原生工具绑定: %s", agent_name, tool_name)
+
+
+async def get_available_tool_names(agent_name: str) -> set[str]:
+    """获取 Agent 当前实际可用的工具名称集合
+
+    合并原生工具和 MCP 工具的名称，用于运行时工具可用性校验。
+
+    Args:
+        agent_name: Agent 名称
+
+    Returns:
+        可用工具名称集合
+    """
+    available: set[str] = set()
+
+    # 原生工具
+    tool_names = AGENT_NATIVE_TOOL_BINDINGS.get(agent_name, [])
+    registry = get_native_tool_registry()
+    for name in tool_names:
+        if registry.get(name) is not None:
+            available.add(name)
+
+    # MCP 工具
+    try:
+        from agent.core.mcp_integration import _tool_cache, AGENT_TOOL_BINDINGS
+        bound_servers = AGENT_TOOL_BINDINGS.get(agent_name, [])
+        for server_name in bound_servers:
+            server_tools = _tool_cache.get(server_name, [])
+            for t in server_tools:
+                tool_fn_name = getattr(t, "name", None) or getattr(t, "__name__", "")
+                if tool_fn_name:
+                    available.add(tool_fn_name)
+    except Exception as e:
+        logger.debug("获取 MCP 工具名称失败（非致命）: %s", e)
+
+    return available

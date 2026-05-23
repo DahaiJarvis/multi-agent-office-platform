@@ -351,7 +351,7 @@ async def _create_single_agent(agent_name: str) -> AssistantAgent:
     try:
         from agent.core.skill_adapter import SkillRegistry
         skill_registry = SkillRegistry.get_instance()
-        skill_extensions = skill_registry.get_agent_prompt_extensions(agent_name)
+        skill_extensions = await skill_registry.get_agent_prompt_extensions(agent_name)
         if skill_extensions:
             prompt += "\n\n" + skill_extensions
     except Exception as e:

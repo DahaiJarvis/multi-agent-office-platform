@@ -455,9 +455,22 @@ async def api_install_from_marketplace(
     skill_name: str,
     target_version: str = Query(default="", description="目标版本号"),
 ) -> dict:
-    """从市场安装技能"""
+    """从市场安装技能
+
+    安装前会检查依赖是否满足，必需依赖不满足时返回错误信息。
+    """
+    from agent.core.skill_adapter import SkillDependencyError
+
     registry = SkillRegistry.get_instance()
-    doc = await registry.install_from_marketplace(skill_name, target_version)
+    try:
+        doc = await registry.install_from_marketplace(skill_name, target_version)
+    except SkillDependencyError as e:
+        from api.errors import AppException, ErrorCode
+        raise AppException(
+            ErrorCode.SKILL_VALIDATION_ERROR,
+            message=f"技能 '{skill_name}' 依赖不满足，无法安装: {e}",
+        )
+
     if doc is None:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.SKILL_NOT_FOUND, message=f"技能 '{skill_name}' 不在市场中")
