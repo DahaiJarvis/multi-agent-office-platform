@@ -3,8 +3,10 @@
 Phase 4: 安全与治理
 - permission: RBAC 权限模型
 - auth: JWT 认证
-- desensitize: 数据脱敏
-- guardrails: 安全护栏
+- desensitize: 数据脱敏（轻量级快速检测）
+- guardrails: 安全护栏（编排层，集成注入检测和 PII 深度检测）
+- injection_detection: 增强型 Prompt 注入防护（4层防御）
+- pii_detection: 扩展型 PII 检测引擎（11种PII + 分级脱敏）
 - audit: 审计日志
 - sso: SSO 企业身份集成
 - encryption: 静态数据加密
@@ -44,6 +46,23 @@ from security.guardrails import (
     check_tool_call_guardrails,
     check_output_guardrails,
 )
+from security.injection_detection import (
+    detect_injection,
+    sanitize_input,
+    InjectionDetectionResult,
+    ThreatLevel,
+    DetectionLayer,
+)
+from security.pii_detection import (
+    detect_pii as deep_detect_pii,
+    PIIDetectionResult,
+    PIICategory,
+    PIISensitivity,
+    CustomPIIRule,
+    add_custom_rule,
+    remove_custom_rule,
+    list_custom_rules,
+)
 from security.audit import (
     AuditEvent,
     record_audit,
@@ -74,7 +93,7 @@ __all__ = [
     "verify_token",
     "refresh_access_token",
     "extract_token_from_header",
-    # 脱敏
+    # 脱敏（轻量级）
     "PIIDetection",
     "PII_PATTERNS",
     "detect_pii",
@@ -86,6 +105,21 @@ __all__ = [
     "check_input_guardrails",
     "check_tool_call_guardrails",
     "check_output_guardrails",
+    # 注入检测（增强型4层防御）
+    "detect_injection",
+    "sanitize_input",
+    "InjectionDetectionResult",
+    "ThreatLevel",
+    "DetectionLayer",
+    # PII 深度检测（11种PII + 分级脱敏）
+    "deep_detect_pii",
+    "PIIDetectionResult",
+    "PIICategory",
+    "PIISensitivity",
+    "CustomPIIRule",
+    "add_custom_rule",
+    "remove_custom_rule",
+    "list_custom_rules",
     # 审计
     "AuditEvent",
     "record_audit",

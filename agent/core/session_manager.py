@@ -80,6 +80,7 @@ L3 长期记忆（PostgreSQL）：
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -162,6 +163,8 @@ class SessionManager:
         self._memory_store: dict[str, str] = {}
         self._memory_index: dict[str, dict[str, float]] = {}
         self._use_memory_fallback: bool = False
+        # 会话转移历史（从 session_router 提取）
+        self._transfer_history: list[dict[str, Any]] = []
 
     async def _get_redis(self) -> aioredis.Redis:
         """获取 Redis 连接
@@ -694,35 +697,84 @@ class SessionManager:
         self,
         session_id: str,
         target_agent: str,
-    ) -> None:
+        from_agent: str = "",
+        reason: str = "",
+    ) -> bool:
         """转移会话到目标 Agent
 
         用于 Agent 间协作，将控制权转移给其他 Agent。
+        整合了原 session_router.py 的转移历史记录和来源 Agent 验证逻辑。
 
         转移流程：
         -------------------------------------------------------------------------
         1. 获取会话
-        2. 更新 active_agents 列表
-        3. 记录转移日志
-        4. 更新会话
+        2. 验证来源 Agent（如果指定了 from_agent）
+        3. 更新 active_agents 列表
+        4. 记录转移历史
+        5. 更新会话
         -------------------------------------------------------------------------
 
         Args:
             session_id: 会话ID
             target_agent: 目标 Agent 名称
+            from_agent: 源 Agent 名称（可选，用于验证当前持有者）
+            reason: 转移原因
+
+        Returns:
+            是否转移成功
         """
         session = await self.get_session(session_id)
         if session is None:
-            return
+            logger.warning("会话不存在，无法转移: session_id=%s", session_id)
+            return False
+
+        # 验证来源 Agent
+        if from_agent and session.active_agents:
+            if from_agent not in session.active_agents:
+                logger.warning(
+                    "会话当前 Agent 不匹配: session=%s expected=%s actual=%s",
+                    session_id, from_agent, session.active_agents,
+                )
+                return False
 
         if target_agent not in session.active_agents:
             session.active_agents.append(target_agent)
 
         session.metadata["transferred_to"] = target_agent
         session.metadata["transfer_time"] = time.time()
+        if from_agent:
+            session.metadata["transferred_from"] = from_agent
+        if reason:
+            session.metadata["transfer_reason"] = reason
+
+        # 记录转移历史
+        self._transfer_history.append({
+            "session_id": session_id,
+            "from_agent": from_agent,
+            "to_agent": target_agent,
+            "reason": reason,
+            "timestamp": time.time(),
+        })
 
         await self.update_session(session)
-        logger.info("转移会话: session_id=%s -> %s", session_id, target_agent)
+        logger.info("转移会话: session_id=%s %s -> %s reason=%s", session_id, from_agent, target_agent, reason)
+        return True
+
+    def get_transfer_history(self, session_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        """获取会话转移历史
+
+        Args:
+            session_id: 会话ID（可选，为空则返回全部）
+            limit: 返回数量上限
+
+        Returns:
+            转移历史列表
+        """
+        if session_id:
+            records = [r for r in self._transfer_history if r["session_id"] == session_id]
+        else:
+            records = self._transfer_history
+        return records[-limit:]
 
     async def close(self) -> None:
         """释放 Redis 连接引用

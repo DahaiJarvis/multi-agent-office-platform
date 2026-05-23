@@ -143,45 +143,52 @@ class PromptRegistry:
         for yaml_file in yaml_files:
             try:
                 with open(yaml_file, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f)
-                if not data or not isinstance(data, dict):
+                    raw = f.read()
+
+                # 尝试多文档加载（支持 --- 分隔的多 Agent 配置）
+                docs = list(yaml.safe_load_all(raw))
+                # 过滤掉 None 和非字典的文档
+                docs = [d for d in docs if d and isinstance(d, dict)]
+
+                if not docs:
                     continue
 
-                agent_name = data.get("agent_name", yaml_file.stem)
-                description = data.get("description", "")
-                content = data.get("content", "")
-                version = data.get("version", "1.0.0")
-                canary_percent = data.get("canary_percent", 0.0)
-                canary_version = data.get("canary_version", "")
+                for data in docs:
+                    agent_name = data.get("agent_name", yaml_file.stem)
+                    description = data.get("description", "")
+                    content = data.get("content", "")
+                    version = data.get("version", "1.0.0")
+                    canary_percent = data.get("canary_percent", 0.0)
+                    canary_version = data.get("canary_version", "")
 
-                # 解析结构化的意图标签和示例（仅 IntentClassifier）
-                if agent_name == "IntentClassifier":
-                    self._load_intent_definitions(data)
+                    # 解析结构化的意图标签和示例（仅 IntentClassifier）
+                    if agent_name == "IntentClassifier":
+                        self._load_intent_definitions(data)
 
-                # 渲染 Prompt 模板中的占位符
-                if content and "{{" in content:
-                    content = self._render_prompt_template(content)
+                    # 渲染 Prompt 模板中的占位符
+                    if content and "{{" in content:
+                        content = self._render_prompt_template(content)
 
-                if not content:
-                    logger.warning("Prompt 文件 %s 内容为空，跳过", yaml_file.name)
-                    continue
+                    if not content:
+                        logger.warning("Prompt 文件 %s 中 agent=%s 内容为空，跳过", yaml_file.name, agent_name)
+                        continue
 
-                prompt_version = PromptVersion(
-                    version=version,
-                    content=content,
-                    description="初始版本",
-                )
+                    prompt_version = PromptVersion(
+                        version=version,
+                        content=content,
+                        description="初始版本",
+                    )
 
-                entry = PromptEntry(
-                    agent_name=agent_name,
-                    description=description,
-                    current_version=version,
-                    versions=[prompt_version],
-                    canary_percent=canary_percent,
-                    canary_version=canary_version,
-                )
-                self._entries[agent_name] = entry
-                logger.info("加载 Prompt: agent=%s version=%s", agent_name, version)
+                    entry = PromptEntry(
+                        agent_name=agent_name,
+                        description=description,
+                        current_version=version,
+                        versions=[prompt_version],
+                        canary_percent=canary_percent,
+                        canary_version=canary_version,
+                    )
+                    self._entries[agent_name] = entry
+                    logger.info("加载 Prompt: agent=%s version=%s", agent_name, version)
 
             except Exception as e:
                 logger.error("加载 Prompt 文件 %s 失败: %s", yaml_file.name, e)

@@ -329,7 +329,7 @@ BUILTIN_RULES: list[dict[str, Any]] = [
         "name": "银行卡号",
         "category": PIICategory.BANK_CARD,
         "sensitivity": PIISensitivity.RESTRICTED,
-        "pattern": r"(?<!\d)(?:62|4\d|5[1-5]|35)\d{13,16}(?!\d)",
+        "pattern": r"(?<!\d)(?:62|4\d|5[1-5]|35)\d{13,17}(?!\d)",
         "validator": _luhn_check,
         "confidence": 0.85,
     },
@@ -427,6 +427,28 @@ def _detect_chinese_names(content: str) -> list[PIIDetection]:
                     rule_name="中文姓名-上下文",
                 ))
 
+    name_verb_patterns = [
+        (r"给([\u4e00-\u9fff]{2,3})(发送|发|寄|转交|转达|打电话|留言|通知)", "中文姓名-动词前"),
+        (r"(叫|找|联系|约|邀请|通知|告诉)([\u4e00-\u9fff]{2,3})(一下|来|去|过来|过去|帮忙)?", "中文姓名-动词后"),
+    ]
+    for pattern_str, rule_name in name_verb_patterns:
+        pattern = re.compile(pattern_str)
+        for match in pattern.finditer(content):
+            name = match.group(1) if "动词前" in rule_name else match.group(2)
+            surname = name[0]
+            if surname in COMMON_SURNAMES:
+                start = match.start(1) if "动词前" in rule_name else match.start(2)
+                end = match.end(1) if "动词前" in rule_name else match.end(2)
+                detections.append(PIIDetection(
+                    category=PIICategory.NAME,
+                    sensitivity=PIISensitivity.CONFIDENTIAL,
+                    value=name,
+                    start=start,
+                    end=end,
+                    confidence=0.7,
+                    rule_name=rule_name,
+                ))
+
     return detections
 
 
@@ -448,6 +470,15 @@ def _apply_builtin_rules(content: str, categories: set[PIICategory] | None) -> l
         for match in pattern.finditer(content):
             value = match.group()
             if rule.get("validator") and not rule["validator"](value):
+                detections.append(PIIDetection(
+                    category=rule["category"],
+                    sensitivity=rule["sensitivity"],
+                    value=value,
+                    start=match.start(),
+                    end=match.end(),
+                    confidence=rule["confidence"] * 0.5,
+                    rule_name=rule["name"] + "-校验未通过",
+                ))
                 continue
             detections.append(PIIDetection(
                 category=rule["category"],

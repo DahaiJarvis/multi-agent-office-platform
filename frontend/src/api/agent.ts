@@ -122,7 +122,16 @@ export const agentApi = {
     })
       .then(async (response) => {
         if (!response.ok) {
-          onError(new Error(`HTTP ${response.status}`))
+          let errorMsg = `HTTP ${response.status}`
+          try {
+            const errBody = await response.json()
+            if (errBody.message) {
+              errorMsg = errBody.message
+            }
+          } catch {
+            // 无法解析错误体，使用默认消息
+          }
+          onError(new Error(errorMsg))
           return
         }
         const reader = response.body?.getReader()

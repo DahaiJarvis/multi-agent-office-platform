@@ -1,11 +1,21 @@
 """安全护栏（Guardrails）
 
 Agent 运行时的实时安全防线，在执行链路的三个关键节点嵌入检查：
-  - 输入护栏: Prompt 注入检测、PII 泄露检测
+  - 输入护栏: Prompt 注入检测（4层防御）、PII 泄露检测（深度检测）
   - 工具调用护栏: 权限校验、敏感操作确认
   - 输出护栏: 数据脱敏、合规检查
 
 与架构文档 7.4 节对齐。
+
+注入检测集成 injection_detection.py 四层防御：
+  - 第一层：规则引擎（正则模式匹配 + 启发式规则）
+  - 第二层：语义分析（文本特征统计 + 结构异常检测）
+  - 第三层：AI 检测（基于 LLM 的注入意图判断，条件触发）
+  - 第四层：上下文一致性（对话历史与当前输入的语义偏差检测）
+
+PII 检测集成 pii_detection.py 深度检测：
+  - 快速路径：desensitize.has_pii 快速判断
+  - 深度路径：pii_detection.detect_pii 11种PII + 分级脱敏
 """
 
 import logging
@@ -41,7 +51,7 @@ class GuardrailResult(BaseModel):
     checks: list[dict[str, Any]] = []
 
 
-# ==================== Prompt 注入检测模式 ====================
+# ==================== Prompt 注入检测模式（简易版，作为降级方案） ====================
 
 PROMPT_INJECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"ignore\s+(previous|above|all)\s+instructions?", re.IGNORECASE),
@@ -60,65 +70,60 @@ OFF_TOPIC_KEYWORDS = [
 ]
 
 
-def check_input_guardrails(
+async def check_input_guardrails(
     content: str,
     user_roles: list[str] | None = None,
+    conversation_history: list[dict] | None = None,
 ) -> GuardrailResult:
     """输入护栏检查
 
     检查用户输入是否包含：
-    1. Prompt 注入攻击
-    2. PII 信息泄露
+    1. Prompt 注入攻击（4层防御：规则引擎 + 启发式 + AI检测 + 上下文一致性）
+    2. PII 信息泄露（快速检测 + 深度检测）
     3. 非办公话题
 
     Args:
         content: 用户输入内容
         user_roles: 用户角色列表
+        conversation_history: 对话历史（用于上下文一致性检测）
 
     Returns:
         GuardrailResult 检查结果
     """
     checks: list[dict[str, Any]] = []
 
-    # 1. Prompt 注入检测
-    injection_detected = False
-    for pattern in PROMPT_INJECTION_PATTERNS:
-        if pattern.search(content):
-            injection_detected = True
-            checks.append({
-                "check": "prompt_injection",
-                "result": "blocked",
-                "pattern": pattern.pattern,
-            })
-            break
+    # 1. Prompt 注入检测（增强版4层防御）
+    injection_result = await _check_injection_enhanced(content, conversation_history)
+    checks.append(injection_result["check_entry"])
 
-    if not injection_detected:
-        checks.append({"check": "prompt_injection", "result": "pass"})
-
-    if injection_detected:
+    if injection_result["action"] == "block":
         logger.warning("Prompt 注入攻击被拦截: content=%s", content[:100])
         return GuardrailResult(
             passed=False,
             action=GuardrailAction.BLOCK,
-            reason="检测到潜在的 Prompt 注入攻击，请求已被拦截",
+            reason=injection_result["reason"],
             checks=checks,
         )
 
-    # 2. PII 泄露检测
-    pii_detections = detect_pii(content)
-    if pii_detections:
-        pii_types = list({d.pii_type for d in pii_detections})
-        redacted = desensitize_content(content, user_roles)
-        checks.append({
-            "check": "pii_leakage",
-            "result": "redacted",
-            "pii_types": pii_types,
-        })
+    if injection_result["action"] == "redact":
+        checks.append({"check": "prompt_injection", "result": "redacted"})
         return GuardrailResult(
             passed=True,
             action=GuardrailAction.REDACT,
-            reason=f"输入包含敏感信息({', '.join(pii_types)})，已自动脱敏",
-            redacted_content=redacted,
+            reason=injection_result["reason"],
+            redacted_content=injection_result.get("sanitized_content", content),
+            checks=checks,
+        )
+
+    # 2. PII 泄露检测（双模式：快速检测 + 深度检测）
+    pii_result = _check_pii_enhanced(content, user_roles)
+    if pii_result["action"] == "redact":
+        checks.append(pii_result["check_entry"])
+        return GuardrailResult(
+            passed=True,
+            action=GuardrailAction.REDACT,
+            reason=pii_result["reason"],
+            redacted_content=pii_result["redacted_content"],
             checks=checks,
         )
 
@@ -143,6 +148,168 @@ def check_input_guardrails(
     checks.append({"check": "off_topic", "result": "pass"})
 
     return GuardrailResult(passed=True, checks=checks)
+
+
+async def _check_injection_enhanced(
+    content: str,
+    conversation_history: list[dict] | None = None,
+) -> dict[str, Any]:
+    """增强版注入检测（4层防御）
+
+    调用 injection_detection.detect_injection 进行多层检测，
+    不可用时降级到简易正则检测。
+
+    Args:
+        content: 用户输入
+        conversation_history: 对话历史
+
+    Returns:
+        包含 action、reason、check_entry、sanitized_content 的字典
+    """
+    try:
+        from security.injection_detection import detect_injection
+
+        result = await detect_injection(
+            content,
+            conversation_history=conversation_history,
+            enable_ai_detection=False,
+        )
+
+        action = "pass"
+        reason = ""
+        if result.is_injection:
+            if result.action == "block":
+                action = "block"
+                reason = f"检测到 Prompt 注入攻击（威胁等级: {result.threat_level.value}，评分: {result.overall_score:.2f}），请求已被拦截"
+            elif result.action == "redact":
+                action = "redact"
+                reason = f"检测到可疑输入（威胁等级: {result.threat_level.value}），已自动净化"
+            elif result.action == "warn":
+                action = "pass"
+                reason = f"输入存在轻微风险（威胁等级: {result.threat_level.value}），已放行"
+
+        detection_layers = [d.layer.value for d in result.detections]
+        return {
+            "action": action,
+            "reason": reason,
+            "sanitized_content": result.sanitized_content if action == "redact" else None,
+            "check_entry": {
+                "check": "prompt_injection",
+                "result": action if action != "pass" else "pass",
+                "threat_level": result.threat_level.value,
+                "overall_score": result.overall_score,
+                "detection_layers": detection_layers,
+            },
+        }
+
+    except Exception as e:
+        logger.warning("增强版注入检测失败，降级到简易检测: %s", e)
+        return _check_injection_simple(content)
+
+
+def _check_injection_simple(content: str) -> dict[str, Any]:
+    """简易注入检测（降级方案）
+
+    当增强版检测不可用时，使用简易正则检测。
+
+    Args:
+        content: 用户输入
+
+    Returns:
+        包含 action、reason、check_entry 的字典
+    """
+    for pattern in PROMPT_INJECTION_PATTERNS:
+        if pattern.search(content):
+            return {
+                "action": "block",
+                "reason": "检测到潜在的 Prompt 注入攻击，请求已被拦截",
+                "check_entry": {
+                    "check": "prompt_injection",
+                    "result": "blocked",
+                    "pattern": pattern.pattern,
+                    "mode": "simple_fallback",
+                },
+            }
+
+    return {
+        "action": "pass",
+        "reason": "",
+        "check_entry": {
+            "check": "prompt_injection",
+            "result": "pass",
+            "mode": "simple_fallback",
+        },
+    }
+
+
+def _check_pii_enhanced(
+    content: str,
+    user_roles: list[str] | None = None,
+) -> dict[str, Any]:
+    """增强版 PII 检测（双模式）
+
+    快速路径：先用 desensitize.has_pii 快速判断
+    深度路径：用 pii_detection.detect_pii 获取详细结果和分级脱敏
+
+    Args:
+        content: 待检测文本
+        user_roles: 用户角色列表
+
+    Returns:
+        包含 action、reason、redacted_content、check_entry 的字典
+    """
+    if not has_pii(content):
+        return {
+            "action": "pass",
+            "reason": "",
+            "redacted_content": None,
+            "check_entry": {"check": "pii_leakage", "result": "pass"},
+        }
+
+    try:
+        from security.pii_detection import detect_pii as deep_detect_pii
+
+        deep_result = deep_detect_pii(content)
+        if deep_result.has_pii:
+            pii_types = list(deep_result.summary.keys())
+            return {
+                "action": "redact",
+                "reason": f"输入包含敏感信息({', '.join(pii_types)})，已自动脱敏",
+                "redacted_content": deep_result.redacted_content,
+                "check_entry": {
+                    "check": "pii_leakage",
+                    "result": "redacted",
+                    "pii_types": pii_types,
+                    "detection_count": len(deep_result.detections),
+                    "summary": deep_result.summary,
+                    "mode": "deep_detection",
+                },
+            }
+    except Exception as e:
+        logger.warning("深度 PII 检测失败，降级到基础脱敏: %s", e)
+
+    pii_detections = detect_pii(content)
+    if pii_detections:
+        pii_types = list({d.pii_type for d in pii_detections})
+        redacted = desensitize_content(content, user_roles)
+        return {
+            "action": "redact",
+            "reason": f"输入包含敏感信息({', '.join(pii_types)})，已自动脱敏",
+            "redacted_content": redacted,
+            "check_entry": {
+                "check": "pii_leakage",
+                "result": "redacted",
+                "pii_types": pii_types,
+                "mode": "basic_fallback",
+            },
+        }
+
+    return {
+        "action": "pass",
+        "reason": "",
+        "redacted_content": None,
+        "check_entry": {"check": "pii_leakage", "result": "pass"},
+    }
 
 
 async def check_tool_call_guardrails(
@@ -598,21 +765,17 @@ async def check_output_guardrails(
     """
     checks: list[dict[str, Any]] = []
 
-    # 1. 数据泄露检测与脱敏
-    if has_pii(content):
-        redacted = desensitize_content(content, user_roles)
-        pii_detections = detect_pii(content)
-        pii_types = list({d.pii_type for d in pii_detections})
-        checks.append({
-            "check": "data_leakage",
-            "result": "redacted",
-            "pii_types": pii_types,
-        })
+    # 1. 数据泄露检测与脱敏（使用增强版深度检测）
+    pii_result = _check_pii_enhanced(content, user_roles)
+    if pii_result["action"] == "redact":
+        check_entry = pii_result["check_entry"].copy()
+        check_entry["check"] = "data_leakage"
+        checks.append(check_entry)
         return GuardrailResult(
             passed=True,
             action=GuardrailAction.REDACT,
-            reason=f"输出包含敏感信息({', '.join(pii_types)})，已自动脱敏",
-            redacted_content=redacted,
+            reason=pii_result["reason"],
+            redacted_content=pii_result["redacted_content"],
             checks=checks,
         )
 

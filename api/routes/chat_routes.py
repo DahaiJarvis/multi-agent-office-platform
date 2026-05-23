@@ -43,8 +43,19 @@ def format_sse(event: str, data: str) -> str:
 async def chat(request: ChatRequest) -> ChatResponse:
     """处理用户对话请求（同步模式）
 
-    流程：获取/创建会话 -> 追加用户消息 -> Supervisor 路由 -> Agent 执行 -> 返回结果
+    流程：输入护栏检查 -> 获取/创建会话 -> 追加用户消息 -> Supervisor 路由 -> Agent 执行 -> 输出护栏检查 -> 返回结果
     """
+    from security.guardrails import check_input_guardrails, check_output_guardrails
+
+    input_result = await check_input_guardrails(
+        content=request.message,
+        conversation_history=None,
+    )
+    if not input_result.passed:
+        raise AppException(ErrorCode.GUARDRAIL_BLOCKED, message=input_result.reason)
+
+    actual_message = input_result.redacted_content or request.message
+
     session_mgr = await get_session_manager()
 
     if request.session_id:
@@ -59,11 +70,11 @@ async def chat(request: ChatRequest) -> ChatResponse:
     await session_mgr.append_message(
         session_id=session.session_id,
         role="user",
-        content=request.message,
+        content=actual_message,
     )
 
     result = await route_and_execute(
-        user_message=request.message,
+        user_message=actual_message,
         session_id=session.session_id,
         user_id=request.user_id,
         session=session,
@@ -71,6 +82,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
     )
 
     reply = result.get("message", "处理完成")
+
+    output_result = await check_output_guardrails(content=reply)
+    if not output_result.passed:
+        raise AppException(ErrorCode.GUARDRAIL_BLOCKED, message=output_result.reason)
+    if output_result.redacted_content:
+        reply = output_result.redacted_content
+
     agent_name = result.get("agent_name", "Supervisor")
     intent = result.get("intent")
     collaboration_mode = result.get("collaboration_mode")
@@ -107,7 +125,20 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
     通过 SSE (Server-Sent Events) 逐 Token 推送 Agent 响应。
     使用 AutoGen 的 run_stream() 实现真正的 Token 级流式输出，
     LLM 每生成一个 Token 即推送到客户端，显著降低首 Token 延迟。
+
+    流程：输入护栏检查 -> 获取/创建会话 -> 追加用户消息 -> 流式执行 -> 输出护栏检查
     """
+    from security.guardrails import check_input_guardrails, check_output_guardrails
+
+    input_result = await check_input_guardrails(
+        content=request.message,
+        conversation_history=None,
+    )
+    if not input_result.passed:
+        raise AppException(ErrorCode.GUARDRAIL_BLOCKED, message=input_result.reason)
+
+    actual_message = input_result.redacted_content or request.message
+
     session_mgr = await get_session_manager()
 
     if request.session_id:
@@ -122,7 +153,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
     await session_mgr.append_message(
         session_id=session.session_id,
         role="user",
-        content=request.message,
+        content=actual_message,
     )
 
     async def event_generator():
@@ -162,7 +193,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 event_bus_gen = None
 
             stream_gen = route_and_execute_stream(
-                user_message=request.message,
+                user_message=actual_message,
                 session_id=session.session_id,
                 user_id=request.user_id,
                 session=session,
@@ -287,6 +318,17 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                         pass
 
             if full_message:
+                try:
+                    output_result = await check_output_guardrails(content=full_message)
+                    if not output_result.passed:
+                        yield format_sse("guardrail_block", output_result.reason)
+                        yield format_sse("status", "blocked")
+                        return
+                    if output_result.redacted_content:
+                        full_message = output_result.redacted_content
+                except Exception as output_err:
+                    logger.warning("输出护栏检查异常，放行: %s", output_err)
+
                 await session_mgr.append_message(
                     session_id=session.session_id,
                     role="assistant",
