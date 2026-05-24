@@ -84,6 +84,10 @@ from agent.core.workflow.human_confirm import (
     HumanConfirmManager,
     get_human_confirm_manager,
 )
+from agent.core.workflow.impact_analyzer import (
+    analyze_skip_impact,
+    apply_skip_with_impact,
+)
 
 __all__ = [
     "NodeType",
@@ -151,4 +155,6 @@ __all__ = [
     "ConfirmRequest",
     "HumanConfirmManager",
     "get_human_confirm_manager",
+    "analyze_skip_impact",
+    "apply_skip_with_impact",
 ]

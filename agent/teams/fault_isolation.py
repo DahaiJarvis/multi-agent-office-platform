@@ -535,6 +535,7 @@ class FaultIsolationPolicy:
         execution: TaskExecution,
         step_index: int,
         error: Exception,
+        failure_reason: str = "",
     ) -> StepCheckpoint:
         """策略4: 标记失败，根据 failure_policy 决定后续行为
 
@@ -564,6 +565,7 @@ class FaultIsolationPolicy:
             input_data=step or {},
             error=str(error),
             fallback_used="all_strategies_exhausted",
+            failure_reason=failure_reason or "agent_fault",
         )
 
         policy = execution.failure_policy

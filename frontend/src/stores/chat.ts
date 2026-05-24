@@ -200,6 +200,8 @@ export const useChatStore = defineStore('chat', () => {
   function clearTaskActivities() {
     taskActivities.value = []
     _activitySeq = 0
+    taskSteps.value = []
+    totalSteps.value = 0
   }
 
   function clearChat() {

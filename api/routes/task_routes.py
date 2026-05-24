@@ -222,14 +222,12 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
 
                 asyncio.create_task(_retry_background())
             elif decision == "skip":
-                from agent.core.workflow.task_checkpoint import StepStatus
+                from agent.core.workflow.impact_analyzer import apply_skip_with_impact
 
-                for cp in execution.checkpoints:
-                    if cp.step_index == result.step_index and cp.status in (StepStatus.WAITING_CONFIRM, StepStatus.FAILED):
-                        cp.status = StepStatus.SKIPPED
-                        cp.error = f"用户跳过: {comment}"
-                        await store.save_checkpoint(execution.execution_id, cp)
-                        break
+                await apply_skip_with_impact(
+                    execution, result.step_index, comment,
+                )
+
                 execution = await store.get_execution(result.execution_id) or execution
                 execution.error = ""
                 await store.update_execution(execution)
@@ -285,6 +283,7 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
                 if cp.step_index == result.step_index and cp.status == StepStatus.WAITING_CONFIRM:
                     cp.status = StepStatus.FAILED
                     cp.error = f"用户取消: {comment}"
+                    cp.failure_reason = "user_rejected"
                     await store.save_checkpoint(execution.execution_id, cp)
                     break
             execution = await store.get_execution(result.execution_id) or execution

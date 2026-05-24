@@ -171,6 +171,26 @@ class TaskExecutionEngine:
             if step_checkpoint_index < execution.current_step:
                 continue
 
+            # 跳过已被标记为SKIPPED的步骤（用户跳过或级联跳过）
+            existing_cp = None
+            for cp in execution.checkpoints:
+                if cp.step_index == step_checkpoint_index and cp.status == StepStatus.SKIPPED:
+                    existing_cp = cp
+                    break
+            if existing_cp is not None:
+                done_info = {
+                    "step_name": step.get("name", ""),
+                    "step_type": step.get("type", ""),
+                    "agent_name": step.get("agent_name", ""),
+                    "step_index": step_checkpoint_index,
+                    "total_steps": len(execution.steps) + 1,
+                    "status": "skipped",
+                }
+                if existing_cp.error:
+                    done_info["error"] = existing_cp.error
+                yield {"type": "step_done", **done_info}
+                continue
+
             # 更新心跳
             await self._store.update_heartbeat(execution.execution_id)
 
@@ -497,6 +517,15 @@ class TaskExecutionEngine:
             if step_checkpoint_index < execution.current_step:
                 continue
 
+            # 跳过已被标记为SKIPPED的步骤（用户跳过或级联跳过）
+            skip_cp = None
+            for cp in execution.checkpoints:
+                if cp.step_index == step_checkpoint_index and cp.status == StepStatus.SKIPPED:
+                    skip_cp = cp
+                    break
+            if skip_cp is not None:
+                continue
+
             await self._store.update_heartbeat(execution.execution_id)
 
             try:
@@ -638,11 +667,13 @@ class TaskExecutionEngine:
                     "agent_name": intent.target_agent,
                     "confirm_type": "sensitive_action",
                     "confirm_reason": f"即将执行 {intent.target_agent} 的操作，请确认是否继续",
+                    "depends_on": [],
                 })
             steps.append({
                 "type": StepType.AGENT_CALL.value,
                 "name": f"调用{intent.target_agent}",
                 "agent_name": intent.target_agent,
+                "depends_on": [0] if intent.review_required else [],
             })
 
         elif intent.collaboration_mode == CollaborationMode.SELECTOR:
@@ -653,17 +684,21 @@ class TaskExecutionEngine:
                     "agent_name": intent.target_agent,
                     "confirm_type": "sensitive_action",
                     "confirm_reason": f"即将执行 {intent.target_agent} 的操作，请确认是否继续",
+                    "depends_on": [],
                 })
+            agent_step_idx = len(steps)
             steps.append({
                 "type": StepType.AGENT_CALL.value,
                 "name": f"调用{intent.target_agent}",
                 "agent_name": intent.target_agent,
+                "depends_on": [0] if intent.review_required else [],
             })
             if intent.review_required:
                 steps.append({
                     "type": StepType.REVIEW.value,
                     "name": "审核结果",
                     "agent_name": "Reviewer",
+                    "depends_on": [agent_step_idx],
                 })
 
         elif intent.collaboration_mode == CollaborationMode.SWARM:
@@ -704,19 +739,23 @@ class TaskExecutionEngine:
                 "agent_name": "Aggregator",
                 "confirm_type": "sensitive_action",
                 "confirm_reason": f"即将并行调用 {', '.join(agent_names)} 执行任务，请确认是否继续",
+                "depends_on": [],
             })
 
+        parallel_step_idx = len(steps)
         steps.append({
             "type": StepType.PARALLEL_EXEC.value,
             "name": f"并行执行（{', '.join(agent_names)}）",
             "agent_name": "Aggregator",
             "parallel_agents": agent_names,
+            "depends_on": [0] if intent.review_required else [],
         })
 
         steps.append({
             "type": StepType.AGGREGATE.value,
             "name": "汇总并行结果",
             "agent_name": "Aggregator",
+            "depends_on": [parallel_step_idx],
         })
 
         return steps
@@ -747,10 +786,16 @@ class TaskExecutionEngine:
                 "agent_name": "Judge",
                 "confirm_type": "sensitive_action",
                 "confirm_reason": f"即将启动辩论模式（{', '.join(agent_names)}），请确认是否继续",
+                "depends_on": [],
             })
 
         for round_idx in range(debate_rounds):
             round_label = "初始立场" if round_idx == 0 else f"第{round_idx + 1}轮辩论"
+            round_depends: list[int] = []
+            if round_idx == 0 and intent.review_required:
+                round_depends = [0]
+            elif round_idx > 0:
+                round_depends = [len(steps) - 1]
             steps.append({
                 "type": StepType.DEBATE_ROUND.value,
                 "name": f"辩论 - {round_label}",
@@ -758,12 +803,14 @@ class TaskExecutionEngine:
                 "debate_agents": agent_names,
                 "round_index": round_idx,
                 "total_rounds": debate_rounds,
+                "depends_on": round_depends,
             })
 
         steps.append({
             "type": StepType.AGGREGATE.value,
             "name": "裁判裁决",
             "agent_name": "Judge",
+            "depends_on": [len(steps) - 1],
         })
 
         return steps
@@ -792,19 +839,23 @@ class TaskExecutionEngine:
                 "agent_name": "Voter",
                 "confirm_type": "sensitive_action",
                 "confirm_reason": f"即将启动投票模式（{', '.join(agent_names)}），请确认是否继续",
+                "depends_on": [],
             })
 
+        vote_step_idx = len(steps)
         steps.append({
             "type": StepType.VOTE_EXEC.value,
             "name": f"投票表决（{', '.join(agent_names)}）",
             "agent_name": "Voter",
             "vote_agents": agent_names,
+            "depends_on": [0] if intent.review_required else [],
         })
 
         steps.append({
             "type": StepType.AGGREGATE.value,
             "name": "汇总投票结果",
             "agent_name": "Voter",
+            "depends_on": [vote_step_idx],
         })
 
         return steps
@@ -826,19 +877,25 @@ class TaskExecutionEngine:
         if intent.sub_tasks:
             for idx, sub_task in enumerate(intent.sub_tasks):
                 resolved_agent = self._resolve_agent_for_sub_task(sub_task, default_agent)
-                if self._is_sensitive_action(sub_task):
+                is_sensitive = self._is_sensitive_action(sub_task)
+                confirm_step_idx = -1
+                if is_sensitive:
+                    confirm_step_idx = len(steps)
                     steps.append({
                         "type": StepType.HUMAN_CONFIRM.value,
                         "name": f"确认: {sub_task}",
                         "agent_name": resolved_agent,
                         "confirm_type": "sensitive_action",
                         "confirm_reason": f"即将执行「{sub_task}」，此操作需要确认后才能继续",
+                        "depends_on": [],
                     })
+                agent_depends = [confirm_step_idx] if is_sensitive else []
                 steps.append({
                     "type": StepType.AGENT_CALL.value,
                     "name": sub_task,
                     "agent_name": resolved_agent,
                     "sub_task_index": idx,
+                    "depends_on": agent_depends,
                 })
         else:
             if intent.review_required:
@@ -848,25 +905,36 @@ class TaskExecutionEngine:
                     "agent_name": default_agent,
                     "confirm_type": "sensitive_action",
                     "confirm_reason": f"即将执行 {default_agent} 的操作，请确认是否继续",
+                    "depends_on": [],
                 })
             steps.append({
                 "type": StepType.AGENT_CALL.value,
                 "name": f"调用{default_agent}",
                 "agent_name": default_agent,
+                "depends_on": [0] if intent.review_required else [],
             })
 
         if intent.review_required:
+            last_agent_step_idx = len(steps) - 1
             steps.append({
                 "type": StepType.REVIEW.value,
                 "name": "审核结果",
                 "agent_name": "Reviewer",
+                "depends_on": [last_agent_step_idx],
             })
 
         if len(steps) > 1:
+            last_agent_call_idx = -1
+            for i in range(len(steps) - 1, -1, -1):
+                if steps[i].get("type") == StepType.AGENT_CALL.value:
+                    last_agent_call_idx = i
+                    break
+            aggregate_depends = [last_agent_call_idx] if last_agent_call_idx >= 0 else []
             steps.append({
                 "type": StepType.AGGREGATE.value,
                 "name": "汇总结果",
                 "agent_name": "OfficeAssistant",
+                "depends_on": aggregate_depends,
             })
 
         return steps

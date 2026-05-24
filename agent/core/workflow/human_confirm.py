@@ -453,7 +453,8 @@ class HumanConfirmManager:
         if confirm_type == ConfirmType.SENSITIVE_ACTION:
             return [
                 ConfirmOption(label="确认执行", value="continue", description="确认执行此敏感操作"),
-                ConfirmOption(label="取消", value="cancel", description="取消此操作"),
+                ConfirmOption(label="跳过此步骤", value="skip", description="跳过当前操作，继续执行后续步骤"),
+                ConfirmOption(label="取消任务", value="cancel", description="取消整个任务"),
             ]
         elif confirm_type == ConfirmType.DEGRADE_DECISION:
             return [
