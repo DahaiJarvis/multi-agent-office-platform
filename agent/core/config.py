@@ -209,6 +209,11 @@ class Settings(BaseSettings):
     # 取值范围: 60~86400，默认 3600（1 小时）
     ida_token_ttl_seconds: int = Field(default=3600, alias="IDA_TOKEN_TTL_SECONDS")
 
+    # 持久化 TTL 配置（天）
+    # Agent 配置、技能绑定等数据在 Redis 中的过期时间
+    # 开发环境建议 7 天，生产环境建议 90 天
+    persist_ttl_days: int = Field(default=90, alias="PERSIST_TTL_DAYS")
+
     # IDA 认证模式：legacy(映射Token) / direct(透传Token)
     # legacy: 使用 RSA 私钥签发映射 Token，IDA 使用 RSA 公钥验证（兼容旧系统）
     # direct: 直接透传主平台 Token，IDA 通过 JWKS 端点验证（推荐，统一身份源）

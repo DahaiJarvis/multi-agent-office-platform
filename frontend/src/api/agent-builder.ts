@@ -7,6 +7,7 @@ export interface CustomAgent {
   description: string
   system_prompt: string
   mcp_servers: string[]
+  builtin_skill_ids: string[]
   model_tier: string
   temperature: number
   max_rounds: number
@@ -19,6 +20,15 @@ export interface CustomAgent {
   created_by: string
   created_at: number
   updated_at: number
+}
+
+export interface BuiltinSkill {
+  skill_id: string
+  name: string
+  description: string
+  category: string
+  required_tools: string[]
+  priority: number
 }
 
 export interface AgentVersion {
@@ -49,6 +59,7 @@ export const agentBuilderApi = {
     description?: string
     system_prompt: string
     mcp_servers?: string[]
+    builtin_skill_ids?: string[]
     model_tier?: string
     temperature?: number
     max_rounds?: number
@@ -101,5 +112,9 @@ export const agentBuilderApi = {
       name,
       overrides: Object.keys(overrides).length > 0 ? overrides : undefined
     })
+  },
+
+  builtinSkills() {
+    return http.get<BuiltinSkill[]>('/agent-builder/builtin-skills')
   },
 }

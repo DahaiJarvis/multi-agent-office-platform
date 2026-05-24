@@ -134,7 +134,8 @@ class FeedbackService:
             # 如果是首次反馈（无旧反馈），total 加 1；否则 total 不变
             if not old_type:
                 await redis.hincrby(stats_key, "total", 1)
-            await redis.expire(stats_key, 86400 * 90)
+            from agent.core.async_utils import get_persist_ttl_seconds
+            await redis.expire(stats_key, get_persist_ttl_seconds())
 
             # 按 Agent 维度统计
             if request.agent_name:
@@ -155,7 +156,8 @@ class FeedbackService:
 
                 if not old_type:
                     await redis.hincrby(agent_stats_key, "total", 1)
-                await redis.expire(agent_stats_key, 86400 * 90)
+                from agent.core.async_utils import get_persist_ttl_seconds
+                await redis.expire(agent_stats_key, get_persist_ttl_seconds())
 
             logger.info(
                 "收到反馈: session=%s index=%d type=%s agent=%s",

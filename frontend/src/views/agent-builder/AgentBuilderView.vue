@@ -49,6 +49,7 @@
         <div class="agent-tags">
           <span v-for="tag in agent.tags" :key="tag" class="tag">{{ tag }}</span>
           <span v-if="agent.mcp_servers.length" class="tag mcp">MCP: {{ agent.mcp_servers.length }}</span>
+          <span v-if="agent.builtin_skill_ids && agent.builtin_skill_ids.length" class="tag skill">技能: {{ agent.builtin_skill_ids.length }}</span>
         </div>
         <div class="card-actions">
           <button class="btn-sm btn-edit" @click="openEditDialog(agent)">编辑</button>
@@ -77,6 +78,15 @@
         <el-form-item label="最大轮次"><el-input-number v-model="form.max_rounds" :min="1" :max="50" /></el-form-item>
         <el-form-item label="需要审核"><el-switch v-model="form.review_required" /></el-form-item>
         <el-form-item label="MCP 服务器"><el-input v-model="form.mcpServersStr" placeholder="多个用逗号分隔" /></el-form-item>
+        <el-form-item label="内置技能">
+          <div v-if="builtinSkillsLoading" style="color: var(--color-text-tertiary); font-size: 13px;">加载中...</div>
+          <el-checkbox-group v-else v-model="form.builtinSkillIds" style="display: flex; flex-wrap: wrap; gap: 8px;">
+            <el-checkbox v-for="skill in builtinSkills" :key="skill.skill_id" :value="skill.skill_id" :label="skill.skill_id">
+              <span>{{ skill.name }}</span>
+              <span style="color: var(--color-text-tertiary); font-size: 12px; margin-left: 4px;">{{ skill.category }}</span>
+            </el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
         <el-form-item label="标签"><el-input v-model="form.tagsStr" placeholder="多个标签用逗号分隔" /></el-form-item>
       </el-form>
       <template #footer>
@@ -191,7 +201,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { agentBuilderApi, type CustomAgent, type AgentTemplate, type AgentVersion } from '../../api/agent-builder'
+import { agentBuilderApi, type CustomAgent, type AgentTemplate, type AgentVersion, type BuiltinSkill } from '../../api/agent-builder'
 
 const loading = ref(false)
 const agents = ref<CustomAgent[]>([])
@@ -205,7 +215,11 @@ const form = reactive({
   name: '', display_name: '', description: '', system_prompt: '',
   model_tier: 'plus', temperature: 0.7, max_rounds: 10,
   review_required: false, mcpServersStr: '', tagsStr: '',
+  builtinSkillIds: [] as string[],
 })
+
+const builtinSkills = ref<BuiltinSkill[]>([])
+const builtinSkillsLoading = ref(false)
 
 const showTemplateDialog = ref(false)
 const templateLoading = ref(false)
@@ -243,7 +257,8 @@ async function loadTemplates() {
 
 function openCreateDialog() {
   isEdit.value = false; editId.value = ''
-  Object.assign(form, { name: '', display_name: '', description: '', system_prompt: '', model_tier: 'plus', temperature: 0.7, max_rounds: 10, review_required: false, mcpServersStr: '', tagsStr: '' })
+  Object.assign(form, { name: '', display_name: '', description: '', system_prompt: '', model_tier: 'plus', temperature: 0.7, max_rounds: 10, review_required: false, mcpServersStr: '', tagsStr: '', builtinSkillIds: [] })
+  loadBuiltinSkills()
   showCreateEditDialog.value = true
 }
 
@@ -255,8 +270,17 @@ function openEditDialog(agent: CustomAgent) {
     temperature: agent.temperature, max_rounds: agent.max_rounds,
     review_required: agent.review_required,
     mcpServersStr: agent.mcp_servers.join(', '), tagsStr: agent.tags.join(', '),
+    builtinSkillIds: agent.builtin_skill_ids || [],
   })
+  loadBuiltinSkills()
   showCreateEditDialog.value = true
+}
+
+async function loadBuiltinSkills() {
+  builtinSkillsLoading.value = true
+  try { builtinSkills.value = await agentBuilderApi.builtinSkills() || [] }
+  catch { builtinSkills.value = [] }
+  finally { builtinSkillsLoading.value = false }
 }
 
 async function submitForm() {
@@ -264,7 +288,7 @@ async function submitForm() {
   if (!form.system_prompt.trim()) { ElMessage.warning('请输入系统提示词'); return }
   const mcp_servers = form.mcpServersStr.split(',').map(s => s.trim()).filter(Boolean)
   const tags = form.tagsStr.split(',').map(s => s.trim()).filter(Boolean)
-  const payload = { ...form, mcp_servers, tags }
+  const payload = { ...form, mcp_servers, tags, builtin_skill_ids: form.builtinSkillIds }
   try {
     if (isEdit.value) {
       await agentBuilderApi.update(editId.value, payload)
@@ -371,6 +395,7 @@ onMounted(() => { loadAgents() })
 .agent-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
 .tag { font-size: 12px; padding: 3px 10px; border-radius: 8px; background: rgba(99,102,241,0.08); color: var(--color-primary); }
 .tag.mcp { background: rgba(168,85,247,0.08); color: #a855f7; }
+.tag.skill { background: rgba(34,197,94,0.08); color: #16a34a; }
 .card-actions { display: flex; gap: 8px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid var(--color-border-light); }
 .btn-sm { padding: 5px 14px; border-radius: var(--radius-md); font-size: 12px; font-weight: 500; transition: all var(--transition-fast); }
 .btn-edit { background: rgba(99,102,241,0.1); color: var(--color-primary); }

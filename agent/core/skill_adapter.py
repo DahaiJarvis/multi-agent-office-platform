@@ -62,6 +62,8 @@ _SKILL_MARKET_SET_KEY = "skill_market:all"
 _SKILL_MARKET_CATEGORY_PREFIX = "skill_market:category:"
 _SKILL_MARKET_RATINGS_PREFIX = "skill_market:ratings:"
 _SKILL_TEST_PREFIX = "skill_test:"
+_SKILL_BINDING_PREFIX = "skill_binding:"
+_SKILL_BUILTIN_BINDING_PREFIX = "skill_builtin_binding:"
 
 
 class SkillParseError(Exception):
@@ -144,7 +146,7 @@ def _detect_skill_conflict(skill_name: str, suggested_tools: list[str]) -> list[
     conflicts: list[SkillConflictItem] = []
 
     try:
-        from agent.agents.domain import BUILTIN_SKILLS
+        from agent.agents.skill_defs import BUILTIN_SKILLS
     except Exception:
         return conflicts
 
@@ -719,6 +721,9 @@ class SkillRegistry:
         self._skills_dir = skills_dir or SKILLS_DIR
         self._skills: dict[str, SkillDocument] = {}
         self._agent_bindings: dict[str, list[str]] = {}
+        # 内置技能绑定：从 AGENT_SKILL_BINDINGS 初始化，统一由 SkillRegistry 管理
+        self._builtin_bindings: dict[str, list[str]] = {}
+        self._init_builtin_bindings()
         self._active_skills: dict[str, set[str]] = {}
         self._loaded: bool = False
         # SkillPack 扩展数据
@@ -745,6 +750,166 @@ class SkillRegistry:
     def reset_instance(cls) -> None:
         """重置单例（仅用于测试）"""
         cls._instance = None
+
+    def _init_builtin_bindings(self) -> None:
+        """从 AGENT_SKILL_BINDINGS 初始化内置技能绑定
+
+        将 domain.py 中硬编码的内置技能绑定关系同步到 SkillRegistry，
+        使 SkillRegistry 成为技能绑定的统一管理入口。
+        """
+        try:
+            from agent.agents.skill_defs import AGENT_SKILL_BINDINGS
+            for agent_name, skill_ids in AGENT_SKILL_BINDINGS.items():
+                self._builtin_bindings[agent_name] = list(skill_ids)
+            logger.info("内置技能绑定初始化完成: %d 个 Agent", len(self._builtin_bindings))
+        except Exception as e:
+            logger.warning("内置技能绑定初始化失败: %s", e)
+
+    def _schedule_persist_binding(self, agent_name: str) -> None:
+        """调度绑定关系持久化（发后即忘）
+
+        Args:
+            agent_name: Agent 名称
+        """
+        from agent.core.async_utils import schedule_async_task
+        schedule_async_task(self._persist_binding(agent_name), task_name=f"技能绑定持久化({agent_name})")
+
+    async def _persist_binding(self, agent_name: str) -> None:
+        """将 Agent 的技能绑定关系持久化到 Redis
+
+        Args:
+            agent_name: Agent 名称
+        """
+        try:
+            from agent.core.redis_manager import get_redis_client
+            redis = await get_redis_client()
+            if redis is None:
+                return
+            import json
+            from agent.core.async_utils import get_persist_ttl_seconds
+            ttl = get_persist_ttl_seconds()
+            # 持久化 SKILL.md 绑定
+            skillmd_bindings = self._agent_bindings.get(agent_name, [])
+            if skillmd_bindings:
+                key = f"{_SKILL_BINDING_PREFIX}{agent_name}"
+                await redis.set(key, json.dumps(skillmd_bindings), ex=ttl)
+            else:
+                await redis.delete(f"{_SKILL_BINDING_PREFIX}{agent_name}")
+            # 持久化内置技能绑定
+            builtin_bindings = self._builtin_bindings.get(agent_name, [])
+            if builtin_bindings:
+                key = f"{_SKILL_BUILTIN_BINDING_PREFIX}{agent_name}"
+                await redis.set(key, json.dumps(builtin_bindings), ex=ttl)
+            else:
+                await redis.delete(f"{_SKILL_BUILTIN_BINDING_PREFIX}{agent_name}")
+        except Exception as e:
+            logger.warning("绑定关系持久化失败: %s", e)
+
+    async def restore_bindings_from_redis(self) -> int:
+        """从 Redis 恢复技能绑定关系
+
+        启动时调用，将 Redis 中持久化的绑定关系加载到内存。
+        仅恢复内存中不存在的绑定（避免覆盖运行时修改）。
+
+        Returns:
+            恢复的绑定数量
+        """
+        try:
+            import json
+            from agent.core.redis_manager import get_redis_client
+            redis = await get_redis_client()
+            if redis is None:
+                return 0
+
+            restored = 0
+
+            # 恢复 SKILL.md 绑定
+            async for key in redis.scan_iter(match=f"{_SKILL_BINDING_PREFIX}*"):
+                try:
+                    agent_name = key.replace(_SKILL_BINDING_PREFIX, "")
+                    raw = await redis.get(key)
+                    if raw:
+                        bindings = json.loads(raw)
+                        if agent_name not in self._agent_bindings:
+                            self._agent_bindings[agent_name] = bindings
+                            restored += 1
+                except Exception as e:
+                    logger.warning("恢复 SKILL.md 绑定失败: key=%s error=%s", key, e)
+
+            # 恢复内置技能绑定
+            async for key in redis.scan_iter(match=f"{_SKILL_BUILTIN_BINDING_PREFIX}*"):
+                try:
+                    agent_name = key.replace(_SKILL_BUILTIN_BINDING_PREFIX, "")
+                    raw = await redis.get(key)
+                    if raw:
+                        bindings = json.loads(raw)
+                        if agent_name not in self._builtin_bindings:
+                            self._builtin_bindings[agent_name] = bindings
+                            restored += 1
+                except Exception as e:
+                    logger.warning("恢复内置技能绑定失败: key=%s error=%s", key, e)
+
+            if restored > 0:
+                logger.info("从 Redis 恢复了 %d 个技能绑定关系", restored)
+            return restored
+        except Exception as e:
+            logger.warning("Redis 绑定恢复失败: %s", e)
+            return 0
+
+    async def check_builtin_skills_tool_availability(self) -> list[dict]:
+        """检测内置技能的 required_tools 与实际可用工具的匹配情况
+
+        遍历所有 BUILTIN_SKILLS，检查其 required_tools 是否在
+        MCP 注册表或原生工具注册表中存在。不存在的工具标记为不可用。
+
+        Returns:
+            检测结果列表，每项包含 skill_id、skill_name、
+            missing_tools（缺失的工具列表）和 available_tools（可用的工具列表）
+        """
+        results: list[dict] = []
+
+        try:
+            from agent.agents.skill_defs import BUILTIN_SKILLS
+        except Exception:
+            return results
+
+        for skill_id, skill_config in BUILTIN_SKILLS.items():
+            missing: list[str] = []
+            available: list[str] = []
+
+            for tool_name in skill_config.required_tools:
+                if await self._is_tool_available_check(tool_name):
+                    available.append(tool_name)
+                else:
+                    missing.append(tool_name)
+
+            if missing:
+                results.append({
+                    "skill_id": skill_id,
+                    "skill_name": skill_config.name,
+                    "missing_tools": missing,
+                    "available_tools": available,
+                })
+                logger.warning(
+                    "内置技能 '%s'(%s) 有 %d 个工具不可用: %s",
+                    skill_config.name, skill_id, len(missing), ", ".join(missing),
+                )
+
+        return results
+
+    async def _is_tool_available_check(self, tool_name: str) -> bool:
+        """检查单个工具是否在运行时可用
+
+        依次检查原生工具注册表和 MCP 工具缓存。
+        委托给同步方法 _is_tool_available，保持接口兼容。
+
+        Args:
+            tool_name: 工具名称
+
+        Returns:
+            工具是否可用
+        """
+        return self._is_tool_available(tool_name)
 
     def load_all(self) -> dict[str, SkillDocument]:
         """加载 skills/ 目录下所有 SKILL.md 和 SkillPack
@@ -941,6 +1106,8 @@ class SkillRegistry:
         if skill_name not in self._agent_bindings[agent_name]:
             self._agent_bindings[agent_name].append(skill_name)
             logger.info("绑定 Skill %s 到 Agent %s", skill_name, agent_name)
+            # 持久化绑定关系到 Redis
+            self._schedule_persist_binding(agent_name)
         return True
 
     def unbind_from_agent(self, skill_name: str, agent_name: str) -> bool:
@@ -959,6 +1126,8 @@ class SkillRegistry:
             if skill_name in bindings:
                 bindings.remove(skill_name)
                 logger.info("解除 Agent %s 的 Skill 绑定: %s", agent_name, skill_name)
+                # 持久化绑定关系到 Redis
+                self._schedule_persist_binding(agent_name)
                 return True
         logger.warning("解除绑定失败: Agent %s 未绑定 Skill %s", agent_name, skill_name)
         return False
@@ -985,17 +1154,99 @@ class SkillRegistry:
         return skills
 
     async def get_agent_prompt_extensions(self, agent_name: str) -> str:
-        """获取 Agent 绑定的 Skill 指令拼接文本
+        """获取 Agent 绑定的全部技能指令拼接文本
 
-        将所有绑定的 Skill 指令拼接为一段文本，用于追加到 Agent 的 System Prompt。
-        同时检查 Skill 声明的工具是否在运行时可用，不可用时追加提示。
+        统一处理两类技能：
+          1. 内置技能（BUILTIN_SKILLS）：从 _builtin_bindings 获取绑定关系，
+             注入 prompt_extension 提示词片段
+          2. SKILL.md 技能：从 _agent_bindings 获取绑定关系，
+             注入 instruction 指令文本
+
+        同时检查 SKILL.md 声明的工具是否在运行时可用，不可用时追加提示。
         检测与内置技能的冲突，冲突时在指令前加注释说明。
 
         Args:
             agent_name: Agent 名称
 
         Returns:
-            Skill 指令拼接文本，无绑定时返回空字符串
+            技能指令拼接文本，无绑定时返回空字符串
+        """
+        parts: list[str] = []
+
+        # 第一部分：内置技能的 prompt_extension
+        builtin_parts = self._build_builtin_prompt_extensions(agent_name)
+        if builtin_parts:
+            parts.append(builtin_parts)
+
+        # 第二部分：SKILL.md 技能的 instruction
+        skillmd_parts = await self._build_skillmd_prompt_extensions(agent_name)
+        if skillmd_parts:
+            parts.append(skillmd_parts)
+
+        return "\n\n".join(parts) if parts else ""
+
+    def _build_builtin_prompt_extensions(self, agent_name: str) -> str:
+        """构建内置技能的 prompt_extension 拼接文本
+
+        从 _builtin_bindings 获取该 Agent 绑定的内置技能 ID，
+        优先从已加载的 SKILL.md 获取指令文本，回退到 BUILTIN_SKILLS 的 prompt_extension。
+
+        Args:
+            agent_name: Agent 名称
+
+        Returns:
+            内置技能提示词文本，无绑定时返回空字符串
+        """
+        builtin_ids = self._builtin_bindings.get(agent_name, [])
+        if not builtin_ids:
+            return ""
+
+        # 内置技能 ID 到 SKILL.md 名称的映射
+        id_to_md_name = {
+            "email_send": "email-send",
+            "email_search": "email-search",
+            "approval_process": "approval-process",
+            "calendar_manage": "calendar-manage",
+            "crm_query": "crm-query",
+            "knowledge_search": "knowledge-search",
+            "finance_query": "finance-query",
+            "hr_query": "hr-query",
+        }
+
+        builtin_parts: list[str] = []
+        for skill_id in builtin_ids:
+            # 优先从 SKILL.md 获取指令
+            md_name = id_to_md_name.get(skill_id, skill_id)
+            md_doc = self._skills.get(md_name)
+            if md_doc and md_doc.instruction:
+                builtin_parts.append(f"## 内置技能: {md_doc.manifest.name}\n\n{md_doc.instruction}")
+                continue
+
+            # 回退到 BUILTIN_SKILLS 的 prompt_extension
+            try:
+                from agent.agents.skill_defs import BUILTIN_SKILLS
+                skill = BUILTIN_SKILLS.get(skill_id)
+                if skill and skill.prompt_extension:
+                    builtin_parts.append(f"- {skill.name}: {skill.prompt_extension}")
+            except Exception:
+                pass
+
+        if not builtin_parts:
+            return ""
+
+        return "## 内置技能提示\n\n" + "\n\n".join(builtin_parts)
+
+    async def _build_skillmd_prompt_extensions(self, agent_name: str) -> str:
+        """构建 SKILL.md 技能的 instruction 拼接文本
+
+        从 _agent_bindings 获取该 Agent 绑定的 SKILL.md 技能名称，
+        加载对应的指令文本，同时进行冲突检测和工具可用性校验。
+
+        Args:
+            agent_name: Agent 名称
+
+        Returns:
+            SKILL.md 技能指令文本，无绑定时返回空字符串
         """
         skills = self.get_agent_skills(agent_name)
         if not skills:
@@ -1010,7 +1261,7 @@ class SkillRegistry:
                 pass
 
         # 获取该 Agent 绑定的内置技能 ID 集合，用于冲突提示
-        agent_builtin_ids = self._get_agent_builtin_skill_ids(agent_name)
+        agent_builtin_ids = set(self._builtin_bindings.get(agent_name, []))
 
         parts = []
         for doc in skills:
@@ -1046,9 +1297,10 @@ class SkillRegistry:
 
         return "\n\n".join(parts) if parts else ""
 
-    @staticmethod
-    def _get_agent_builtin_skill_ids(agent_name: str) -> set[str]:
+    def _get_agent_builtin_skill_ids(self, agent_name: str) -> set[str]:
         """获取 Agent 绑定的内置技能 ID 集合
+
+        优先从 _builtin_bindings 获取，回退到 AGENT_SKILL_BINDINGS。
 
         Args:
             agent_name: Agent 名称
@@ -1056,8 +1308,11 @@ class SkillRegistry:
         Returns:
             内置技能 ID 集合
         """
+        ids = self._builtin_bindings.get(agent_name, [])
+        if ids:
+            return set(ids)
         try:
-            from agent.agents.domain import AGENT_SKILL_BINDINGS
+            from agent.agents.skill_defs import AGENT_SKILL_BINDINGS
             return set(AGENT_SKILL_BINDINGS.get(agent_name, []))
         except Exception:
             return set()
@@ -1149,7 +1404,7 @@ class SkillRegistry:
             from agent.tools.loader import get_available_tool_names
             available_tools = await get_available_tool_names(agent_name)
         except Exception as e:
-            logger.debug("获取可用工具名称失败（非致命）: %s", e)
+            logger.warning("获取可用工具名称失败: %s", e)
             return ""
 
         # 找出不可用工具
@@ -1307,9 +1562,13 @@ class SkillRegistry:
             logger.debug("Skill %s 依赖检查异常（非致命）: %s", skill_name, e)
 
     def _check_skill_conflict_on_save(self, skill_name: str, doc: SkillDocument) -> None:
-        """保存时检测与内置技能的名称/语义冲突
+        """保存时检测与内置技能/MCP工具的名称/语义冲突
 
         检测到冲突时标记 review_required 并记录日志，不阻断保存流程。
+        检测三层冲突：
+          1. 与内置技能的名称/语义冲突（已有逻辑）
+          2. 与 MCP 工具名的冲突（SKILL.md 名称与 MCP 工具同名会导致混淆）
+          3. 与原生工具名的冲突（SKILL.md 名称规范化后与 native_ 工具同名）
 
         Args:
             skill_name: Skill 名称
@@ -1326,8 +1585,67 @@ class SkillRegistry:
                         skill_name, c.builtin_skill_id, c.builtin_skill_name,
                         c.conflict_type, c.detail,
                     )
+
+            # 检测与 MCP 工具名的冲突
+            self._check_mcp_tool_name_conflict(skill_name, doc)
+
+            # 检测与原生工具名的冲突
+            self._check_native_tool_name_conflict(skill_name, doc)
+
         except Exception as e:
             logger.debug("Skill %s 冲突检测异常（非致命）: %s", skill_name, e)
+
+    def _check_mcp_tool_name_conflict(self, skill_name: str, doc: SkillDocument) -> None:
+        """检测 SKILL.md 名称与 MCP 工具名冲突
+
+        SKILL.md 名称规范化后（连字符转下划线）如果与某个 MCP 工具名相同，
+        在 Prompt 中可能造成混淆：Agent 分不清"技能名"和"工具名"。
+        使用 MCP 工具反向索引进行 O(1) 查找，避免全量遍历。
+
+        Args:
+            skill_name: Skill 名称
+            doc: SkillDocument 实例
+        """
+        try:
+            from agent.core.mcp_integration import get_tool_server_name
+            normalized = skill_name.replace("-", "_")
+            server_name = get_tool_server_name(normalized)
+            if server_name:
+                doc.manifest.review_required = True
+                logger.warning(
+                    "Skill %s 规范化名称 '%s' 与 MCP 工具同名(服务: %s)，"
+                    "可能导致 Prompt 中技能名与工具名混淆",
+                    skill_name, normalized, server_name,
+                )
+        except Exception as e:
+            logger.debug("MCP 工具名冲突检测异常: %s", e)
+
+    def _check_native_tool_name_conflict(self, skill_name: str, doc: SkillDocument) -> None:
+        """检测 SKILL.md 名称与原生工具名冲突
+
+        SKILL.md 名称规范化后如果与 native_ 前缀工具同名（去掉前缀后），
+        可能造成命名空间混淆。
+
+        Args:
+            skill_name: Skill 名称
+            doc: SkillDocument 实例
+        """
+        try:
+            from agent.tools.registry import get_native_tool_registry
+            registry = get_native_tool_registry()
+            normalized = skill_name.replace("-", "_")
+            for meta in registry.list_tools():
+                bare_name = meta.name.replace("native_", "", 1)
+                if bare_name == normalized:
+                    doc.manifest.review_required = True
+                    logger.warning(
+                        "Skill %s 规范化名称 '%s' 与原生工具 '%s' 去前缀后同名，"
+                        "可能导致命名空间混淆",
+                        skill_name, normalized, meta.name,
+                    )
+                    return
+        except Exception as e:
+            logger.debug("原生工具名冲突检测异常（非致命）: %s", e)
 
     @staticmethod
     def _is_tool_available(tool_name: str) -> bool:
@@ -1348,12 +1666,9 @@ class SkillRegistry:
             pass
 
         try:
-            from agent.core.mcp_integration import _tool_cache
-            for server_tools in _tool_cache.values():
-                for t in server_tools:
-                    tool_fn_name = getattr(t, "name", None) or getattr(t, "__name__", "")
-                    if tool_fn_name == tool_name:
-                        return True
+            from agent.core.mcp_integration import get_tool_server_name
+            if get_tool_server_name(tool_name) is not None:
+                return True
         except Exception:
             pass
 
@@ -1619,7 +1934,7 @@ class SkillRegistry:
             from agent.core.redis_manager import get_redis_client
             return await get_redis_client()
         except Exception as e:
-            logger.debug("Redis 获取失败: %s", e)
+            logger.warning("Redis 获取失败: %s", e)
             return None
 
     async def publish_skill_version(self, skill_name: str, version: str, content: str | None = None) -> bool:
@@ -1651,14 +1966,16 @@ class SkillRegistry:
             if content:
                 version_data["custom_content"] = content
 
+            from agent.core.async_utils import get_persist_ttl_seconds
+            ttl = get_persist_ttl_seconds()
             version_key = f"{_SKILL_VERSION_PREFIX}{skill_name}:{version}:manifest"
             versions_key = f"{_SKILL_VERSION_PREFIX}{skill_name}:versions"
             latest_key = f"{_SKILL_VERSION_PREFIX}{skill_name}:latest"
 
             pipe = redis.pipeline()
-            pipe.set(version_key, json.dumps(version_data, ensure_ascii=False), ex=86400 * 90)
+            pipe.set(version_key, json.dumps(version_data, ensure_ascii=False), ex=ttl)
             pipe.zadd(versions_key, {version: time.time()})
-            pipe.set(latest_key, version, ex=86400 * 90)
+            pipe.set(latest_key, version, ex=ttl)
             await pipe.execute()
 
             # 更新活跃版本
@@ -1694,7 +2011,8 @@ class SkillRegistry:
                 logger.warning("版本不存在: %s@%s", skill_name, version)
                 return False
 
-            await redis.set(active_key, version, ex=86400 * 90)
+            from agent.core.async_utils import get_persist_ttl_seconds
+            await redis.set(active_key, version, ex=get_persist_ttl_seconds())
             self._active_versions[skill_name] = version
 
             logger.info("技能版本激活成功: %s@%s", skill_name, version)
@@ -1849,7 +2167,8 @@ class SkillRegistry:
             try:
                 market_key = f"{_SKILL_MARKET_PREFIX}{skill_name}"
                 pipe = redis.pipeline()
-                pipe.set(market_key, entry.model_dump_json(), ex=86400 * 90)
+                from agent.core.async_utils import get_persist_ttl_seconds
+                pipe.set(market_key, entry.model_dump_json(), ex=get_persist_ttl_seconds())
                 pipe.sadd(_SKILL_MARKET_SET_KEY, skill_name)
                 pipe.sadd(f"{_SKILL_MARKET_CATEGORY_PREFIX}{category}", skill_name)
                 await pipe.execute()
@@ -1968,7 +2287,8 @@ class SkillRegistry:
         if redis is not None:
             try:
                 market_key = f"{_SKILL_MARKET_PREFIX}{skill_name}"
-                await redis.set(market_key, entry.model_dump_json(), ex=86400 * 90)
+                from agent.core.async_utils import get_persist_ttl_seconds
+                await redis.set(market_key, entry.model_dump_json(), ex=get_persist_ttl_seconds())
             except Exception as e:
                 logger.debug("市场下载量更新失败: %s - %s", skill_name, e)
 
@@ -2103,7 +2423,8 @@ class SkillRegistry:
                 entry.rating_count = count
                 # 持久化更新
                 market_key = f"{_SKILL_MARKET_PREFIX}{skill_name}"
-                await redis.set(market_key, entry.model_dump_json(), ex=86400 * 90)
+                from agent.core.async_utils import get_persist_ttl_seconds
+                await redis.set(market_key, entry.model_dump_json(), ex=get_persist_ttl_seconds())
 
             logger.info("技能评分成功: %s user=%s score=%.1f avg=%.2f", skill_name, user_id, score, avg_rating)
             return True
@@ -2286,10 +2607,11 @@ class SkillRegistry:
         try:
             version = report.version or "unknown"
             test_key = f"{_SKILL_TEST_PREFIX}{skill_name}:{version}:results"
+            from agent.core.async_utils import get_persist_ttl_seconds
             await redis.set(
                 test_key,
                 report.model_dump_json(),
-                ex=86400 * 30,
+                ex=get_persist_ttl_seconds(),
             )
         except Exception as e:
             logger.debug("测试报告持久化失败: %s - %s", skill_name, e)

@@ -169,6 +169,7 @@ class CustomAgentConfig(BaseModel):
 
     system_prompt: str = Field(min_length=10, max_length=8192, description="系统提示词")
     mcp_servers: list[str] = Field(default_factory=list, description="绑定的 MCP 服务列表")
+    builtin_skill_ids: list[str] = Field(default_factory=list, description="绑定的内置技能 ID 列表")
     model_tier: ModelTier = Field(default=ModelTier.PLUS, description="模型级别")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="推理温度")
     max_rounds: int = Field(default=10, ge=1, le=50, description="最大对话轮次")
@@ -265,11 +266,133 @@ class AgentVersionRecord(BaseModel):
 # ==================== 存储 ====================
 # -------------------------------------------------------------------------
 # 内存存储，用于开发测试
-# 生产环境应替换为持久化存储（数据库/Redis）
+# 生产环境通过 Redis 持久化备份
 # -------------------------------------------------------------------------
 _agents_store: dict[str, CustomAgentConfig] = {}
 _versions_store: dict[str, list[AgentVersionRecord]] = {}
 _templates_store: dict[str, AgentTemplate] = {}
+
+# Redis 持久化 Key 前缀
+_AGENT_REDIS_PREFIX = "agent:custom:"
+_VERSION_REDIS_PREFIX = "agent:version:"
+
+
+async def _persist_agent(config: CustomAgentConfig) -> None:
+    """将 Agent 配置持久化到 Redis
+
+    Args:
+        config: Agent 配置
+    """
+    try:
+        from agent.core.redis_manager import get_redis_client
+        redis = await get_redis_client()
+        if redis is None:
+            return
+        from agent.core.async_utils import get_persist_ttl_seconds
+        key = f"{_AGENT_REDIS_PREFIX}{config.agent_id}"
+        await redis.set(key, config.model_dump_json(), ex=get_persist_ttl_seconds())
+    except Exception as e:
+        logger.warning("Agent 持久化失败: %s", e)
+
+
+def _schedule_persist(config: CustomAgentConfig) -> None:
+    """调度 Agent 配置持久化（发后即忘）
+
+    在同步函数中调用，通过 schedule_async_task 创建后台任务执行持久化。
+    持久化失败不影响主流程。
+
+    Args:
+        config: Agent 配置
+    """
+    from agent.core.async_utils import schedule_async_task
+    schedule_async_task(_persist_agent(config), task_name="Agent配置持久化")
+
+
+async def _persist_version(agent_id: str, version: AgentVersionRecord) -> None:
+    """将版本记录持久化到 Redis
+
+    Args:
+        agent_id: Agent ID
+        version: 版本记录
+    """
+    try:
+        from agent.core.redis_manager import get_redis_client
+        redis = await get_redis_client()
+        if redis is None:
+            return
+        from agent.core.async_utils import get_persist_ttl_seconds
+        key = f"{_VERSION_REDIS_PREFIX}{agent_id}"
+        await redis.rpush(key, version.model_dump_json())
+        await redis.expire(key, get_persist_ttl_seconds())
+    except Exception as e:
+        logger.warning("版本记录持久化失败: %s", e)
+
+
+async def _delete_persisted_agent(agent_id: str) -> None:
+    """从 Redis 删除 Agent 配置和版本记录
+
+    Args:
+        agent_id: Agent ID
+    """
+    try:
+        from agent.core.redis_manager import get_redis_client
+        redis = await get_redis_client()
+        if redis is None:
+            return
+        await redis.delete(f"{_AGENT_REDIS_PREFIX}{agent_id}")
+        await redis.delete(f"{_VERSION_REDIS_PREFIX}{agent_id}")
+    except Exception as e:
+        logger.warning("Agent 持久化删除失败: %s", e)
+
+
+def _schedule_delete_persist(agent_id: str) -> None:
+    """调度 Agent 持久化删除（发后即忘）
+
+    Args:
+        agent_id: Agent ID
+    """
+    from agent.core.async_utils import schedule_async_task
+    schedule_async_task(_delete_persisted_agent(agent_id), task_name="Agent持久化删除")
+
+
+async def restore_agents_from_redis() -> int:
+    """从 Redis 恢复所有自定义 Agent 配置
+
+    启动时调用，将 Redis 中持久化的 Agent 配置加载到内存。
+    仅恢复内存中不存在的 Agent（避免覆盖运行时修改）。
+
+    Returns:
+        恢复的 Agent 数量
+    """
+    try:
+        from agent.core.redis_manager import get_redis_client
+        redis = await get_redis_client()
+        if redis is None:
+            return 0
+
+        keys = []
+        async for key in redis.scan_iter(match=f"{_AGENT_REDIS_PREFIX}*"):
+            keys.append(key)
+
+        restored = 0
+        for key in keys:
+            try:
+                raw = await redis.get(key)
+                if not raw:
+                    continue
+                config = CustomAgentConfig.model_validate_json(raw)
+                if config.agent_id not in _agents_store:
+                    _agents_store[config.agent_id] = config
+                    restored += 1
+            except Exception as e:
+                logger.warning("恢复 Agent 失败: key=%s error=%s", key, e)
+
+        if restored > 0:
+            logger.info("从 Redis 恢复了 %d 个自定义 Agent", restored)
+        return restored
+    except Exception as e:
+        logger.warning("Redis 恢复失败: %s", e)
+        return 0
 
 
 def _init_default_templates() -> None:
@@ -444,6 +567,25 @@ _init_default_templates()
 # ==================== Agent CRUD ====================
 
 
+def _sync_builtin_bindings(agent_name: str, skill_ids: list[str]) -> None:
+    """同步内置技能绑定到 SkillRegistry
+
+    当自定义 Agent 创建或更新时，将其 builtin_skill_ids 同步到
+    SkillRegistry._builtin_bindings，确保运行时能正确注入内置技能提示词。
+
+    Args:
+        agent_name: Agent 名称
+        skill_ids: 内置技能 ID 列表
+    """
+    try:
+        from agent.core.skill_adapter import SkillRegistry
+        registry = SkillRegistry.get_instance()
+        registry._builtin_bindings[agent_name] = list(skill_ids)
+        logger.debug("内置技能绑定已同步: %s -> %s", agent_name, skill_ids)
+    except Exception as e:
+        logger.warning("内置技能绑定同步失败: %s", e)
+
+
 def create_custom_agent(config: CustomAgentConfig, created_by: str) -> CustomAgentConfig:
     """创建自定义 Agent
 
@@ -490,6 +632,12 @@ def create_custom_agent(config: CustomAgentConfig, created_by: str) -> CustomAge
     _agents_store[config.agent_id] = config
 
     _save_version(config, created_by)
+
+    # 同步内置技能绑定到 SkillRegistry
+    _sync_builtin_bindings(config.name, config.builtin_skill_ids)
+
+    # 持久化到 Redis
+    _schedule_persist(config)
 
     logger.info("自定义 Agent 已创建: id=%s name=%s by=%s", config.agent_id, config.name, created_by)
     return config
@@ -610,6 +758,13 @@ def update_custom_agent(
 
     diff = _compute_diff(old_config, agent)
     _save_version(agent, updated_by, diff)
+
+    # 同步内置技能绑定到 SkillRegistry
+    if "builtin_skill_ids" in updates:
+        _sync_builtin_bindings(agent.name, agent.builtin_skill_ids)
+
+    # 持久化到 Redis
+    _schedule_persist(agent)
 
     logger.info("自定义 Agent 已更新: id=%s version=%d by=%s", agent_id, agent.version, updated_by)
     return agent
@@ -734,6 +889,9 @@ def delete_custom_agent(agent_id: str) -> bool:
     _versions_store.pop(agent_id, None)
 
     _unregister_from_runtime(agent)
+
+    # 从 Redis 删除持久化数据
+    _schedule_delete_persist(agent_id)
 
     logger.info("自定义 Agent 已删除: id=%s", agent_id)
     return True
@@ -1092,6 +1250,22 @@ def compare_versions(agent_id: str, version_a: int, version_b: int) -> dict[str,
 # ==================== 技能组合创建 Agent ====================
 
 
+def _resolve_mcp_server(tool_name: str) -> str | None:
+    """将工具名解析为对应的 MCP 服务名
+
+    委托给 mcp_integration.resolve_mcp_server 统一处理，
+    保持本地函数接口兼容。
+
+    Args:
+        tool_name: 工具名称，如 send_email 或 email:send
+
+    Returns:
+        MCP 服务名，未匹配时返回 None
+    """
+    from agent.core.mcp_integration import resolve_mcp_server
+    return resolve_mcp_server(tool_name)
+
+
 async def create_agent_from_skills(
     agent_name: str,
     skill_ids: list[str],
@@ -1126,7 +1300,7 @@ async def create_agent_from_skills(
     from autogen_agentchat.agents import AssistantAgent
     from agent.core.model_client import get_model_client
     from agent.core.mcp_integration import load_mcp_tools
-    from agent.agents.domain import BUILTIN_SKILLS
+    from agent.agents.skill_defs import BUILTIN_SKILLS
 
     # 收集技能配置
     skills = []
@@ -1165,12 +1339,14 @@ async def create_agent_from_skills(
     system_prompt = "\n".join(prompt_parts)
 
     # 合并工具列表（去重）
+    # 根据 required_tools 中的工具名，映射到对应的 MCP 服务名
+    # 映射规则：先查 TOOL_TO_MCP_SERVER_MAP 精确匹配，再按前缀模糊匹配
     all_mcp_servers: list[str] = []
     for skill in skills:
         for tool_name in skill.required_tools:
-            resource_prefix = tool_name.split(":")[0] if ":" in tool_name else tool_name
-            if resource_prefix not in all_mcp_servers:
-                all_mcp_servers.append(resource_prefix)
+            server_name = _resolve_mcp_server(tool_name)
+            if server_name and server_name not in all_mcp_servers:
+                all_mcp_servers.append(server_name)
 
     # 加载工具
     tools = await load_mcp_tools(all_mcp_servers)
@@ -1186,7 +1362,8 @@ async def create_agent_from_skills(
     )
 
     # 注册到运行时
-    from agent.agents.domain import AGENT_PROMPTS, AGENT_CREATORS, AGENT_SKILL_BINDINGS
+    from agent.agents.domain import AGENT_PROMPTS, AGENT_CREATORS
+    from agent.agents.skill_defs import AGENT_SKILL_BINDINGS
 
     AGENT_PROMPTS[agent_name] = system_prompt
     AGENT_SKILL_BINDINGS[agent_name] = skill_ids

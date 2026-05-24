@@ -132,12 +132,41 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("多租户管理器初始化失败（非致命）: %s", e)
 
+    # 从 Redis 恢复持久化的自定义 Agent 配置和技能绑定关系（必须在注册之前）
+    try:
+        from agent.agents.agent_builder import restore_agents_from_redis
+        restored_agents = await restore_agents_from_redis()
+        if restored_agents > 0:
+            logger.info("从 Redis 恢复了 %d 个自定义 Agent", restored_agents)
+    except Exception as e:
+        logger.warning("自定义 Agent 恢复失败（非致命）: %s", e)
+
+    try:
+        from agent.core.skill_adapter import SkillRegistry
+        registry = SkillRegistry.get_instance()
+        restored_bindings = await registry.restore_bindings_from_redis()
+        if restored_bindings > 0:
+            logger.info("从 Redis 恢复了 %d 个技能绑定关系", restored_bindings)
+    except Exception as e:
+        logger.warning("技能绑定关系恢复失败（非致命）: %s", e)
+
+    # 恢复完成后再注册所有已发布的自定义 Agent 到运行时
     try:
         from agent.agents.agent_builder import register_all_published_agents
         register_all_published_agents()
         logger.info("自定义 Agent 运行时注册完成")
     except Exception as e:
         logger.warning("自定义 Agent 注册失败（非致命）: %s", e)
+
+    # 启动时检测内置技能的工具可用性
+    try:
+        from agent.core.skill_adapter import SkillRegistry
+        registry = SkillRegistry.get_instance()
+        unavailable = await registry.check_builtin_skills_tool_availability()
+        if unavailable:
+            logger.warning("内置技能工具可用性检测: %d 个技能存在不可用工具", len(unavailable))
+    except Exception as e:
+        logger.warning("内置技能工具可用性检测失败（非致命）: %s", e)
 
     try:
         await check_ida_compatibility()

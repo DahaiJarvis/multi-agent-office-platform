@@ -40,6 +40,7 @@ class CreateAgentRequest(BaseModel):
     description: str = Field(default="", max_length=512)
     system_prompt: str = Field(min_length=10, max_length=8192)
     mcp_servers: list[str] = Field(default_factory=list)
+    builtin_skill_ids: list[str] = Field(default_factory=list, description="绑定的内置技能 ID 列表")
     model_tier: ModelTier = Field(default=ModelTier.PLUS)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_rounds: int = Field(default=10, ge=1, le=50)
@@ -56,6 +57,7 @@ class UpdateAgentRequest(BaseModel):
     description: str | None = None
     system_prompt: str | None = None
     mcp_servers: list[str] | None = None
+    builtin_skill_ids: list[str] | None = None
     model_tier: ModelTier | None = None
     temperature: float | None = None
     max_rounds: int | None = None
@@ -84,6 +86,7 @@ class AgentResponse(BaseModel):
     status: str
     system_prompt: str
     mcp_servers: list[str]
+    builtin_skill_ids: list[str]
     model_tier: str
     temperature: float
     max_rounds: int
@@ -129,6 +132,7 @@ def _to_response(config: CustomAgentConfig) -> AgentResponse:
         status=config.status.value,
         system_prompt=config.system_prompt,
         mcp_servers=config.mcp_servers,
+        builtin_skill_ids=config.builtin_skill_ids,
         model_tier=config.model_tier.value,
         temperature=config.temperature,
         max_rounds=config.max_rounds,
@@ -157,6 +161,7 @@ async def api_create_agent(request: Request, body: CreateAgentRequest) -> AgentR
         description=body.description,
         system_prompt=body.system_prompt,
         mcp_servers=body.mcp_servers,
+        builtin_skill_ids=body.builtin_skill_ids,
         model_tier=body.model_tier,
         temperature=body.temperature,
         max_rounds=body.max_rounds,
@@ -276,6 +281,24 @@ async def api_rollback_agent(request: Request, agent_id: str, version: int) -> A
     if not result:
         raise AppException(ErrorCode.NOT_FOUND, message=f"Agent 或版本不存在: {agent_id} v{version}")
     return _to_response(result)
+
+
+@router.get("/builtin-skills", summary="获取可用内置技能列表")
+async def api_list_builtin_skills(request: Request) -> list[dict]:
+    """获取系统内置技能列表，供 Agent Builder 选择绑定"""
+    from agent.agents.skill_defs import BUILTIN_SKILLS
+
+    skills = []
+    for skill_id, skill in BUILTIN_SKILLS.items():
+        skills.append({
+            "skill_id": skill.skill_id,
+            "name": skill.name,
+            "description": skill.description,
+            "category": skill.category,
+            "required_tools": skill.required_tools,
+            "priority": skill.priority,
+        })
+    return skills
 
 
 @router.get("/templates", response_model=list[TemplateResponse], summary="列出Agent模板")

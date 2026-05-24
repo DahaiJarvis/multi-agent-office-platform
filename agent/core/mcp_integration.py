@@ -103,6 +103,56 @@ MCP_SERVER_REGISTRY: dict[str, MCPServerConfig] = {
     ),
 }
 
+# MCP 工具名到服务名的映射表
+# 用于将 BUILTIN_SKILLS 的 required_tools（实际 MCP 工具名）
+# 解析为对应的 MCP 服务名，以便加载该服务的全部工具
+# 新增 MCP 服务时，需在此表补充其工具名到服务名的映射
+TOOL_TO_MCP_SERVER_MAP: dict[str, str] = {
+    "send_email": "email",
+    "search_emails": "email",
+    "query_approval_status": "oa",
+    "submit_approval": "oa",
+    "approve_request": "approval",
+    "reject_request": "approval",
+    "query_schedule": "calendar",
+    "query_customer": "crm",
+    "query_customer_orders": "crm",
+    "query_employee_info": "hr",
+    "query_leave_balance": "hr",
+    "query_financial_report": "finance",
+    "query_payment_status": "finance",
+    "search_knowledge": "knowledge",
+    "web_search": "web_search",
+    "search_documents": "doc",
+    "send_message": "im",
+}
+
+
+def resolve_mcp_server(tool_name: str) -> str | None:
+    """将工具名解析为对应的 MCP 服务名
+
+    解析优先级：
+      1. 精确匹配 TOOL_TO_MCP_SERVER_MAP
+      2. 兼容旧格式 service:action（如 email:send -> email）
+      3. 按前缀模糊匹配 MCP_SERVER_REGISTRY 中的服务名
+
+    Args:
+        tool_name: 工具名称，如 send_email 或 email:send
+
+    Returns:
+        MCP 服务名，未匹配时返回 None
+    """
+    if tool_name in TOOL_TO_MCP_SERVER_MAP:
+        return TOOL_TO_MCP_SERVER_MAP[tool_name]
+
+    if ":" in tool_name:
+        server_name = tool_name.split(":")[0]
+        if server_name in MCP_SERVER_REGISTRY:
+            return server_name
+
+    return None
+
+
 # Agent 与 MCP 服务的工具绑定关系
 AGENT_TOOL_BINDINGS: dict[str, list[str]] = {
     "OfficeAssistant": ["oa", "email", "calendar", "im", "doc"],
@@ -122,6 +172,41 @@ _tool_cache: dict[str, list[Any]] = {}
 _cache_expiry: dict[str, float] = {}
 _CACHE_TTL_SECONDS = 60
 _adapter_cache: dict[str, list[Any]] = {}
+
+# 工具名到服务名的反向索引
+# 当 _tool_cache 更新时自动重建，供冲突检测和服务发现 O(1) 查找
+_tool_name_index: dict[str, str] = {}
+
+
+def rebuild_tool_name_index() -> None:
+    """根据 _tool_cache 重建工具名到服务名的反向索引
+
+    在 MCP 工具加载成功后调用，将每个工具名映射到其所属服务名。
+    后续冲突检测和服务发现可直接查索引，无需遍历全部工具。
+    """
+    global _tool_name_index
+    _tool_name_index = {}
+    for server_name, tools in _tool_cache.items():
+        for tool in tools:
+            tool_name = getattr(tool, "name", None) or getattr(tool, "_func_name", None)
+            if tool_name:
+                _tool_name_index[tool_name] = server_name
+
+
+def get_tool_server_name(tool_name: str) -> str | None:
+    """通过反向索引获取工具所属的 MCP 服务名
+
+    优先查反向索引（O(1)），未命中时回退到 TOOL_TO_MCP_SERVER_MAP。
+
+    Args:
+        tool_name: 工具名称
+
+    Returns:
+        MCP 服务名，未找到时返回 None
+    """
+    if tool_name in _tool_name_index:
+        return _tool_name_index[tool_name]
+    return TOOL_TO_MCP_SERVER_MAP.get(tool_name)
 
 # Registry 同步状态
 _registry_synced: bool = False
@@ -297,6 +382,9 @@ async def load_mcp_tools(server_names: list[str]) -> list[Any]:
             logger.error("加载 MCP 服务 %s 失败: %s", name, e)
             _tool_cache[name] = []
             _cache_expiry[name] = time.time() + _CACHE_TTL_SECONDS
+
+    # 工具缓存有更新时重建反向索引
+    rebuild_tool_name_index()
 
     return all_tools
 
@@ -687,13 +775,29 @@ async def load_agent_tools(agent_name: str) -> list[Any]:
     当 MCP 服务不可用时，自动降级为 mock 工具，返回模拟数据。
     mock 工具的 schema 与真实 MCP 工具一致，确保 Agent 能正常调用。
 
+    同时加载 Skill suggested-tools 声明的额外 MCP 服务工具，
+    实现技能驱动的工具自动发现与加载。
+
     Args:
         agent_name: Agent 名称，如 "EmailAgent"
 
     Returns:
         AutoGen Function Tool 列表
     """
-    bound_servers = AGENT_TOOL_BINDINGS.get(agent_name, [])
+    bound_servers = list(AGENT_TOOL_BINDINGS.get(agent_name, []))
+
+    # 从 Skill 的 suggested-tools 中提取额外的 MCP 服务
+    skill_servers = _get_skill_suggested_servers(agent_name)
+    for server in skill_servers:
+        if server not in bound_servers:
+            bound_servers.append(server)
+
+    if skill_servers:
+        logger.info(
+            "Agent %s 通过 Skill suggested-tools 追加了 %d 个 MCP 服务: %s",
+            agent_name, len(skill_servers), ", ".join(skill_servers),
+        )
+
     tools = await load_mcp_tools(bound_servers)
 
     if not tools and bound_servers:
@@ -707,6 +811,58 @@ async def load_agent_tools(agent_name: str) -> list[Any]:
         return mock_tools
 
     return tools
+
+
+def _get_skill_suggested_servers(agent_name: str) -> list[str]:
+    """从 Agent 绑定的 Skill 中提取 suggested-tools 声明的 MCP 服务
+
+    遍历 Agent 绑定的 SKILL.md 技能，收集其 manifest.suggested_tools
+    中声明的工具名，然后通过 resolve_mcp_server 解析所属服务。
+    优先使用 TOOL_TO_MCP_SERVER_MAP 精确映射，回退到 _tool_cache 反查。
+
+    Args:
+        agent_name: Agent 名称
+
+    Returns:
+        MCP 服务名称列表（去重）
+    """
+    try:
+        from agent.core.skill_adapter import SkillRegistry
+        registry = SkillRegistry.get_instance()
+        skills = registry.get_agent_skills(agent_name)
+    except Exception:
+        return []
+
+    suggested_tool_names: set[str] = set()
+    for skill in skills:
+        if skill.manifest.suggested_tools:
+            suggested_tool_names.update(skill.manifest.suggested_tools)
+
+    if not suggested_tool_names:
+        return []
+
+    already_bound = set(AGENT_TOOL_BINDINGS.get(agent_name, []))
+    servers: list[str] = []
+
+    # 优先使用 TOOL_TO_MCP_SERVER_MAP 精确映射
+    for tool_name in suggested_tool_names:
+        server_name = resolve_mcp_server(tool_name)
+        if server_name and server_name not in already_bound and server_name not in servers:
+            servers.append(server_name)
+
+    # 回退：从 _tool_cache 反查未映射的工具
+    remaining = suggested_tool_names - set(TOOL_TO_MCP_SERVER_MAP.keys())
+    if remaining:
+        for server_name, cached_tools in _tool_cache.items():
+            if server_name in already_bound or server_name in servers:
+                continue
+            for tool in cached_tools:
+                tool_fn_name = getattr(tool, "name", None) or getattr(tool, "_func_name", None)
+                if tool_fn_name in remaining:
+                    servers.append(server_name)
+                    break
+
+    return servers
 
 
 async def close_all_connections() -> None:

@@ -27,23 +27,29 @@ logger = logging.getLogger(__name__)
 
 
 AGENT_NATIVE_TOOL_BINDINGS: dict[str, list[str]] = {
-    "EmailAgent": ["native_session_history", "native_text_format"],
-    "ApprovalAgent": ["native_session_history"],
-    "CalendarAgent": ["native_session_history", "native_current_time", "native_date_calculate"],
-    "CRMAgent": ["native_session_history", "native_data_query", "native_data_visualize"],
-    "HRAgent": ["native_session_history", "native_data_query"],
-    "FinanceAgent": ["native_session_history", "native_data_query", "native_data_visualize", "native_data_export"],
+    "EmailAgent": ["native_session_history", "native_text_format", "native_session_summary"],
+    "ApprovalAgent": ["native_session_history", "native_session_summary"],
+    "CalendarAgent": ["native_session_history", "native_current_time", "native_date_calculate", "native_session_summary"],
+    "CRMAgent": ["native_session_history", "native_data_query", "native_data_visualize", "native_session_summary"],
+    "HRAgent": ["native_session_history", "native_data_query", "native_session_summary"],
+    "FinanceAgent": ["native_session_history", "native_data_query", "native_data_visualize", "native_data_export", "native_report_export", "native_session_summary"],
     "KnowledgeAgent": [
         "native_session_history", "native_document_parse", "native_document_summarize",
-        "native_document_compare", "native_search_all", "native_rag_search", "native_rag_qa",
-        "native_report_generate", "native_image_analyze", "native_skill_load", "native_skill_unload",
-        "native_skill_list",
+        "native_document_compare", "native_search_all", "native_search_documents",
+        "native_search_knowledge", "native_rag_search", "native_rag_qa",
+        "native_report_generate", "native_report_export", "native_image_analyze",
+        "native_image_ocr", "native_text_extract",
+        "native_skill_load", "native_skill_unload", "native_skill_list",
+        "native_session_summary",
     ],
     "OfficeAssistant": [
         "native_session_history", "native_search_all", "native_current_time",
-        "native_text_format", "native_skill_load", "native_skill_unload", "native_skill_list",
+        "native_date_calculate", "native_text_format", "native_text_extract",
+        "native_text_translate",
+        "native_skill_load", "native_skill_unload", "native_skill_list",
+        "native_session_summary",
     ],
-    "Reviewer": ["native_session_history", "native_data_query"],
+    "Reviewer": ["native_session_history", "native_data_query", "native_session_summary"],
 }
 
 
