@@ -27,7 +27,7 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from agent.core.config import get_settings
+from agent.core.infrastructure.config import get_settings
 
 logger = logging.getLogger(__name__)
 

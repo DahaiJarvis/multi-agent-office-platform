@@ -480,7 +480,7 @@ async def _check_resource_conflict(
         }
 
     try:
-        from agent.core.distributed_lock import extract_resource_key, DistributedLock
+        from agent.core.infrastructure.distributed_lock import extract_resource_key, DistributedLock
 
         resource_key_mapping = _get_tool_resource_key_mapping()
         lock_key = extract_resource_key(tool_name, tool_input, resource_key_mapping)
@@ -541,7 +541,7 @@ def _get_tool_resource_key_mapping() -> dict[str, str]:
         映射字典，key 为 "资源:操作"，value 为参数名
     """
     try:
-        from agent.core.config import get_settings
+        from agent.core.infrastructure.config import get_settings
         settings = get_settings()
         return getattr(settings, "tool_resource_key_mapping", {})
     except Exception:
@@ -561,7 +561,7 @@ def _check_tool_whitelist(tool_name: str) -> dict[str, Any]:
     Returns:
         包含 passed、reason、check_entry 的字典
     """
-    from agent.core.mcp_integration import MCP_SERVER_REGISTRY
+    from agent.core.mcp.mcp_integration import MCP_SERVER_REGISTRY
 
     # 提取资源前缀（如 "approval:approve" -> "approval"）
     resource_prefix = tool_name.split(":")[0] if ":" in tool_name else tool_name
@@ -682,14 +682,14 @@ async def _check_tool_quota(tool_name: str) -> dict[str, Any]:
     import time
 
     try:
-        from agent.core.config import get_settings
+        from agent.core.infrastructure.config import get_settings
         settings = get_settings()
         quota = settings.tool_daily_quota
     except Exception:
         quota = 1000
 
     try:
-        from agent.core.redis_manager import get_redis_client
+        from agent.core.infrastructure.redis_manager import get_redis_client
 
         redis = await get_redis_client()
         if redis is None:
@@ -894,13 +894,13 @@ async def _create_approval_for_sensitive_action(
         审批单ID，创建失败时返回 None
     """
     try:
-        from agent.core.approval_flow import get_approval_flow_manager
+        from agent.core.workflow.approval_flow import get_approval_flow_manager
 
         # 获取当前上下文信息
         session_id = ""
         user_id = ""
         try:
-            from agent.core.session_manager import get_session_manager
+            from agent.core.session.session_manager import get_session_manager
             mgr = await get_session_manager()
             # 尝试从上下文获取 session_id 和 user_id
             try:

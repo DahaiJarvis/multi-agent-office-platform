@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from agent.core.plugin_system import (
+from agent.core.infrastructure.plugin_system import (
     register_plugin,
     unregister_plugin,
     enable_plugin,

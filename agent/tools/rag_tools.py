@@ -50,7 +50,7 @@ async def _rag_search(query: str, top_k: int = 5) -> str:
         return json.dumps({"error": "检索查询不能为空", "documents": []}, ensure_ascii=False)
 
     try:
-        from agent.core.rag_enhanced import enhance_rag
+        from agent.core.data.rag_enhanced import enhance_rag
 
         result = await enhance_rag(
             query=query.strip(),
@@ -98,7 +98,7 @@ async def _rag_qa(query: str, top_k: int = 5) -> str:
         return json.dumps({"error": "问答查询不能为空", "answer": "", "sources": []}, ensure_ascii=False)
 
     try:
-        from agent.core.rag_enhanced import enhance_rag
+        from agent.core.data.rag_enhanced import enhance_rag
 
         result = await enhance_rag(
             query=query.strip(),
@@ -116,7 +116,7 @@ async def _rag_qa(query: str, top_k: int = 5) -> str:
             })
 
         if documents and result.relevance_score >= 0.3:
-            from agent.core.model_client import get_lightweight_client
+            from agent.core.model.model_client import get_lightweight_client
             from autogen_core.models import UserMessage
 
             client = get_lightweight_client()

@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
-from agent.core.config import get_settings
+from agent.core.infrastructure.config import get_settings
 
 logger = logging.getLogger(__name__)
 

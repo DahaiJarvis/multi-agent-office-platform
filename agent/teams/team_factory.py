@@ -40,8 +40,11 @@
 |---------|-------------------|-----------|
 | approval_query | DIRECT | ApprovalAgent |
 | email_send | SELECTOR | EmailAgent + Reviewer |
-| cross_system | SWARM | 高级编排 PARALLEL |
-| complex_task | SWARM | 高级编排 DEBATE/VOTE |
+| cross_system | SWARM | Swarm（顺序编排） |
+| complex_task | SWARM | Swarm（顺序编排） |
+
+注：PARALLEL/DEBATE/VOTE 高级编排模式仅在 IntentResult 显式指定
+orchestration_mode 时触发，不再由意图标签自动决定。
 
 ================================================================================
 与其他模块的关系
@@ -95,8 +98,8 @@ from agent.agents.supervisor import (
 )
 from agent.agents.domain import create_domain_agent, AGENT_PROMPTS
 from agent.agents.reviewer import create_reviewer_agent, REVIEWER_SYSTEM_PROMPT
-from agent.core.model_client import get_supervisor_client, get_domain_agent_client, get_reviewer_client
-from agent.core.mcp_integration import load_agent_tools
+from agent.core.model.model_client import get_supervisor_client, get_domain_agent_client, get_reviewer_client
+from agent.core.mcp.mcp_integration import load_agent_tools
 
 logger = logging.getLogger(__name__)
 
@@ -168,10 +171,11 @@ async def create_team(intent: IntentResult) -> Any:
         # team 是 SelectorGroupChat 实例
     """
     # 高级编排模式判断
-    # cross_system 和 complex_task 使用高级编排（PARALLEL/DEBATE/VOTE）
-    if intent.intent in ("cross_system", "complex_task"):
+    # 仅在 IntentResult 显式指定 orchestration_mode 时使用高级编排
+    orchestration_mode = getattr(intent, "orchestration_mode", None)
+    if orchestration_mode in ("parallel", "debate", "vote"):
         from agent.teams.advanced_orchestration import create_advanced_team
-        return await create_advanced_team(intent)
+        return await create_advanced_team(intent, mode=orchestration_mode)
 
     mode = intent.collaboration_mode
     max_rounds = MAX_ROUNDS[mode]

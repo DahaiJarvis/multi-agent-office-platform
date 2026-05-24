@@ -73,7 +73,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 
-from agent.core.config import get_settings
+from agent.core.infrastructure.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -272,7 +272,7 @@ class ExecutionController:
         # 熔断器检查
         # 如果熔断器处于 OPEN 状态，直接拒绝请求
         try:
-            from agent.core.circuit_breaker import get_circuit_breaker, CircuitOpenError
+            from agent.core.infrastructure.circuit_breaker import get_circuit_breaker, CircuitOpenError
             if agent_name:
                 cb = get_circuit_breaker(f"agent_{agent_name}")
                 if cb.state.value == "open":
@@ -510,7 +510,7 @@ class ExecutionController:
         if not agent_name:
             return
         try:
-            from agent.core.circuit_breaker import get_circuit_breaker
+            from agent.core.infrastructure.circuit_breaker import get_circuit_breaker
             cb = get_circuit_breaker(f"agent_{agent_name}")
             await cb.record_success()
         except Exception:
@@ -528,7 +528,7 @@ class ExecutionController:
         if not agent_name:
             return
         try:
-            from agent.core.circuit_breaker import get_circuit_breaker
+            from agent.core.infrastructure.circuit_breaker import get_circuit_breaker
             cb = get_circuit_breaker(f"agent_{agent_name}")
             await cb.record_failure()
         except Exception:
@@ -554,7 +554,7 @@ class ExecutionController:
             if prompt_tokens == 0 and completion_tokens == 0:
                 return
 
-            from agent.core.token_budget import get_token_budget_manager
+            from agent.core.model.token_budget import get_token_budget_manager
             manager = get_token_budget_manager()
             await manager.record_usage(
                 user_id="system",
@@ -650,8 +650,8 @@ class ExecutionController:
             失败时返回 None
         """
         try:
-            from agent.core.session_manager import get_session_manager
-            from agent.core.context_manager import compact_messages
+            from agent.core.session.session_manager import get_session_manager
+            from agent.core.session.context_manager import compact_messages
 
             session_mgr = await get_session_manager()
             session = await session_mgr.get_session(session_id)

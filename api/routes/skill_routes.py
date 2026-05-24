@@ -13,7 +13,7 @@ import logging
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
-from agent.core.skill_adapter import SkillRegistry, SkillParseError, SkillValidationError
+from agent.core.skill.skill_adapter import SkillRegistry, SkillParseError, SkillValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -459,7 +459,7 @@ async def api_install_from_marketplace(
 
     安装前会检查依赖是否满足，必需依赖不满足时返回错误信息。
     """
-    from agent.core.skill_adapter import SkillDependencyError
+    from agent.core.skill.skill_adapter import SkillDependencyError
 
     registry = SkillRegistry.get_instance()
     try:
@@ -500,7 +500,7 @@ async def api_rate_skill(skill_name: str, body: RateSkillRequest) -> dict:
 @router.get("/{skill_name}/resolve", summary="解析技能依赖")
 async def api_resolve_dependencies(skill_name: str) -> dict:
     """解析技能的依赖关系，检查所有依赖是否满足"""
-    from agent.core.skill_resolver import resolve_dependencies
+    from agent.core.skill.skill_resolver import resolve_dependencies
     result = await resolve_dependencies(skill_name)
     return result.model_dump()
 

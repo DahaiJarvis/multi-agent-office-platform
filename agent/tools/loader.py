@@ -115,7 +115,7 @@ async def _load_mcp_tools(agent_name: str) -> list[Any]:
         FunctionTool 列表
     """
     try:
-        from agent.core.mcp_integration import load_agent_tools
+        from agent.core.mcp.mcp_integration import load_agent_tools
         return await load_agent_tools(agent_name)
     except Exception as e:
         logger.warning("Agent %s MCP 工具加载失败: %s", agent_name, e)
@@ -216,7 +216,7 @@ async def get_available_tool_names(agent_name: str) -> set[str]:
 
     # MCP 工具
     try:
-        from agent.core.mcp_integration import _tool_cache, AGENT_TOOL_BINDINGS
+        from agent.core.mcp.mcp_integration import _tool_cache, AGENT_TOOL_BINDINGS
         bound_servers = AGENT_TOOL_BINDINGS.get(agent_name, [])
         for server_name in bound_servers:
             server_tools = _tool_cache.get(server_name, [])

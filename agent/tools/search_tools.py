@@ -52,7 +52,7 @@ async def _search_all(query: str, sources: list[str] | None = None, limit: int =
         return json.dumps({"error": "搜索关键词不能为空", "hits": []}, ensure_ascii=False)
 
     try:
-        from agent.core.search_engine import SearchRequest, DataSource, enterprise_search
+        from agent.core.data.search_engine import SearchRequest, DataSource, enterprise_search
 
         data_sources = [DataSource.ALL]
         if sources:
@@ -114,7 +114,7 @@ async def _search_documents(query: str, limit: int = 10) -> str:
         return json.dumps({"error": "搜索关键词不能为空", "hits": []}, ensure_ascii=False)
 
     try:
-        from agent.core.search_engine import SearchRequest, DataSource, enterprise_search
+        from agent.core.data.search_engine import SearchRequest, DataSource, enterprise_search
 
         request = SearchRequest(
             query=query.strip(),
@@ -162,7 +162,7 @@ async def _search_knowledge(query: str, limit: int = 10) -> str:
         return json.dumps({"error": "搜索关键词不能为空", "hits": []}, ensure_ascii=False)
 
     try:
-        from agent.core.search_engine import SearchRequest, DataSource, enterprise_search
+        from agent.core.data.search_engine import SearchRequest, DataSource, enterprise_search
 
         request = SearchRequest(
             query=query.strip(),

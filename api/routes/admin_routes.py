@@ -17,8 +17,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from api.models.response import HealthResponse
-from agent.core.config import get_settings
-from agent.core.mcp_integration import MCP_SERVER_REGISTRY
+from agent.core.infrastructure.config import get_settings
+from agent.core.mcp.mcp_integration import MCP_SERVER_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ async def list_users(limit: int = 50, offset: int = 0) -> dict:
 @router.get("/token/usage/{user_id}", summary="查询用户Token用量")
 async def get_user_token_usage(user_id: str) -> dict:
     """查询用户当日 Token 用量"""
-    from agent.core.token_budget import get_token_budget_manager
+    from agent.core.model.token_budget import get_token_budget_manager
 
     budget_mgr = get_token_budget_manager()
     return await budget_mgr.get_user_daily_usage(user_id)
@@ -241,7 +241,7 @@ async def get_user_token_usage(user_id: str) -> dict:
 @router.get("/token/budget/{user_id}", summary="查询用户Token预算")
 async def check_token_budget(user_id: str, session_id: str = "") -> dict:
     """检查用户 Token 预算"""
-    from agent.core.token_budget import get_token_budget_manager
+    from agent.core.model.token_budget import get_token_budget_manager
 
     budget_mgr = get_token_budget_manager()
     return await budget_mgr.check_budget(user_id, session_id or "default")
@@ -258,7 +258,7 @@ async def query_audit_logs(
     offset: int = 0,
 ) -> list[dict]:
     """查询审计日志"""
-    from agent.core.audit import get_audit_logger
+    from agent.core.observability.audit import get_audit_logger
 
     audit = get_audit_logger()
     return await audit.query_logs(
@@ -273,7 +273,7 @@ async def query_audit_logs(
 @router.post("/audit/flush", summary="手动刷新审计日志缓冲区")
 async def flush_audit_buffer() -> dict:
     """手动刷新审计日志缓冲区，将 Redis 中的日志持久化到 PostgreSQL"""
-    from agent.core.audit import get_audit_logger
+    from agent.core.observability.audit import get_audit_logger
 
     audit = get_audit_logger()
     count = await audit.flush_buffer()
@@ -291,7 +291,7 @@ async def get_cost_report(date: str = "") -> dict:
     Args:
         date: 日期（格式 YYYY-MM-DD，默认今天）
     """
-    from agent.core.token_budget import get_token_budget_manager
+    from agent.core.model.token_budget import get_token_budget_manager
 
     budget_mgr = get_token_budget_manager()
     return await budget_mgr.get_cost_report(date)
@@ -300,7 +300,7 @@ async def get_cost_report(date: str = "") -> dict:
 @router.get("/cost/tenant/{tenant_id}", summary="查询租户成本")
 async def get_tenant_cost(tenant_id: str) -> dict:
     """获取租户当日成本统计"""
-    from agent.core.token_budget import get_token_budget_manager
+    from agent.core.model.token_budget import get_token_budget_manager
 
     budget_mgr = get_token_budget_manager()
     return await budget_mgr.get_tenant_daily_usage(tenant_id)
@@ -309,7 +309,7 @@ async def get_tenant_cost(tenant_id: str) -> dict:
 @router.get("/cost/agent/{agent_name}", summary="查询Agent成本")
 async def get_agent_cost(agent_name: str) -> dict:
     """获取 Agent 当日成本统计"""
-    from agent.core.token_budget import get_token_budget_manager
+    from agent.core.model.token_budget import get_token_budget_manager
 
     budget_mgr = get_token_budget_manager()
     return await budget_mgr.get_agent_daily_usage(agent_name)
@@ -320,7 +320,7 @@ async def get_agent_cost(agent_name: str) -> dict:
 @router.get("/sla/definitions", summary="获取SLA定义")
 async def list_sla_with_budget() -> dict:
     """列出所有 SLA 层级及其预算额度"""
-    from agent.core.sla import list_sla_definitions
+    from agent.core.observability.sla import list_sla_definitions
 
     definitions = list_sla_definitions()
     return {
@@ -351,7 +351,7 @@ async def get_sla_budget(tier: str) -> dict:
     Args:
         tier: SLA 层级 (standard/professional/enterprise)
     """
-    from agent.core.sla import SLATier, get_budget_for_tier
+    from agent.core.observability.sla import SLATier, get_budget_for_tier
 
     try:
         sla_tier = SLATier(tier)

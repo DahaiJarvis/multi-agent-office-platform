@@ -46,7 +46,7 @@ async def _image_analyze(image_url: str, question: str = "") -> str:
         return json.dumps({"error": "图片 URL 不能为空", "description": ""}, ensure_ascii=False)
 
     try:
-        from agent.core.multimodal import analyze_image
+        from agent.core.common.multimodal import analyze_image
 
         prompt = question.strip() if question and question.strip() else "请详细描述这张图片的内容"
         result = await analyze_image(
@@ -91,7 +91,7 @@ async def _image_ocr(image_url: str, language: str = "zh") -> str:
         return json.dumps({"error": "图片 URL 不能为空", "text": ""}, ensure_ascii=False)
 
     try:
-        from agent.core.multimodal import analyze_image
+        from agent.core.common.multimodal import analyze_image
 
         language_instructions = {
             "zh": "请识别并提取图片中的所有中文文字内容，按原文顺序输出",

@@ -53,7 +53,7 @@ async def _data_query(query: str, data_source: str = "default") -> str:
         return json.dumps({"error": "查询语句不能为空", "columns": [], "rows": []}, ensure_ascii=False)
 
     try:
-        from agent.core.data_analysis import NLQueryRequest, analyze_data
+        from agent.core.data.data_analysis import NLQueryRequest, analyze_data
 
         request = NLQueryRequest(
             query=query.strip(),
@@ -104,7 +104,7 @@ async def _data_visualize(query: str, chart_type: str = "") -> str:
         return json.dumps({"error": "查询语句不能为空", "visualization": None}, ensure_ascii=False)
 
     try:
-        from agent.core.data_analysis import (
+        from agent.core.data.data_analysis import (
             NLQueryRequest,
             analyze_data,
             ChartType,
@@ -178,7 +178,7 @@ async def _data_export(query: str, format: str = "json", data_source: str = "def
         return json.dumps({"error": f"不支持的导出格式: {format}，仅允许 json 和 csv", "data": None}, ensure_ascii=False)
 
     try:
-        from agent.core.data_analysis import NLQueryRequest, analyze_data
+        from agent.core.data.data_analysis import NLQueryRequest, analyze_data
 
         request = NLQueryRequest(
             query=query.strip(),

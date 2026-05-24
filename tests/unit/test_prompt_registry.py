@@ -7,7 +7,7 @@ import pytest
 import tempfile
 import os
 
-from agent.core.prompt_registry import PromptRegistry, PromptEntry, PromptVersion
+from agent.core.prompt.prompt_registry import PromptRegistry, PromptEntry, PromptVersion
 
 
 @pytest.fixture

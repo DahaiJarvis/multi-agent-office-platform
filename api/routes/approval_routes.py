@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from agent.core.approval_flow import get_approval_flow_manager, ApprovalStatus
+from agent.core.workflow.approval_flow import get_approval_flow_manager, ApprovalStatus
 
 logger = logging.getLogger(__name__)
 

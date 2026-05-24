@@ -211,7 +211,7 @@ async def get_intent_list() -> IntentListResponse:
     从 IntentClassifier.yaml 中加载结构化的意图标签列表，
     支持前端动态展示意图分类配置。
     """
-    from agent.core.prompt_registry import get_prompt_registry
+    from agent.core.prompt.prompt_registry import get_prompt_registry
 
     registry = get_prompt_registry()
     intents = registry.get_intents()
@@ -237,7 +237,7 @@ async def get_capability_cards() -> list[CapabilityCardResponse]:
     从 config/capabilities/ 目录加载 YAML 配置，
     返回每个 Agent 的能力声明和意图级路由配置。
     """
-    from agent.core.capability_card import get_capability_registry
+    from agent.core.skill.capability_card import get_capability_registry
 
     registry = get_capability_registry()
     cards = registry.list_all()
@@ -269,8 +269,8 @@ async def get_routing_table() -> RoutingTableResponse:
     基于 CapabilityRegistry 动态生成路由表，
     展示每个意图对应的 Agent、协作模式和审核要求。
     """
-    from agent.core.capability_card import get_capability_registry
-    from agent.core.prompt_registry import get_prompt_registry
+    from agent.core.skill.capability_card import get_capability_registry
+    from agent.core.prompt.prompt_registry import get_prompt_registry
 
     cap_registry = get_capability_registry()
     prompt_registry = get_prompt_registry()

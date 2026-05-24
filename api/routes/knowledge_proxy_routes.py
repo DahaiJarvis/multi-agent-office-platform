@@ -35,7 +35,7 @@ import jwt
 from fastapi import APIRouter, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
-from agent.core.config import get_settings
+from agent.core.infrastructure.config import get_settings
 from api.errors import AppException, ErrorCode
 from api.models.request import (
     CreateKnowledgeBaseRequest,

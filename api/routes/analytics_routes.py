@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query
 
-from agent.core.data_analysis import (
+from agent.core.data.data_analysis import (
     analyze_data,
     NLQueryRequest,
     AnalysisReport,

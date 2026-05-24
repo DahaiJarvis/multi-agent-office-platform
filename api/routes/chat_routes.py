@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from api.errors import AppException, ErrorCode
 from api.models.request import ChatRequest
 from api.models.response import ChatResponse
-from agent.core.session_manager import get_session_manager
+from agent.core.session.session_manager import get_session_manager
 from agent.teams.routing import route_and_execute, route_and_execute_stream
 
 logger = logging.getLogger(__name__)
@@ -167,7 +167,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
             event_bus_gen: AsyncGenerator[str, None] | None = None
             try:
-                from agent.core.event_bus import subscribe_events, EventType
+                from agent.core.infrastructure.event_bus import subscribe_events, EventType
 
                 _event_types = [
                     EventType.TOOL_CALL,
@@ -219,6 +219,7 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                         full_message = event["message"]
 
                     elif event_type == "chunk":
+                        full_message += event["content"]
                         yield format_sse("chunk", event["content"])
                         final_agent = event.get("agent_name", final_agent)
 
@@ -287,12 +288,15 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                         final_agent = event.get("agent_name", final_agent)
                         final_intent = event.get("intent", "")
                         final_mode = event.get("mode", "")
+                        if event.get("full_message"):
+                            full_message = event["full_message"]
                         yield format_sse("agent_name", final_agent)
                         yield format_sse("intent", final_intent)
                         yield format_sse("collaboration_mode", final_mode)
                         yield format_sse("status", "paused")
 
                     elif event_type == "error":
+                        full_message += event["message"]
                         yield format_sse("error", event["message"])
                         yield format_sse("status", "error")
 
@@ -374,7 +378,7 @@ async def event_stream(session_id: str) -> StreamingResponse:
 
     async def _generate():
         try:
-            from agent.core.event_bus import subscribe_events, EventType
+            from agent.core.infrastructure.event_bus import subscribe_events, EventType
 
             event_types = [
                 EventType.AGENT_START,

@@ -38,7 +38,7 @@ async def _skill_load(skill_name: str) -> str:
         return json.dumps({"error": "Skill 名称不能为空", "instruction": ""}, ensure_ascii=False)
 
     try:
-        from agent.core.skill_adapter import SkillRegistry
+        from agent.core.skill.skill_adapter import SkillRegistry
 
         registry = SkillRegistry.get_instance()
         normalized_name = skill_name.strip().lower().replace("_", "-").replace(" ", "-")
@@ -89,7 +89,7 @@ async def _skill_unload(skill_name: str) -> str:
         return json.dumps({"error": "Skill 名称不能为空", "unloaded": False}, ensure_ascii=False)
 
     try:
-        from agent.core.skill_adapter import SkillRegistry
+        from agent.core.skill.skill_adapter import SkillRegistry
 
         registry = SkillRegistry.get_instance()
         normalized_name = skill_name.strip().lower().replace("_", "-").replace(" ", "-")
@@ -124,7 +124,7 @@ async def _skill_list() -> str:
         JSON 格式的 Skill 列表
     """
     try:
-        from agent.core.skill_adapter import SkillRegistry
+        from agent.core.skill.skill_adapter import SkillRegistry
 
         registry = SkillRegistry.get_instance()
         skills = registry.list_skills(enabled_only=True)
@@ -169,7 +169,7 @@ async def _skill_search(keyword: str) -> str:
         return json.dumps({"error": "搜索关键词不能为空", "skills": []}, ensure_ascii=False)
 
     try:
-        from agent.core.skill_adapter import SkillRegistry
+        from agent.core.skill.skill_adapter import SkillRegistry
 
         registry = SkillRegistry.get_instance()
         results = registry.search(keyword.strip())

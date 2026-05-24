@@ -9,7 +9,7 @@ import logging
 from fastapi import APIRouter, UploadFile, File, Form
 from fastapi.responses import Response
 
-from agent.core.multimodal import (
+from agent.core.common.multimodal import (
     analyze_image,
     speech_to_text,
     text_to_speech,

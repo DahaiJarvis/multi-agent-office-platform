@@ -12,7 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from agent.core.config import get_settings
+from agent.core.infrastructure.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ class DistributedRateLimitMiddleware(BaseHTTPMiddleware):
         """获取 Redis 客户端（使用统一连接管理器）"""
         if self._redis_client is None:
             try:
-                from agent.core.redis_manager import get_redis_client
+                from agent.core.infrastructure.redis_manager import get_redis_client
                 self._redis_client = await get_redis_client()
                 if self._redis_client:
                     await self._redis_client.ping()

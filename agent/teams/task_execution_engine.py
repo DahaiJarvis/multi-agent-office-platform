@@ -27,7 +27,7 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from agent.core.task_checkpoint import (
+from agent.core.workflow.task_checkpoint import (
     TaskExecution,
     TaskCheckpointStore,
     TaskStatus,
@@ -37,18 +37,18 @@ from agent.core.task_checkpoint import (
     FailurePolicy,
     get_task_checkpoint_store,
 )
-from agent.core.event_bus import publish_event, EventType
+from agent.core.infrastructure.event_bus import publish_event, EventType
 from agent.agents.supervisor import IntentResult, CollaborationMode
 from agent.agents.domain import create_domain_agent
 from agent.teams.team_factory import create_team
 from agent.teams.execution_controller import get_execution_controller
 from agent.teams.fault_isolation import FaultIsolationPolicy, get_fault_isolation_policy
-from agent.core.human_confirm import (
+from agent.core.workflow.human_confirm import (
     HumanConfirmManager,
     ConfirmType,
     get_human_confirm_manager,
 )
-from agent.core.session_manager import SessionState, get_session_manager
+from agent.core.session.session_manager import SessionState, get_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -554,6 +554,12 @@ class TaskExecutionEngine:
         "提交报销", "付款",
     ]
 
+    # 敏感操作正则模式，用于模糊匹配变体表达
+    SENSITIVE_ACTION_PATTERNS = [
+        r"发.{0,4}邮件",
+        r"提交.{0,4}审批",
+    ]
+
     # 子任务关键词到领域 Agent 的映射
     # 用于将子任务智能路由到对应的专业 Agent
     SUB_TASK_AGENT_MAP: dict[str, str] = {
@@ -608,9 +614,11 @@ class TaskExecutionEngine:
         根据协作模式生成不同的步骤列表：
           - DIRECT: 单步Agent调用
           - SELECTOR: Agent调用 + 审核
-          - SWARM + cross_system: PARALLEL并行编排
-          - SWARM + complex_task: DEBATE辩论编排
-          - SWARM + 其他: 多Agent调用 + 汇总
+          - SWARM: SEQUENTIAL顺序编排（基于sub_tasks按序执行）
+            - cross_system 和 complex_task 均使用顺序编排
+            - 跨系统操作有先后依赖（如查CRM→发邮件），必须按序执行
+            - 复杂多步任务按sub_tasks顺序执行
+          - PARALLEL/DEBATE/VOTE: 仅在显式指定orchestration_mode时触发
 
         对于包含敏感操作的步骤，会自动在操作前插入人工确认步骤。
 
@@ -659,22 +667,23 @@ class TaskExecutionEngine:
                 })
 
         elif intent.collaboration_mode == CollaborationMode.SWARM:
-            # cross_system 意图 -> PARALLEL 并行编排
-            if intent.intent == "cross_system":
+            orchestration_mode = getattr(intent, "orchestration_mode", None)
+            if orchestration_mode == "parallel":
                 steps = self._plan_parallel_steps(intent)
-            # complex_task 意图 -> DEBATE 辩论编排
-            elif intent.intent == "complex_task":
+            elif orchestration_mode == "debate":
                 steps = self._plan_debate_steps(intent)
-            # 其他 SWARM 意图 -> 原有的多步编排
+            elif orchestration_mode == "vote":
+                steps = self._plan_vote_steps(intent)
             else:
                 steps = self._plan_swarm_steps(intent)
 
         return steps
 
     def _plan_parallel_steps(self, intent: IntentResult) -> list[dict[str, Any]]:
-        """为 cross_system 意图规划 PARALLEL 并行编排步骤
+        """为显式指定 parallel 编排模式的意图规划并行步骤
 
         PARALLEL 模式：多个 Agent 并行执行同一任务，Aggregator 汇总结果。
+        适用于多维度并行收集信息且各维度无依赖关系的场景。
         步骤规划：
           1. 并行执行步骤（包含所有参与的 Agent）
           2. 结果汇总步骤
@@ -713,9 +722,10 @@ class TaskExecutionEngine:
         return steps
 
     def _plan_debate_steps(self, intent: IntentResult) -> list[dict[str, Any]]:
-        """为 complex_task 意图规划 DEBATE 辩论编排步骤
+        """为显式指定 debate 编排模式的意图规划辩论步骤
 
         DEBATE 模式：多个 Agent 从不同角度辩论，Judge 裁决。
+        适用于需要多角度深度推理和验证的决策问题。
         步骤规划：
           1. 各轮辩论步骤
           2. 裁判裁决步骤
@@ -754,6 +764,47 @@ class TaskExecutionEngine:
             "type": StepType.AGGREGATE.value,
             "name": "裁判裁决",
             "agent_name": "Judge",
+        })
+
+        return steps
+
+    def _plan_vote_steps(self, intent: IntentResult) -> list[dict[str, Any]]:
+        """为显式指定 vote 编排模式的意图规划投票步骤
+
+        VOTE 模式：多个 Agent 独立回答同一问题，多数决定最终结果。
+        步骤规划：
+          1. 投票执行步骤
+          2. 结果汇总步骤
+
+        Args:
+            intent: 意图分类结果
+
+        Returns:
+            步骤列表
+        """
+        agent_names = self._resolve_vote_agents(intent)
+        steps: list[dict[str, Any]] = []
+
+        if intent.review_required:
+            steps.append({
+                "type": StepType.HUMAN_CONFIRM.value,
+                "name": "确认投票执行",
+                "agent_name": "Voter",
+                "confirm_type": "sensitive_action",
+                "confirm_reason": f"即将启动投票模式（{', '.join(agent_names)}），请确认是否继续",
+            })
+
+        steps.append({
+            "type": StepType.VOTE_EXEC.value,
+            "name": f"投票表决（{', '.join(agent_names)}）",
+            "agent_name": "Voter",
+            "vote_agents": agent_names,
+        })
+
+        steps.append({
+            "type": StepType.AGGREGATE.value,
+            "name": "汇总投票结果",
+            "agent_name": "Voter",
         })
 
         return steps
@@ -864,8 +915,32 @@ class TaskExecutionEngine:
 
         return ["KnowledgeAgent", "OfficeAssistant"]
 
+    def _resolve_vote_agents(self, intent: IntentResult) -> list[str]:
+        """根据意图和子任务解析 VOTE 模式需要的 Agent 列表
+
+        投票需要至少三个独立判断的 Agent，多数决定提高准确率。
+
+        Args:
+            intent: 意图分类结果
+
+        Returns:
+            Agent 名称列表
+        """
+        if intent.sub_tasks:
+            agents = []
+            for sub_task in intent.sub_tasks:
+                agent = self._resolve_agent_for_sub_task(sub_task, "")
+                if agent and agent not in agents:
+                    agents.append(agent)
+            if len(agents) >= 2:
+                return agents[:4]
+
+        return ["KnowledgeAgent", "OfficeAssistant", "HRAgent"]
+
     def _is_sensitive_action(self, task_name: str) -> bool:
         """判断子任务是否包含敏感操作
+
+        先精确匹配关键词，再通过正则模式模糊匹配变体表达。
 
         Args:
             task_name: 子任务名称
@@ -873,8 +948,12 @@ class TaskExecutionEngine:
         Returns:
             是否为敏感操作
         """
+        import re
         for keyword in self.SENSITIVE_ACTION_KEYWORDS:
             if keyword in task_name:
+                return True
+        for pattern in self.SENSITIVE_ACTION_PATTERNS:
+            if re.search(pattern, task_name):
                 return True
         return False
 
@@ -901,7 +980,7 @@ class TaskExecutionEngine:
             - suggested_agents: list[str], 建议的替代Agent
         """
         try:
-            from agent.core.capability_card import get_capability_registry
+            from agent.core.skill.capability_card import get_capability_registry
             registry = get_capability_registry()
             return registry.check_agent_capability(agent_name, user_message)
         except Exception as e:
@@ -1978,7 +2057,7 @@ def get_task_execution_engine() -> TaskExecutionEngine:
     """
     global _task_execution_engine
     try:
-        from agent.core.app_context import get_app_context
+        from agent.core.session.app_context import get_app_context
         ctx = get_app_context()
         if ctx.initialized and ctx.get_task_execution_engine() is not None:
             return ctx.get_task_execution_engine()

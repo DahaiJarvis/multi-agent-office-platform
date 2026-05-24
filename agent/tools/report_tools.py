@@ -49,7 +49,7 @@ async def _report_generate(topic: str, data_query: str = "", report_type: str = 
         data_context = ""
         if data_query and data_query.strip():
             try:
-                from agent.core.data_analysis import NLQueryRequest, analyze_data
+                from agent.core.data.data_analysis import NLQueryRequest, analyze_data
 
                 request = NLQueryRequest(
                     query=data_query.strip(),
@@ -71,7 +71,7 @@ async def _report_generate(topic: str, data_query: str = "", report_type: str = 
                 logger.warning("报告数据查询失败: %s", e)
                 data_context = "\n\n## 数据支撑\n- 数据查询失败，报告基于通用知识生成\n"
 
-        from agent.core.model_client import get_lightweight_client
+        from agent.core.model.model_client import get_lightweight_client
         from autogen_core.models import UserMessage
 
         client = get_lightweight_client()

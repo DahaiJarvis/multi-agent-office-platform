@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter
 
-from agent.core.search_engine import (
+from agent.core.data.search_engine import (
     enterprise_search,
     SearchRequest,
     SearchResponse,

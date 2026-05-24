@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, Query
 
-from agent.core.sla import (
+from agent.core.observability.sla import (
     get_sla_definition,
     list_sla_definitions,
     get_current_metrics,

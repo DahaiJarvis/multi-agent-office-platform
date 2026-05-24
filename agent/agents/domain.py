@@ -71,8 +71,8 @@ from typing import Any
 
 from autogen_agentchat.agents import AssistantAgent
 
-from agent.core.model_client import get_domain_agent_client
-from agent.core.mcp_integration import AGENT_TOOL_BINDINGS
+from agent.core.model.model_client import get_domain_agent_client
+from agent.core.mcp.mcp_integration import AGENT_TOOL_BINDINGS
 from agent.tools.loader import load_all_tools
 # 从 skill_defs 重导出，保持向后兼容
 from agent.agents.skill_defs import SkillConfig, BUILTIN_SKILLS, AGENT_SKILL_BINDINGS  # noqa: F401
@@ -349,7 +349,7 @@ async def _create_single_agent(agent_name: str) -> AssistantAgent:
 
     # 追加 Skill 指令到 System Prompt
     try:
-        from agent.core.skill_adapter import SkillRegistry
+        from agent.core.skill.skill_adapter import SkillRegistry
         skill_registry = SkillRegistry.get_instance()
         skill_extensions = await skill_registry.get_agent_prompt_extensions(agent_name)
         if skill_extensions:
@@ -408,7 +408,7 @@ async def _get_agent_prompt(agent_name: str) -> str | None:
         System Prompt 字符串，未找到时返回 None
     """
     try:
-        from agent.core.prompt_registry import get_prompt_registry
+        from agent.core.prompt.prompt_registry import get_prompt_registry
         registry = get_prompt_registry()
         prompt = await registry.get_prompt(agent_name)
         if prompt:

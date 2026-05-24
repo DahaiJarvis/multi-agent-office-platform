@@ -1,0 +1,484 @@
+"""审计日志集中化
+
+提供集中化的审计日志收集、缓冲和持久化能力。
+
+架构:
+  - 写入端: 各业务模块调用 audit_log() 写入审计事件
+  - 缓冲层: Redis List 作为缓冲队列，高吞吐写入
+  - 消费端: 后台任务批量从 Redis 消费，写入 PostgreSQL
+  - 查询端: 通过 API 查询审计日志
+
+审计事件类型:
+  - auth: 认证授权事件（登录、登出、Token 刷新）
+  - agent: Agent 调用事件（意图分类、任务执行）
+  - data: 数据访问事件（查询、修改、删除）
+  - system: 系统事件（配置变更、服务启停）
+"""
+
+import json
+import logging
+import time
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
+
+
+class AuditEventType(str, Enum):
+    """审计事件类型"""
+
+    AUTH = "auth"
+    AGENT = "agent"
+    DATA = "data"
+    SYSTEM = "system"
+
+
+class AuditEvent(BaseModel):
+    """审计事件"""
+
+    event_type: AuditEventType = Field(..., description="事件类型")
+    action: str = Field(..., description="操作动作")
+    user_id: str = Field(default="", description="操作用户")
+    tenant_id: str = Field(default="", description="租户ID")
+    session_id: str = Field(default="", description="会话ID")
+    agent_name: str = Field(default="", description="Agent名称")
+    resource: str = Field(default="", description="操作资源")
+    detail: dict[str, Any] = Field(default_factory=dict, description="事件详情")
+    timestamp: float = Field(default_factory=time.time, description="事件时间戳")
+    request_id: str = Field(default="", description="请求ID")
+    ip_address: str = Field(default="", description="客户端IP")
+
+
+class AuditLogger:
+    """审计日志管理器
+
+    写入: 审计事件 -> Redis List（缓冲队列）
+    消费: 后台任务 -> 批量写入 PostgreSQL
+    查询: 从 PostgreSQL 查询历史审计日志
+    降级: PostgreSQL 不可用时，写入本地文件
+    """
+
+    BUFFER_KEY = "audit_log:buffer"
+    BUFFER_BATCH_SIZE = 100
+    BUFFER_MAX_LEN = 100000
+    FALLBACK_DIR = "logs/audit_fallback"
+
+    def __init__(self) -> None:
+        self._redis: Any = None
+        self._use_file_fallback: bool = False
+        self._pg_engine: Any = None
+        self._pg_pool: Any = None
+
+    async def _get_redis(self) -> Any:
+        """获取 Redis 客户端（使用统一连接管理器）"""
+        if self._redis is None:
+            try:
+                from agent.core.infrastructure.redis_manager import get_redis_client
+                self._redis = await get_redis_client()
+            except Exception as e:
+                logger.warning("审计日志 Redis 连接失败: %s", e)
+                return None
+        return self._redis
+
+    async def _get_pg_pool(self) -> tuple[Any, Any]:
+        """获取 PostgreSQL 连接池（复用引擎实例）
+
+        使用全局缓存的引擎和会话工厂，避免每次操作创建新连接。
+
+        Returns:
+            (engine, session_pool) 元组
+        """
+        if self._pg_engine is None or self._pg_pool is None:
+            from agent.core.infrastructure.config import get_settings
+            from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
+            settings = get_settings()
+            self._pg_engine = create_async_engine(
+                settings.postgres_dsn,
+                pool_size=5,
+                max_overflow=10,
+                pool_pre_ping=True,
+            )
+            self._pg_pool = async_sessionmaker(self._pg_engine, expire_on_commit=False)
+
+            # 确保表存在
+            from sqlalchemy import text
+            async with self._pg_engine.begin() as conn:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        id BIGSERIAL PRIMARY KEY,
+                        event_type VARCHAR(32) NOT NULL,
+                        action VARCHAR(128) NOT NULL,
+                        user_id VARCHAR(64) DEFAULT '',
+                        session_id VARCHAR(36) DEFAULT '',
+                        agent_name VARCHAR(64) DEFAULT '',
+                        resource VARCHAR(256) DEFAULT '',
+                        detail JSONB DEFAULT '{}',
+                        request_id VARCHAR(64) DEFAULT '',
+                        ip_address VARCHAR(45) DEFAULT '',
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                """))
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_audit_logs_event_type ON audit_logs(event_type)
+                """))
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)
+                """))
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at)
+                """))
+
+        return self._pg_engine, self._pg_pool
+
+    async def log(
+        self,
+        event_type: AuditEventType,
+        action: str,
+        user_id: str = "",
+        tenant_id: str = "",
+        session_id: str = "",
+        agent_name: str = "",
+        resource: str = "",
+        detail: dict[str, Any] | None = None,
+        request_id: str = "",
+        ip_address: str = "",
+    ) -> bool:
+        """记录审计事件
+
+        将审计事件写入 Redis 缓冲队列，由后台任务消费持久化。
+        多租户模式下，自动从上下文填充 tenant_id。
+
+        Args:
+            event_type: 事件类型
+            action: 操作动作
+            user_id: 操作用户
+            tenant_id: 租户ID
+            session_id: 会话ID
+            agent_name: Agent名称
+            resource: 操作资源
+            detail: 事件详情
+            request_id: 请求ID
+            ip_address: 客户端IP
+
+        Returns:
+            是否写入成功
+        """
+        # 自动从上下文填充 tenant_id
+        if not tenant_id:
+            try:
+                from security.tenant import get_current_tenant_id
+                tenant_id = get_current_tenant_id() or ""
+            except Exception:
+                pass
+
+        event = AuditEvent(
+            event_type=event_type,
+            action=action,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            agent_name=agent_name,
+            resource=resource,
+            detail=detail or {},
+            request_id=request_id,
+            ip_address=ip_address,
+        )
+
+        return await self._write_to_buffer(event)
+
+    async def _write_to_buffer(self, event: AuditEvent) -> bool:
+        """写入 Redis 缓冲队列"""
+        redis = await self._get_redis()
+        if redis is None:
+            # Redis 不可用时降级到标准日志
+            logger.info(
+                "AUDIT: type=%s action=%s user=%s session=%s agent=%s resource=%s",
+                event.event_type.value,
+                event.action,
+                event.user_id,
+                event.session_id,
+                event.agent_name,
+                event.resource,
+            )
+            return False
+
+        try:
+            # 检查缓冲队列长度，防止无限增长
+            current_len = await redis.llen(self.BUFFER_KEY)
+            if current_len >= self.BUFFER_MAX_LEN:
+                # 丢弃最旧的一半日志
+                await redis.ltrim(self.BUFFER_KEY, self.BUFFER_MAX_LEN // 2, -1)
+                logger.warning("审计日志缓冲队列过长，已清理旧数据")
+
+            await redis.rpush(
+                self.BUFFER_KEY,
+                event.model_dump_json(),
+            )
+            return True
+
+        except Exception as e:
+            logger.error("审计日志写入缓冲失败: %s", e)
+            return False
+
+    async def flush_buffer(self) -> int:
+        """消费缓冲队列，批量写入持久化存储
+
+        Returns:
+            消费的日志条数
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return 0
+
+        try:
+            # 批量取出日志
+            events_raw = await redis.lpop(self.BUFFER_KEY, self.BUFFER_BATCH_SIZE)
+            if not events_raw:
+                return 0
+
+            # 单条也包装为列表
+            if isinstance(events_raw, str):
+                events_raw = [events_raw]
+
+            # 写入 PostgreSQL
+            count = await self._persist_events(events_raw)
+
+            logger.debug("审计日志持久化: %d 条", count)
+            return count
+
+        except Exception as e:
+            logger.error("审计日志消费失败: %s", e)
+            return 0
+
+    async def _persist_events(self, events_raw: list[str]) -> int:
+        """将审计事件批量写入 PostgreSQL，不可用时降级到本地文件
+
+        使用连接池复用数据库连接，采用批量 INSERT 提升写入性能。
+        """
+        if self._use_file_fallback:
+            return await self._persist_to_file(events_raw)
+
+        try:
+            engine, pool = await self._get_pg_pool()
+
+            # 批量插入：构建多行 VALUES 语句
+            values_clauses = []
+            params: dict[str, Any] = {}
+            count = 0
+
+            for idx, raw in enumerate(events_raw):
+                try:
+                    event = json.loads(raw)
+                    prefix = f"e{idx}"
+                    values_clauses.append(
+                        f"(:{prefix}_et, :{prefix}_act, :{prefix}_uid, :{prefix}_sid, "
+                        f":{prefix}_agent, :{prefix}_res, :{prefix}_detail, :{prefix}_rid, "
+                        f":{prefix}_ip, to_timestamp(:{prefix}_ts))"
+                    )
+                    params[f"{prefix}_et"] = event.get("event_type", "")
+                    params[f"{prefix}_act"] = event.get("action", "")
+                    params[f"{prefix}_uid"] = event.get("user_id", "")
+                    params[f"{prefix}_sid"] = event.get("session_id", "")
+                    params[f"{prefix}_agent"] = event.get("agent_name", "")
+                    params[f"{prefix}_res"] = event.get("resource", "")
+                    params[f"{prefix}_detail"] = json.dumps(event.get("detail", {}), ensure_ascii=False)
+                    params[f"{prefix}_rid"] = event.get("request_id", "")
+                    params[f"{prefix}_ip"] = event.get("ip_address", "")
+                    params[f"{prefix}_ts"] = event.get("timestamp", time.time())
+                    count += 1
+                except Exception:
+                    continue
+
+            if count > 0:
+                from sqlalchemy import text
+                insert_sql = (
+                    "INSERT INTO audit_logs (event_type, action, user_id, session_id, "
+                    "agent_name, resource, detail, request_id, ip_address, created_at) VALUES "
+                    + ", ".join(values_clauses)
+                )
+                async with pool() as session:
+                    await session.execute(text(insert_sql), params)
+                    await session.commit()
+
+            return count
+
+        except Exception as e:
+            logger.error("审计日志持久化失败，降级到本地文件: %s", e)
+            self._use_file_fallback = True
+            return await self._persist_to_file(events_raw)
+
+    async def _persist_to_file(self, events_raw: list[str]) -> int:
+        """将审计事件写入本地文件（PostgreSQL 降级方案）
+
+        按日期滚动写入 logs/audit_fallback/ 目录，
+        文件名格式: audit_YYYYMMDD.jsonl
+
+        Args:
+            events_raw: 原始事件 JSON 列表
+
+        Returns:
+            写入的事件条数
+        """
+        import os
+        from datetime import datetime
+
+        try:
+            os.makedirs(self.FALLBACK_DIR, exist_ok=True)
+        except Exception:
+            pass
+
+        today = datetime.now().strftime("%Y%m%d")
+        filepath = os.path.join(self.FALLBACK_DIR, f"audit_{today}.jsonl")
+
+        count = 0
+        try:
+            with open(filepath, "a", encoding="utf-8") as f:
+                for raw in events_raw:
+                    f.write(raw + "\n")
+                    count += 1
+        except Exception as e:
+            logger.error("审计日志写入本地文件失败: %s", e)
+
+        return count
+
+    async def switch_to_file_fallback(self) -> None:
+        """降级回调：切换到本地文件存储"""
+        if not self._use_file_fallback:
+            logger.info("AuditLogger 切换到本地文件降级存储")
+            self._use_file_fallback = True
+
+    async def switch_to_postgres(self) -> None:
+        """恢复回调：切换回 PostgreSQL 存储"""
+        if self._use_file_fallback:
+            logger.info("AuditLogger 恢复 PostgreSQL 存储")
+            self._use_file_fallback = False
+
+    async def query_logs(
+        self,
+        event_type: str | None = None,
+        user_id: str | None = None,
+        action: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """查询审计日志
+
+        使用连接池复用数据库连接，对 action 参数进行 LIKE 通配符转义防止注入。
+
+        Args:
+            event_type: 事件类型过滤
+            user_id: 用户ID过滤
+            action: 操作动作过滤（LIKE 匹配，自动转义通配符）
+            limit: 返回数量上限
+            offset: 偏移量
+
+        Returns:
+            审计日志列表
+        """
+        try:
+            engine, pool = await self._get_pg_pool()
+            from sqlalchemy import text
+
+            conditions = []
+            params: dict[str, Any] = {"limit": limit, "offset": offset}
+
+            if event_type:
+                conditions.append("event_type = :et")
+                params["et"] = event_type
+            if user_id:
+                conditions.append("user_id = :uid")
+                params["uid"] = user_id
+            if action:
+                # 转义 LIKE 通配符，防止 LIKE 注入
+                safe_action = action.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                conditions.append("action LIKE :act ESCAPE '\\\\'")
+                params["act"] = f"%{safe_action}%"
+
+            where_clause = ""
+            if conditions:
+                where_clause = "WHERE " + " AND ".join(conditions)
+
+            query = f"""
+                SELECT id, event_type, action, user_id, session_id, agent_name,
+                       resource, detail, request_id, ip_address, created_at
+                FROM audit_logs
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT :limit OFFSET :offset
+            """
+
+            async with pool() as session:
+                result = await session.execute(text(query), params)
+                rows = result.mappings().all()
+
+            logs = []
+            for row in rows:
+                logs.append({
+                    "id": row["id"],
+                    "event_type": row["event_type"],
+                    "action": row["action"],
+                    "user_id": row["user_id"],
+                    "session_id": row["session_id"],
+                    "agent_name": row["agent_name"],
+                    "resource": row["resource"],
+                    "detail": row["detail"] if isinstance(row["detail"], dict) else {},
+                    "request_id": row["request_id"],
+                    "ip_address": row["ip_address"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else "",
+                })
+
+            return logs
+
+        except Exception as e:
+            logger.error("查询审计日志失败: %s", e)
+            return []
+
+    async def close(self) -> None:
+        """关闭 Redis 和 PostgreSQL 连接"""
+        if self._redis:
+            await self._redis.close()
+            self._redis = None
+        if self._pg_engine:
+            await self._pg_engine.dispose()
+            self._pg_engine = None
+            self._pg_pool = None
+
+
+# 全局审计日志管理器
+_audit_logger: AuditLogger | None = None
+
+
+def get_audit_logger() -> AuditLogger:
+    """获取全局审计日志管理器"""
+    global _audit_logger
+    if _audit_logger is None:
+        _audit_logger = AuditLogger()
+        # 注册 PostgreSQL 降级回调
+        try:
+            from deploy.ha_manager import DegradationManager
+            DegradationManager.register_handler(
+                "postgres",
+                on_degraded=_audit_logger.switch_to_file_fallback,
+                on_recovered=_audit_logger.switch_to_postgres,
+            )
+        except Exception:
+            pass
+    return _audit_logger
+
+
+async def audit_log(
+    event_type: AuditEventType,
+    action: str,
+    **kwargs: Any,
+) -> bool:
+    """便捷函数：记录审计事件
+
+    用法:
+        await audit_log(AuditEventType.AUTH, "user_login", user_id="u001")
+        await audit_log(AuditEventType.AGENT, "intent_classify", user_id="u001", agent_name="Supervisor")
+    """
+    audit = get_audit_logger()
+    return await audit.log(event_type=event_type, action=action, **kwargs)

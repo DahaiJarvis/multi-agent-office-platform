@@ -86,7 +86,7 @@ class UserStore:
 
         try:
             from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
 
             settings = get_settings()
             engine = create_async_engine(
@@ -110,7 +110,7 @@ class UserStore:
         try:
             from sqlalchemy import text
             from sqlalchemy.ext.asyncio import create_async_engine
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
 
             settings = get_settings()
             engine = create_async_engine(settings.postgres_dsn, pool_size=1, max_overflow=2)

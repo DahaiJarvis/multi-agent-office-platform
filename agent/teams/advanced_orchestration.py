@@ -11,11 +11,12 @@
   - VOTE: 需要高准确率的事实性问题（如知识问答、分类判断）
 
 触发条件：
-  当意图分类结果为 cross_system 或 complex_task 时，由 team_factory 自动路由到此模块。
-  具体模式选择逻辑：
-    - cross_system -> PARALLEL（跨系统操作需要多维度并行收集信息）
-    - complex_task -> DEBATE（复杂任务需要多角度推理验证）
-    - 其他 -> VOTE（默认使用投票提高准确率）
+  仅在 IntentResult 显式指定 orchestration_mode 时触发，不再由意图标签自动决定。
+  cross_system 和 complex_task 默认使用 SEQUENTIAL 顺序编排（由 TaskExecutionEngine 处理）。
+  PARALLEL/DEBATE/VOTE 适用于以下场景：
+    - PARALLEL: 多维度并行收集信息，各维度无依赖关系
+    - DEBATE: 需要多角度深度推理和验证的决策问题
+    - VOTE: 需要高准确率的事实性判断
 
 三种模式是互斥的，每次请求只会选择其中一种模式执行，不会组合使用。
 
@@ -36,8 +37,8 @@ from pydantic import BaseModel, Field
 
 from agent.agents.domain import create_domain_agent, AGENT_PROMPTS
 from agent.agents.supervisor import IntentResult, CollaborationMode
-from agent.core.model_client import get_supervisor_client, get_domain_agent_client
-from agent.core.mcp_integration import load_agent_tools
+from agent.core.model.model_client import get_supervisor_client, get_domain_agent_client
+from agent.core.mcp.mcp_integration import load_agent_tools
 
 logger = logging.getLogger(__name__)
 
@@ -694,15 +695,15 @@ async def create_advanced_team(
 ) -> ParallelTeam | DebateTeam | VoteTeam:
     """创建高级编排团队
 
-    由 team_factory.create_team() 在意图为 cross_system 或 complex_task 时调用。
+    由 team_factory.create_team() 在 IntentResult 显式指定 orchestration_mode 时调用。
     三种模式互斥，每次只创建一种团队实例。
 
     Args:
-        intent: 意图分类结果，用于自动选择模式和 Agent
-        mode: 编排模式，为空时根据意图自动选择：
-              - cross_system -> PARALLEL
-              - complex_task -> DEBATE
-              - 其他 -> VOTE
+        intent: 意图分类结果，用于自动选择 Agent
+        mode: 编排模式，必须显式指定：
+              - parallel: 多维度并行收集信息
+              - debate: 多角度深度推理验证
+              - vote: 多数决定提高准确率
         agent_names: 参与的 Agent 名称列表，为空时使用推荐搭配
 
     Returns:
@@ -730,12 +731,12 @@ async def create_advanced_team(
 
 
 def _select_mode(intent: IntentResult) -> AdvancedMode:
-    """根据意图自动选择编排模式
+    """根据意图自动选择编排模式（兜底逻辑）
 
-    选择逻辑：
-      - cross_system: 跨系统操作涉及多个业务系统，需要并行收集各系统信息 -> PARALLEL
-      - complex_task: 复杂任务需要深度推理和多角度验证 -> DEBATE
-      - 其他意图: 默认使用投票提高准确率 -> VOTE
+    当 mode 参数为空时的兜底选择逻辑。
+    正常情况下 mode 应由调用方显式指定，此函数仅作为默认值。
+
+    默认选择 VOTE 模式，因为它是开销最小的高级编排方式。
 
     Args:
         intent: 意图分类结果
@@ -743,10 +744,6 @@ def _select_mode(intent: IntentResult) -> AdvancedMode:
     Returns:
         推荐的编排模式
     """
-    if intent.intent == "cross_system":
-        return AdvancedMode.PARALLEL
-    if intent.intent == "complex_task":
-        return AdvancedMode.DEBATE
     return AdvancedMode.VOTE
 
 

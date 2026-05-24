@@ -271,7 +271,7 @@ async def _document_summarize(file_path: str, mode: str = "brief") -> str:
         if not content.strip():
             return json.dumps({"file_path": safe_path, "summary": "文档内容为空", "mode": mode}, ensure_ascii=False)
 
-        from agent.core.model_client import get_lightweight_client
+        from agent.core.model.model_client import get_lightweight_client
         from autogen_core.models import UserMessage
 
         client = get_lightweight_client()
@@ -353,7 +353,7 @@ async def _document_compare(file_path_a: str, file_path_b: str, aspect: str = "g
                 "message": "其中一份文档内容为空，无法对比",
             }, ensure_ascii=False)
 
-        from agent.core.model_client import get_lightweight_client
+        from agent.core.model.model_client import get_lightweight_client
         from autogen_core.models import UserMessage
 
         client = get_lightweight_client()

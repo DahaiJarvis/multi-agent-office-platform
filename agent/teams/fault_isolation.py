@@ -60,7 +60,7 @@ import json
 import logging
 from typing import Any
 
-from agent.core.task_checkpoint import (
+from agent.core.workflow.task_checkpoint import (
     TaskExecution,
     TaskCheckpointStore,
     StepCheckpoint,
@@ -70,7 +70,7 @@ from agent.core.task_checkpoint import (
     TaskStatus,
     get_task_checkpoint_store,
 )
-from agent.core.event_bus import publish_event, EventType
+from agent.core.infrastructure.event_bus import publish_event, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -687,7 +687,7 @@ class FaultIsolationPolicy:
             True表示熔断器已打开（Agent不可用）
         """
         try:
-            from agent.core.circuit_breaker import get_circuit_breaker
+            from agent.core.infrastructure.circuit_breaker import get_circuit_breaker
             cb = get_circuit_breaker(f"agent_{agent_name}")
             return cb.state.value == "open"
         except Exception:
@@ -739,7 +739,7 @@ class FaultIsolationPolicy:
             Agent的专业Prompt，不存在则返回None
         """
         try:
-            from agent.core.prompt_registry import get_prompt_registry
+            from agent.core.prompt.prompt_registry import get_prompt_registry
             registry = get_prompt_registry()
             prompt = registry.get_prompt(agent_name)
             if prompt:

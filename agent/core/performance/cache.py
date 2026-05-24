@@ -181,7 +181,7 @@ class RedisCache:
     async def _get_client(self) -> Any:
         if self._client is None:
             try:
-                from agent.core.redis_manager import get_redis_client
+                from agent.core.infrastructure.redis_manager import get_redis_client
                 self._client = await get_redis_client()
             except Exception:
                 logger.debug("Redis 连接获取失败，L2 缓存不可用")

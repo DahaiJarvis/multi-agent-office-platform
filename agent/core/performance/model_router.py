@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from agent.core.model_client import get_model_client
+from agent.core.model.model_client import get_model_client
 
 logger = logging.getLogger(__name__)
 

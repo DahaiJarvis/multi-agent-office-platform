@@ -245,7 +245,7 @@ def test_7_direct_mode():
     """
     print_header("测试7: DIRECT模式 - 简单查询")
 
-    from agent.core.capability_card import get_capability_registry
+    from agent.core.skill.capability_card import get_capability_registry
 
     registry = get_capability_registry()
     routing = registry.get_routing_for_intent("approval_query")
@@ -271,7 +271,7 @@ def test_8_selector_mode():
     """
     print_header("测试8: SELECTOR模式 - 敏感操作")
 
-    from agent.core.capability_card import get_capability_registry
+    from agent.core.skill.capability_card import get_capability_registry
 
     registry = get_capability_registry()
     routing = registry.get_routing_for_intent("email_send")
@@ -300,7 +300,7 @@ def test_9_swarm_mode():
     """
     print_header("测试9: SWARM模式 - 跨系统协作")
 
-    from agent.core.capability_card import get_capability_registry
+    from agent.core.skill.capability_card import get_capability_registry
 
     registry = get_capability_registry()
 
@@ -388,7 +388,7 @@ async def test_12_session_transfer():
     """
     print_header("测试12: Agent间会话转移")
 
-    from agent.core.session_manager import SessionManager
+    from agent.core.session.session_manager import SessionManager
 
     mgr = SessionManager()
 

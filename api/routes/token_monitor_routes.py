@@ -22,7 +22,7 @@ async def token_dashboard(
 
     返回全局和用户维度的 Token 消耗概览。
     """
-    from agent.core.token_budget import TokenBudgetManager, BudgetConfig
+    from agent.core.model.token_budget import TokenBudgetManager, BudgetConfig
 
     manager = TokenBudgetManager()
 
@@ -91,7 +91,7 @@ async def budget_check(
 
     返回用户、会话、全局、租户维度的预算使用情况和建议的模型级别。
     """
-    from agent.core.token_budget import TokenBudgetManager
+    from agent.core.model.token_budget import TokenBudgetManager
 
     manager = TokenBudgetManager()
     result = await manager.check_budget(user_id, session_id, tenant_id)
@@ -105,7 +105,7 @@ async def mcp_quality_monitor() -> dict:
     返回各 MCP 服务的成功率、延迟、错误率等指标。
     """
     try:
-        from agent.core.mcp_tracing import get_mcp_tracer
+        from agent.core.mcp.mcp_tracing import get_mcp_tracer
         tracer = get_mcp_tracer()
         return {
             "services": {name: metrics.model_dump() for name, metrics in tracer.get_all_quality_metrics().items()},
@@ -120,7 +120,7 @@ async def mcp_quality_monitor() -> dict:
 async def circuit_breaker_status() -> dict:
     """获取所有熔断器状态"""
     try:
-        from agent.core.circuit_breaker import list_circuit_breakers
+        from agent.core.infrastructure.circuit_breaker import list_circuit_breakers
         breakers = list_circuit_breakers()
         return {
             "breakers": {name: stats.model_dump() for name, stats in breakers.items()},
@@ -135,7 +135,7 @@ async def circuit_breaker_status() -> dict:
 async def mcp_validation_stats() -> dict:
     """获取 MCP 响应校验统计"""
     try:
-        from agent.core.mcp_validator import get_validation_stats
+        from agent.core.mcp.mcp_validator import get_validation_stats
         return {
             "stats": get_validation_stats(),
             "timestamp": time.time(),

@@ -244,7 +244,7 @@ async def _text_extract(text: str, extract_type: str = "auto") -> str:
         return json.dumps({"error": "文本内容不能为空", "extractions": []}, ensure_ascii=False)
 
     try:
-        from agent.core.model_client import get_lightweight_client
+        from agent.core.model.model_client import get_lightweight_client
         from autogen_core.models import UserMessage
 
         client = get_lightweight_client()
@@ -321,7 +321,7 @@ async def _text_translate(text: str, target_lang: str = "en", source_lang: str =
         return json.dumps({"error": f"不支持的目标语言: {target_lang}，支持 en/zh/ja/ko", "translation": ""}, ensure_ascii=False)
 
     try:
-        from agent.core.model_client import get_lightweight_client
+        from agent.core.model.model_client import get_lightweight_client
         from autogen_core.models import UserMessage
 
         client = get_lightweight_client()

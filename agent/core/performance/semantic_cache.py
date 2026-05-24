@@ -137,7 +137,7 @@ class SemanticCache:
         if self._redis is not None:
             return self._redis
         try:
-            from agent.core.redis_manager import get_redis_client
+            from agent.core.infrastructure.redis_manager import get_redis_client
             self._redis = await get_redis_client()
             return self._redis
         except Exception as e:
@@ -539,7 +539,7 @@ class SemanticCache:
         if self._embedding_client is None:
             try:
                 import dashscope
-                from agent.core.config import get_settings
+                from agent.core.infrastructure.config import get_settings
                 settings = get_settings()
                 dashscope.api_key = settings.dashscope_api_key
                 self._embedding_client = dashscope

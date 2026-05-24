@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from agent.core.message_queue import get_scheduled_task_manager, ScheduledTask
+from agent.core.workflow.message_queue import get_scheduled_task_manager, ScheduledTask
 
 logger = logging.getLogger(__name__)
 

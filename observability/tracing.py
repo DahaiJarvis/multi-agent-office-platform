@@ -201,7 +201,7 @@ class LangfuseTracer:
         self._initialized = True
 
         try:
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
 
             settings = get_settings()
 
@@ -404,7 +404,7 @@ class SpanCache:
         if self._redis is None:
             try:
                 import redis.asyncio as aioredis
-                from agent.core.config import get_settings
+                from agent.core.infrastructure.config import get_settings
 
                 settings = get_settings()
                 self._redis = aioredis.from_url(

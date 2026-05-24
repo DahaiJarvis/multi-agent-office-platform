@@ -82,7 +82,7 @@ def _map_event_type(event_type: str):
     Returns:
         AuditEventType 枚举值
     """
-    from agent.core.audit import AuditEventType
+    from agent.core.observability.audit import AuditEventType
 
     event_type_map = {
         "request": AuditEventType.AGENT,
@@ -160,7 +160,7 @@ def record_audit(event: AuditEvent) -> None:
     # 直接写入集中化审计系统
     try:
         import asyncio
-        from agent.core.audit import audit_log
+        from agent.core.observability.audit import audit_log
 
         audit_type = _map_event_type(event.event_type)
         action = _build_audit_action(event)

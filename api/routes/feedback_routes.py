@@ -12,7 +12,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from api.errors import AppException, ErrorCode
-from agent.core.feedback import FeedbackType
+from agent.core.observability.feedback import FeedbackType
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ async def submit_feedback(
     user_id: str = "anonymous",
 ) -> dict:
     """提交对话反馈（点赞/点踩）"""
-    from agent.core.feedback import get_feedback_service, FeedbackRequest
+    from agent.core.observability.feedback import get_feedback_service, FeedbackRequest
 
     service = get_feedback_service()
     request = FeedbackRequest(
@@ -59,7 +59,7 @@ async def submit_feedback(
 @router.get("/feedback/stats", summary="查询反馈统计")
 async def get_feedback_stats(date: str | None = None) -> dict:
     """查询反馈统计"""
-    from agent.core.feedback import get_feedback_service
+    from agent.core.observability.feedback import get_feedback_service
 
     service = get_feedback_service()
     stats = await service.get_daily_stats(date)
@@ -69,7 +69,7 @@ async def get_feedback_stats(date: str | None = None) -> dict:
 @router.get("/feedback/stats/{agent_name}", summary="查询指定Agent反馈统计")
 async def get_agent_feedback_stats(agent_name: str, date: str | None = None) -> dict:
     """查询指定 Agent 的反馈统计"""
-    from agent.core.feedback import get_feedback_service
+    from agent.core.observability.feedback import get_feedback_service
 
     service = get_feedback_service()
     stats = await service.get_agent_stats(agent_name, date)

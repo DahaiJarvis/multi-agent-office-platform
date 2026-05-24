@@ -154,7 +154,7 @@ class HealthChecker:
         health = ComponentHealth(name="redis", last_check=time.time())
         start = time.monotonic()
         try:
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
             import redis.asyncio as aioredis
 
             settings = get_settings()
@@ -190,7 +190,7 @@ class HealthChecker:
         health = ComponentHealth(name="postgres", last_check=time.time())
         start = time.monotonic()
         try:
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
             import asyncpg
 
             settings = get_settings()
@@ -262,7 +262,7 @@ class HealthChecker:
         health = ComponentHealth(name="llm", last_check=time.time())
         start = time.monotonic()
         try:
-            from agent.core.model_client import get_lightweight_client
+            from agent.core.model.model_client import get_lightweight_client
 
             client = get_lightweight_client()
             response = await client.create(
@@ -300,7 +300,7 @@ class HealthChecker:
         start = time.monotonic()
         try:
             import httpx
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
 
             settings = get_settings()
             ida_base_url = getattr(settings, "ida_base_url", "http://localhost:3001")
@@ -765,7 +765,7 @@ class HeartbeatMonitor:
             elif component == "llm":
                 return await self._probe_llm()
             elif component == "ida":
-                from agent.core.config import get_settings
+                from agent.core.infrastructure.config import get_settings
                 settings = get_settings()
                 ida_base_url = getattr(settings, "ida_base_url", "http://localhost:3001")
                 return await self._probe_http(f"{ida_base_url}/api/v1/health")
@@ -777,7 +777,7 @@ class HeartbeatMonitor:
     async def _probe_redis(self) -> bool:
         """探测 Redis"""
         try:
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
             import redis.asyncio as aioredis
 
             settings = get_settings()
@@ -791,7 +791,7 @@ class HeartbeatMonitor:
     async def _probe_postgres(self) -> bool:
         """探测 PostgreSQL"""
         try:
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
             import asyncpg
 
             settings = get_settings()
@@ -819,7 +819,7 @@ class HeartbeatMonitor:
     async def _probe_llm(self) -> bool:
         """探测 LLM 服务"""
         try:
-            from agent.core.model_client import get_lightweight_client
+            from agent.core.model.model_client import get_lightweight_client
 
             client = get_lightweight_client()
             response = await asyncio.wait_for(
@@ -1040,7 +1040,7 @@ class DisasterRecoveryMonitor:
     async def _get_redis_replication_lag(self) -> float:
         """获取 Redis 主从复制延迟"""
         try:
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
             import redis.asyncio as aioredis
 
             settings = get_settings()
@@ -1073,7 +1073,7 @@ class DisasterRecoveryMonitor:
     async def _get_postgres_replication_lag(self) -> float:
         """获取 PostgreSQL 主从复制延迟"""
         try:
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
             import asyncpg
 
             settings = get_settings()
@@ -1226,7 +1226,7 @@ class DisasterRecoveryMonitor:
     async def _verify_redis_integrity(self) -> bool:
         """校验 Redis 数据完整性"""
         try:
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
             import redis.asyncio as aioredis
 
             settings = get_settings()
@@ -1252,7 +1252,7 @@ class DisasterRecoveryMonitor:
     async def _verify_postgres_integrity(self) -> bool:
         """校验 PostgreSQL 数据完整性"""
         try:
-            from agent.core.config import get_settings
+            from agent.core.infrastructure.config import get_settings
             import asyncpg
 
             settings = get_settings()

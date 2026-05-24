@@ -204,7 +204,7 @@ async def login(request: LoginRequest) -> LoginResponse:
             _upgrade_user_password_hash(request.password)
     else:
         # 未在用户存储中的用户，使用前缀推断角色（开发模式兼容）
-        from agent.core.config import get_settings
+        from agent.core.infrastructure.config import get_settings
         settings = get_settings()
         if settings.is_production:
             _record_login_failure(request.user_id)

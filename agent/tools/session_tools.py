@@ -76,7 +76,7 @@ async def _session_history(limit: int = 10) -> str:
         return json.dumps({"error": "当前无活跃会话", "messages": []}, ensure_ascii=False)
 
     try:
-        from agent.core.session_manager import get_session_manager
+        from agent.core.session.session_manager import get_session_manager
         manager = await get_session_manager()
         session = await manager.get_session(session_id)
         if session is None:
@@ -122,7 +122,7 @@ async def _session_search(keyword: str, limit: int = 20) -> str:
         return json.dumps({"error": "搜索关键词不能为空", "results": []}, ensure_ascii=False)
 
     try:
-        from agent.core.session_manager import get_session_manager
+        from agent.core.session.session_manager import get_session_manager
         manager = await get_session_manager()
         session = await manager.get_session(session_id)
         if session is None:
@@ -169,7 +169,7 @@ async def _session_summary(mode: str = "brief") -> str:
         return json.dumps({"error": "当前无活跃会话", "summary": ""}, ensure_ascii=False)
 
     try:
-        from agent.core.session_manager import get_session_manager
+        from agent.core.session.session_manager import get_session_manager
         manager = await get_session_manager()
         session = await manager.get_session(session_id)
         if session is None:
@@ -191,7 +191,7 @@ async def _session_summary(mode: str = "brief") -> str:
                 "cached": True,
             }, ensure_ascii=False)
 
-        from agent.core.model_client import get_lightweight_client
+        from agent.core.model.model_client import get_lightweight_client
         from autogen_core.models import UserMessage
 
         client = get_lightweight_client()

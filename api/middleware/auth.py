@@ -11,7 +11,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from agent.core.config import get_settings
+from agent.core.infrastructure.config import get_settings
 from security.auth import verify_token, extract_token_from_header
 from security.audit import record_auth_audit
 

@@ -7,9 +7,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent.core.config import get_settings
-from agent.core.app_context import get_app_context
-from agent.core.mcp_integration import close_all_connections
+from agent.core.infrastructure.config import get_settings
+from agent.core.session.app_context import get_app_context
+from agent.core.mcp.mcp_integration import close_all_connections
 from api.middleware.auth import AuthMiddleware
 from api.middleware.csrf import CSRFMiddleware
 from api.middleware.rate_limit import DistributedRateLimitMiddleware
@@ -68,7 +68,7 @@ async def _audit_flush_loop() -> None:
     while True:
         try:
             await asyncio.sleep(30)
-            from agent.core.audit import get_audit_logger
+            from agent.core.observability.audit import get_audit_logger
             audit = get_audit_logger()
             await audit.flush_buffer()
         except asyncio.CancelledError:
@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
         logger.warning("自定义 Agent 恢复失败（非致命）: %s", e)
 
     try:
-        from agent.core.skill_adapter import SkillRegistry
+        from agent.core.skill.skill_adapter import SkillRegistry
         registry = SkillRegistry.get_instance()
         restored_bindings = await registry.restore_bindings_from_redis()
         if restored_bindings > 0:
@@ -160,7 +160,7 @@ async def lifespan(app: FastAPI):
 
     # 启动时检测内置技能的工具可用性
     try:
-        from agent.core.skill_adapter import SkillRegistry
+        from agent.core.skill.skill_adapter import SkillRegistry
         registry = SkillRegistry.get_instance()
         unavailable = await registry.check_builtin_skills_tool_availability()
         if unavailable:

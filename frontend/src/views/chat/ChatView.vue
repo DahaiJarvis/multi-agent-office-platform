@@ -450,17 +450,15 @@ const interleavedTimeline = computed(() => {
     }
   }
 
-  timeline.push(buildBoardSnapshot())
-
+  // 先收集文字活动，同时跟踪步骤完成状态
   for (const act of chatStore.taskActivities) {
     if (act.type === 'step_done') {
       if (act.stepIndex != null) {
         completedStepIndices.add(act.stepIndex)
       }
-      timeline.push(buildBoardSnapshot())
+      // step_done 不生成看板快照，仅更新完成状态
     } else if (act.type === 'step_start') {
-      // step_start 不单独显示文字，但触发看板更新（步骤变为 running）
-      timeline.push(buildBoardSnapshot())
+      // step_start 不生成看板快照，仅触发步骤状态变更
     } else if (act.type === 'thought') {
       timeline.push({ type: 'text', activity: act })
     } else if (act.type === 'tool_call' || act.type === 'tool_result') {
@@ -470,6 +468,12 @@ const interleavedTimeline = computed(() => {
     } else if (act.type === 'intent') {
       timeline.push({ type: 'text', activity: act })
     }
+  }
+
+  // 始终只保留一个最新的看板快照，放在时间线最前面
+  const boardSnapshot = buildBoardSnapshot()
+  if (boardSnapshot.steps.length > 0) {
+    timeline.unshift(boardSnapshot)
   }
 
   return timeline
@@ -1005,7 +1009,16 @@ async function refreshSessionList() {
 
 async function restoreSessionAndTask(sessionId: string) {
   chatStore.setSessionId(sessionId)
-  const data = await sessionApi.getHistory(sessionId)
+  let data: any
+  try {
+    data = await sessionApi.getHistory(sessionId)
+  } catch (e: any) {
+    // 会话已过期或不存在，清除无效 session_id 并重置状态
+    chatStore.setSessionId('')
+    sessionStorage.removeItem('current_session_id')
+    localStorage.removeItem('current_session_id')
+    throw e
+  }
   const historyMessages = data.messages || []
   chatStore.loadHistory(historyMessages)
   try {
@@ -1422,7 +1435,10 @@ onMounted(async () => {
         chatStore.loadHistory(historyMessages)
         scrollToBottom()
       } catch {
-        // 消息加载失败不影响任务状态恢复
+        // 会话已过期，清除无效状态
+        chatStore.setSessionId('')
+        sessionStorage.removeItem('current_session_id')
+        localStorage.removeItem('current_session_id')
       }
     }
     // 仅运行中的任务才订阅SSE，已完成/已暂停/已中断的不需要
@@ -1450,7 +1466,10 @@ onMounted(async () => {
         }
       }
     } catch {
-      // 恢复失败不影响正常使用
+      // 会话恢复失败（已过期或不存在），清除无效状态，用户可正常开始新对话
+      chatStore.setSessionId('')
+      sessionStorage.removeItem('current_session_id')
+      localStorage.removeItem('current_session_id')
     }
   }
 })

@@ -39,7 +39,7 @@ async def _get_redis() -> Any:
     if _redis_client is not None:
         return _redis_client
     try:
-        from agent.core.redis_manager import get_redis_client
+        from agent.core.infrastructure.redis_manager import get_redis_client
         _redis_client = await get_redis_client()
         return _redis_client
     except Exception as e:

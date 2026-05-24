@@ -105,8 +105,8 @@ async def task_event_stream(execution_id: str) -> StreamingResponse:
     """
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        from agent.core.event_bus import subscribe_events, EventType
-        from agent.core.task_checkpoint import get_task_checkpoint_store
+        from agent.core.infrastructure.event_bus import subscribe_events, EventType
+        from agent.core.workflow.task_checkpoint import get_task_checkpoint_store
 
         store = get_task_checkpoint_store()
         execution = await store.get_execution(execution_id)
@@ -161,7 +161,7 @@ async def get_pending_confirms(user_id: str) -> dict:
 
     返回用户所有待处理的人工确认请求。
     """
-    from agent.core.human_confirm import get_human_confirm_manager
+    from agent.core.workflow.human_confirm import get_human_confirm_manager
 
     manager = get_human_confirm_manager()
     confirms = await manager.get_pending_confirms(user_id)
@@ -184,7 +184,7 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
         confirm_id: 确认单ID
         body: 确认请求体，包含 decision/comment/user_id 等字段
     """
-    from agent.core.human_confirm import get_human_confirm_manager
+    from agent.core.workflow.human_confirm import get_human_confirm_manager
 
     decision = body.decision
     comment = body.comment
@@ -201,7 +201,7 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
 
     if decision in ("continue", "skip", "retry"):
         from agent.teams.task_execution_engine import get_task_execution_engine
-        from agent.core.task_checkpoint import get_task_checkpoint_store, TaskStatus
+        from agent.core.workflow.task_checkpoint import get_task_checkpoint_store, TaskStatus
 
         store = get_task_checkpoint_store()
         execution = await store.get_execution(result.execution_id)
@@ -222,7 +222,7 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
 
                 asyncio.create_task(_retry_background())
             elif decision == "skip":
-                from agent.core.task_checkpoint import StepStatus
+                from agent.core.workflow.task_checkpoint import StepStatus
 
                 for cp in execution.checkpoints:
                     if cp.step_index == result.step_index and cp.status in (StepStatus.WAITING_CONFIRM, StepStatus.FAILED):
@@ -246,7 +246,7 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
 
                 asyncio.create_task(_resume_background())
             else:
-                from agent.core.task_checkpoint import StepStatus
+                from agent.core.workflow.task_checkpoint import StepStatus
 
                 for cp in execution.checkpoints:
                     if cp.step_index == result.step_index and cp.status == StepStatus.WAITING_CONFIRM:
@@ -273,14 +273,14 @@ async def resolve_confirm(confirm_id: str, body: TaskConfirmRequest) -> dict:
                 asyncio.create_task(_resume_background())
 
     elif decision == "cancel":
-        from agent.core.task_checkpoint import get_task_checkpoint_store, TaskStatus
+        from agent.core.workflow.task_checkpoint import get_task_checkpoint_store, TaskStatus
 
         store = get_task_checkpoint_store()
         execution = await store.get_execution(result.execution_id)
         if execution:
             execution.status = TaskStatus.CANCELLED
             execution.error = f"用户取消任务: {comment}"
-            from agent.core.task_checkpoint import StepStatus
+            from agent.core.workflow.task_checkpoint import StepStatus
             for cp in execution.checkpoints:
                 if cp.step_index == result.step_index and cp.status == StepStatus.WAITING_CONFIRM:
                     cp.status = StepStatus.FAILED
@@ -306,7 +306,7 @@ async def cancel_task(request: TaskCancelRequest) -> dict:
     force=False: 暂停任务(INTERRUPTED)，可通过resume恢复
     force=True: 放弃任务(CANCELLED)，不可恢复
     """
-    from agent.core.task_checkpoint import get_task_checkpoint_store, TaskStatus
+    from agent.core.workflow.task_checkpoint import get_task_checkpoint_store, TaskStatus
 
     store = get_task_checkpoint_store()
     execution = await store.get_execution(request.execution_id)

@@ -63,8 +63,8 @@ import logging
 
 from autogen_agentchat.agents import AssistantAgent
 
-from agent.core.model_client import get_reviewer_client
-from agent.core.mcp_integration import load_agent_tools
+from agent.core.model.model_client import get_reviewer_client
+from agent.core.mcp.mcp_integration import load_agent_tools
 
 logger = logging.getLogger(__name__)
 

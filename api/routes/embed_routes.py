@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from api.errors import AppException, ErrorCode
 from security.auth import require_roles
-from agent.core.config import get_settings
+from agent.core.infrastructure.config import get_settings
 
 logger = logging.getLogger(__name__)
 

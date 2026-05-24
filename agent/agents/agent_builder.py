@@ -284,11 +284,11 @@ async def _persist_agent(config: CustomAgentConfig) -> None:
         config: Agent 配置
     """
     try:
-        from agent.core.redis_manager import get_redis_client
+        from agent.core.infrastructure.redis_manager import get_redis_client
         redis = await get_redis_client()
         if redis is None:
             return
-        from agent.core.async_utils import get_persist_ttl_seconds
+        from agent.core.infrastructure.async_utils import get_persist_ttl_seconds
         key = f"{_AGENT_REDIS_PREFIX}{config.agent_id}"
         await redis.set(key, config.model_dump_json(), ex=get_persist_ttl_seconds())
     except Exception as e:
@@ -304,7 +304,7 @@ def _schedule_persist(config: CustomAgentConfig) -> None:
     Args:
         config: Agent 配置
     """
-    from agent.core.async_utils import schedule_async_task
+    from agent.core.infrastructure.async_utils import schedule_async_task
     schedule_async_task(_persist_agent(config), task_name="Agent配置持久化")
 
 
@@ -316,11 +316,11 @@ async def _persist_version(agent_id: str, version: AgentVersionRecord) -> None:
         version: 版本记录
     """
     try:
-        from agent.core.redis_manager import get_redis_client
+        from agent.core.infrastructure.redis_manager import get_redis_client
         redis = await get_redis_client()
         if redis is None:
             return
-        from agent.core.async_utils import get_persist_ttl_seconds
+        from agent.core.infrastructure.async_utils import get_persist_ttl_seconds
         key = f"{_VERSION_REDIS_PREFIX}{agent_id}"
         await redis.rpush(key, version.model_dump_json())
         await redis.expire(key, get_persist_ttl_seconds())
@@ -335,7 +335,7 @@ async def _delete_persisted_agent(agent_id: str) -> None:
         agent_id: Agent ID
     """
     try:
-        from agent.core.redis_manager import get_redis_client
+        from agent.core.infrastructure.redis_manager import get_redis_client
         redis = await get_redis_client()
         if redis is None:
             return
@@ -351,7 +351,7 @@ def _schedule_delete_persist(agent_id: str) -> None:
     Args:
         agent_id: Agent ID
     """
-    from agent.core.async_utils import schedule_async_task
+    from agent.core.infrastructure.async_utils import schedule_async_task
     schedule_async_task(_delete_persisted_agent(agent_id), task_name="Agent持久化删除")
 
 
@@ -365,7 +365,7 @@ async def restore_agents_from_redis() -> int:
         恢复的 Agent 数量
     """
     try:
-        from agent.core.redis_manager import get_redis_client
+        from agent.core.infrastructure.redis_manager import get_redis_client
         redis = await get_redis_client()
         if redis is None:
             return 0
@@ -578,7 +578,7 @@ def _sync_builtin_bindings(agent_name: str, skill_ids: list[str]) -> None:
         skill_ids: 内置技能 ID 列表
     """
     try:
-        from agent.core.skill_adapter import SkillRegistry
+        from agent.core.skill.skill_adapter import SkillRegistry
         registry = SkillRegistry.get_instance()
         registry._builtin_bindings[agent_name] = list(skill_ids)
         logger.debug("内置技能绑定已同步: %s -> %s", agent_name, skill_ids)
@@ -1014,14 +1014,14 @@ def _register_to_runtime(agent: CustomAgentConfig) -> None:
     team_factory 可创建该 Agent 的实例。
     """
     from agent.agents.domain import AGENT_PROMPTS, AGENT_CREATORS
-    from agent.core.mcp_integration import AGENT_TOOL_BINDINGS
+    from agent.core.mcp.mcp_integration import AGENT_TOOL_BINDINGS
 
     AGENT_PROMPTS[agent.name] = agent.system_prompt
     AGENT_TOOL_BINDINGS[agent.name] = agent.mcp_servers
 
     async def _create_custom() -> Any:
         from autogen_agentchat.agents import AssistantAgent
-        from agent.core.model_client import get_model_client
+        from agent.core.model.model_client import get_model_client
 
         tools = await _load_custom_agent_tools(agent.name)
         return AssistantAgent(
@@ -1041,7 +1041,7 @@ def _register_to_runtime(agent: CustomAgentConfig) -> None:
 def _unregister_from_runtime(agent: CustomAgentConfig) -> None:
     """从运行时注销自定义 Agent"""
     from agent.agents.domain import AGENT_PROMPTS, AGENT_CREATORS
-    from agent.core.mcp_integration import AGENT_TOOL_BINDINGS
+    from agent.core.mcp.mcp_integration import AGENT_TOOL_BINDINGS
 
     AGENT_PROMPTS.pop(agent.name, None)
     AGENT_CREATORS.pop(agent.name, None)
@@ -1052,7 +1052,7 @@ def _unregister_from_runtime(agent: CustomAgentConfig) -> None:
 
 async def _load_custom_agent_tools(agent_name: str) -> list[Any]:
     """加载自定义 Agent 的工具"""
-    from agent.core.mcp_integration import load_agent_tools
+    from agent.core.mcp.mcp_integration import load_agent_tools
     return await load_agent_tools(agent_name)
 
 
@@ -1262,7 +1262,7 @@ def _resolve_mcp_server(tool_name: str) -> str | None:
     Returns:
         MCP 服务名，未匹配时返回 None
     """
-    from agent.core.mcp_integration import resolve_mcp_server
+    from agent.core.mcp.mcp_integration import resolve_mcp_server
     return resolve_mcp_server(tool_name)
 
 
@@ -1298,8 +1298,8 @@ async def create_agent_from_skills(
         ValueError: 技能ID不存在
     """
     from autogen_agentchat.agents import AssistantAgent
-    from agent.core.model_client import get_model_client
-    from agent.core.mcp_integration import load_mcp_tools
+    from agent.core.model.model_client import get_model_client
+    from agent.core.mcp.mcp_integration import load_mcp_tools
     from agent.agents.skill_defs import BUILTIN_SKILLS
 
     # 收集技能配置

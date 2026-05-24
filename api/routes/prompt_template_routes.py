@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from agent.core.prompt_library import (
+from agent.core.prompt.prompt_library import (
     create_template,
     get_template,
     list_templates,

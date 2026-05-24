@@ -93,8 +93,8 @@ from agent.agents.supervisor import (
 )
 from agent.teams.team_factory import create_team
 from agent.teams.execution_controller import get_execution_controller
-from agent.core.session_manager import SessionState, get_session_manager
-from agent.core.event_bus import publish_event, EventType
+from agent.core.session.session_manager import SessionState, get_session_manager
+from agent.core.infrastructure.event_bus import publish_event, EventType
 from observability.metrics import record_agent_call, record_business_task, record_intent_distribution, record_clarification
 from observability.tracing import langfuse_tracer, span_cache
 
@@ -300,7 +300,7 @@ async def route_and_execute(
     if intent.collaboration_mode == CollaborationMode.SWARM:
         try:
             from agent.teams.task_execution_engine import get_task_execution_engine
-            from agent.core.task_checkpoint import FailurePolicy
+            from agent.core.workflow.task_checkpoint import FailurePolicy
 
             engine = get_task_execution_engine()
             result = await engine.execute(
@@ -414,7 +414,7 @@ async def route_and_execute(
 
         # 记录审计日志
         try:
-            from agent.core.audit import audit_log, AuditEventType
+            from agent.core.observability.audit import audit_log, AuditEventType
             await audit_log(
                 event_type=AuditEventType.AGENT,
                 action="task_execute",
@@ -504,7 +504,7 @@ async def route_and_execute(
 
         # 记录失败审计日志
         try:
-            from agent.core.audit import audit_log, AuditEventType
+            from agent.core.observability.audit import audit_log, AuditEventType
             await audit_log(
                 event_type=AuditEventType.AGENT,
                 action="task_execute_failed",
@@ -532,7 +532,7 @@ async def route_and_execute(
         # After-turn 知识提取（异步，不阻塞主流程）
         # 从对话中提取有价值的知识存储到长期记忆
         try:
-            from agent.core.context_manager import extract_and_store_knowledge
+            from agent.core.session.context_manager import extract_and_store_knowledge
             tenant_id = ""
             try:
                 from security.tenant import get_current_tenant_id
@@ -771,7 +771,7 @@ async def route_and_execute_stream(
     if intent.collaboration_mode == CollaborationMode.SWARM:
         try:
             from agent.teams.task_execution_engine import get_task_execution_engine
-            from agent.core.task_checkpoint import FailurePolicy
+            from agent.core.workflow.task_checkpoint import FailurePolicy
 
             engine = get_task_execution_engine()
 
@@ -831,6 +831,7 @@ async def route_and_execute_stream(
                     "intent": result.get("intent", intent.intent) if result else intent.intent,
                     "mode": intent.collaboration_mode.value,
                     "execution_id": result.get("execution_id", execution.execution_id),
+                    "full_message": final_message,
                 }
                 return
 

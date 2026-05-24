@@ -167,14 +167,14 @@ def get_pool_manager() -> ConnectionPoolManager:
     """
     global _pool_manager
     try:
-        from agent.core.app_context import get_app_context
+        from agent.core.session.app_context import get_app_context
         ctx = get_app_context()
         if ctx.initialized and ctx.get_pool_manager() is not None:
             return ctx.get_pool_manager()
     except Exception:
         pass
     if _pool_manager is None:
-        from agent.core.config import get_settings
+        from agent.core.infrastructure.config import get_settings
         settings = get_settings()
         _pool_manager = ConnectionPoolManager(redis_url=settings.redis_url)
     return _pool_manager
