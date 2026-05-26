@@ -28,6 +28,7 @@
 """
 
 import asyncio
+import difflib
 import logging
 import time
 from enum import Enum
@@ -149,6 +150,88 @@ def _is_raw_json(text: str) -> bool:
     return False
 
 
+# 投票同义词映射表
+# -------------------------------------------------------------------------
+# 用于将不同语言/表达的投票结果归一化为统一格式
+# key 为小写的中文或英文表达，value 为归一化后的标准英文形式
+# -------------------------------------------------------------------------
+VOTE_SYNONYM_MAP: dict[str, str] = {
+    "同意": "agree",
+    "赞同": "agree",
+    "赞成": "agree",
+    "支持": "agree",
+    "是": "yes",
+    "对的": "yes",
+    "正确": "yes",
+    "否": "no",
+    "不是": "no",
+    "不对": "no",
+    "拒绝": "disagree",
+    "反对": "disagree",
+    "不同意": "disagree",
+    "否决": "reject",
+    "通过": "approve",
+    "批准": "approve",
+    "批准": "approve",
+    "确认": "confirm",
+    "取消": "cancel",
+    "撤销": "cancel",
+    "高": "high",
+    "中": "medium",
+    "低": "low",
+    "有风险": "risky",
+    "无风险": "safe",
+    "安全": "safe",
+    "危险": "dangerous",
+    "存在": "exist",
+    "不存在": "not_exist",
+    "是": "true",
+    "否": "false",
+}
+
+
+def _normalize_vote(vote: str, options: list[str] | None = None) -> str:
+    """归一化投票结果
+
+    处理流程：
+      1. 去除首尾空白并转为小写
+      2. 查找同义词映射表，将中文表达转为标准英文
+      3. 如果提供了 options，使用模糊匹配将投票结果映射到最接近的选项
+
+    Args:
+        vote: Agent 的原始投票内容
+        options: 可选的选项列表，提供时会尝试模糊匹配到选项
+
+    Returns:
+        归一化后的投票结果
+    """
+    normalized = vote.strip().lower()
+
+    # 查找同义词映射
+    mapped = VOTE_SYNONYM_MAP.get(normalized)
+    if mapped:
+        normalized = mapped
+
+    # 如果提供了选项列表，尝试模糊匹配到最接近的选项
+    if options:
+        # 先尝试精确匹配（忽略大小写）
+        for option in options:
+            if normalized == option.strip().lower():
+                return option
+
+        # 使用 difflib 模糊匹配，找到最接近的选项
+        options_lower = [opt.strip().lower() for opt in options]
+        matches = difflib.get_close_matches(normalized, options_lower, n=1, cutoff=0.6)
+        if matches:
+            matched_lower = matches[0]
+            # 返回原始选项（保持原始大小写）
+            for option in options:
+                if option.strip().lower() == matched_lower:
+                    return option
+
+    return normalized
+
+
 class AdvancedMode(str, Enum):
     """高级编排模式枚举
 
@@ -198,7 +281,7 @@ class VoteResult(BaseModel):
 
     Attributes:
         votes: 各 Agent 的原始投票内容
-        vote_counts: 各选项的票数统计（已归一化为小写）
+        vote_counts: 各选项的票数统计（已通过同义词映射和模糊匹配归一化）
         winner: 得票最多的选项
         confidence: 置信度 = 胜出票数 / 总票数，越高表示共识越强
     """
@@ -612,7 +695,7 @@ class VoteTeam:
         执行流程：
           1. 各 Agent 独立回答问题（串行执行，但互不可见其他 Agent 的回答）
           2. 如果提供了 options，Agent 只需从选项中选择；否则自由回答
-          3. 对所有回答进行归一化（小写）后计票
+          3. 对所有回答进行归一化（同义词映射 + 模糊匹配）后计票
           4. 得票最多的选项胜出，置信度 = 胜出票数 / 总票数
 
         Args:
@@ -634,8 +717,11 @@ class VoteTeam:
                 if options:
                     vote_prompt = (
                         f"问题: {task}\n"
-                        f"选项: {', '.join(options)}\n"
-                        f"请只输出你选择的选项，不要输出其他内容。"
+                        f"可选选项: {', '.join(options)}\n"
+                        f"请严格从上述选项中选择一个，原样输出选项文本，"
+                        f"不要翻译、不要改写、不要添加解释或其他内容。\n"
+                        f"正确示例: {options[0]}\n"
+                        f"错误示例: 同意、我选择{options[0]}、{options[0].lower() if options[0].isalpha() else '改写选项'}"
                     )
                 else:
                     vote_prompt = f"请回答以下问题，给出简洁明确的答案: {task}"
@@ -651,10 +737,10 @@ class VoteTeam:
                 if progress_callback:
                     await progress_callback(agent.name, "failed", f"{agent.name} 投票失败")
 
-        # 计票：归一化为小写后统计各选项票数
+        # 计票：使用同义词映射和模糊匹配归一化后统计各选项票数
         vote_counts: dict[str, int] = {}
         for vote in votes.values():
-            normalized = vote.strip().lower()
+            normalized = _normalize_vote(vote, options)
             vote_counts[normalized] = vote_counts.get(normalized, 0) + 1
 
         # 确定胜出选项：得票最多的选项胜出
