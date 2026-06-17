@@ -1,6 +1,6 @@
 """技能系统模块
 
-提供技能注册、解析、能力卡片等技能管理能力。
+提供技能注册、解析、能力卡片、安全扫描和沙箱执行等技能管理能力。
 """
 
 from agent.core.skill.skill_adapter import (
@@ -24,6 +24,12 @@ from agent.core.skill.skill_adapter import (
     MarketplaceEntry,
     sanitize_prompt,
     SkillRegistry,
+    SKILLS_DIR,
+    _EXTRA_SCAN_DIRS,
+    SKILL_SOURCE_BUILTIN,
+    SKILL_SOURCE_LOCAL,
+    SKILL_SOURCE_ANTHROPIC,
+    SKILL_SOURCE_OPENCLAW,
 )
 from agent.core.skill.skill_resolver import (
     DependencyStatus,
@@ -35,6 +41,32 @@ from agent.core.skill.capability_card import (
     CapabilityCard,
     CapabilityRegistry,
     get_capability_registry,
+)
+from agent.core.skill.skill_security import (
+    SecurityRiskLevel,
+    SecurityAction,
+    SecurityMatch,
+    SecurityScanResult,
+    scan_skill_scripts,
+    scan_skill_md_content,
+)
+from agent.core.skill.skill_runner import (
+    SandboxLevel,
+    DockerNotAvailableError,
+    SkillExecutionError,
+    SkillTimeoutError,
+    ExecutionResult,
+    SkillRunner,
+    get_skill_runner,
+    reset_skill_runner,
+)
+from agent.core.skill.sandbox import (
+    SandboxBackend,
+    SandboxBackendError,
+    LocalSubprocessSandbox,
+    E2BSandbox,
+    DockerSandbox,
+    SandboxFactory,
 )
 
 __all__ = [
@@ -58,6 +90,12 @@ __all__ = [
     "MarketplaceEntry",
     "sanitize_prompt",
     "SkillRegistry",
+    "SKILLS_DIR",
+    "_EXTRA_SCAN_DIRS",
+    "SKILL_SOURCE_BUILTIN",
+    "SKILL_SOURCE_LOCAL",
+    "SKILL_SOURCE_ANTHROPIC",
+    "SKILL_SOURCE_OPENCLAW",
     "DependencyStatus",
     "DependencyResolutionResult",
     "resolve_dependencies",
@@ -65,4 +103,24 @@ __all__ = [
     "CapabilityCard",
     "CapabilityRegistry",
     "get_capability_registry",
+    "SecurityRiskLevel",
+    "SecurityAction",
+    "SecurityMatch",
+    "SecurityScanResult",
+    "scan_skill_scripts",
+    "scan_skill_md_content",
+    "SandboxLevel",
+    "DockerNotAvailableError",
+    "SkillExecutionError",
+    "SkillTimeoutError",
+    "ExecutionResult",
+    "SkillRunner",
+    "get_skill_runner",
+    "reset_skill_runner",
+    "SandboxBackend",
+    "SandboxBackendError",
+    "LocalSubprocessSandbox",
+    "E2BSandbox",
+    "DockerSandbox",
+    "SandboxFactory",
 ]

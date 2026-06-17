@@ -182,6 +182,14 @@ class Settings(BaseSettings):
     tool_retry_backoff: float = Field(default=0.5, description="工具调用重试退避基数(秒)")
     tool_daily_quota: int = Field(default=1000, description="单工具每日调用配额")
 
+    # Skill 沙箱配置
+    skill_sandbox_backend: str = Field(
+        default="local",
+        alias="SKILL_SANDBOX_BACKEND",
+        description="Skill 脚本沙箱后端: local(本地子进程) / e2b(MicroVM) / docker(容器)",
+    )
+    e2b_api_key: str = Field(default="", alias="E2B_API_KEY", description="E2B 沙箱 API Key")
+
     # 执行控制
     execution_max_runtime: int = Field(default=600, description="任务执行最大运行时间(秒)")
     execution_llm_timeout: int = Field(default=30, description="单轮LLM调用超时(秒)")
