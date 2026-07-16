@@ -533,31 +533,17 @@ class SemanticCache:
     async def _get_embedding(self, text: str) -> list[float]:
         """获取文本的 Embedding 向量
 
-        使用阿里云 DashScope Embedding API。
-        降级方案：返回空列表，语义匹配不生效。
+        复用共享 Embedding 客户端（agent.core.infrastructure.embedding），
+        保持原有降级语义：调用失败返回空列表，语义匹配不生效。
         """
-        if self._embedding_client is None:
-            try:
-                import dashscope
-                from agent.core.infrastructure.config import get_settings
-                settings = get_settings()
-                dashscope.api_key = settings.dashscope_api_key
-                self._embedding_client = dashscope
-            except Exception as e:
-                logger.debug("Embedding 客户端初始化失败: %s", e)
-                return []
+        from agent.core.infrastructure.embedding import get_embedding_client
 
         try:
-            resp = self._embedding_client.TextEmbedding.call(
-                model=self._config.embedding_model,
-                input=text,
-            )
-            if resp.status_code == 200:
-                return resp.output["embeddings"][0]["embedding"]
+            client = get_embedding_client()
+            return await client.get_embedding(text)
         except Exception as e:
             logger.debug("Embedding 调用失败: %s", e)
-
-        return []
+            return []
 
 
 # 全局语义缓存实例
