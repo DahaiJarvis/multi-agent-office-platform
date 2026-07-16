@@ -255,8 +255,8 @@ def register_plugin(manifest: PluginManifest) -> PluginManifest:
             asyncio.ensure_future(_persist_manifest(manifest))
         else:
             loop.run_until_complete(_persist_manifest(manifest))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("插件持久化操作失败，已忽略: %s", e)
 
     return manifest
 
@@ -289,8 +289,8 @@ def unregister_plugin(plugin_id: str) -> bool:
         else:
             loop.run_until_complete(_remove_manifest(plugin_id))
             loop.run_until_complete(_remove_instance(plugin_id))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("插件持久化操作失败，已忽略: %s", e)
 
     return True
 
@@ -341,8 +341,8 @@ def enable_plugin(plugin_id: str, config: dict[str, Any] | None = None) -> Plugi
             asyncio.ensure_future(_persist_instance(instance))
         else:
             loop.run_until_complete(_persist_instance(instance))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("插件持久化操作失败，已忽略: %s", e)
 
     return instance
 
@@ -369,8 +369,8 @@ def disable_plugin(plugin_id: str) -> PluginInstance | None:
             asyncio.ensure_future(_persist_instance(instance))
         else:
             loop.run_until_complete(_persist_instance(instance))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("插件持久化操作失败，已忽略: %s", e)
 
     return instance
 
@@ -560,8 +560,8 @@ def publish_to_marketplace(manifest: PluginManifest, category: str = "general") 
             asyncio.ensure_future(_persist_market_entry(entry))
         else:
             loop.run_until_complete(_persist_market_entry(entry))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("插件持久化操作失败，已忽略: %s", e)
 
     return entry
 
@@ -604,8 +604,8 @@ def install_from_marketplace(plugin_id: str) -> PluginManifest | None:
             asyncio.ensure_future(_persist_market_entry(entry))
         else:
             loop.run_until_complete(_persist_market_entry(entry))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("插件持久化操作失败，已忽略: %s", e)
 
     return register_plugin(entry.manifest.model_copy())
 

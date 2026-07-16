@@ -239,8 +239,8 @@ def create_token_pair(
         try:
             from security.tenant import get_current_tenant_id
             tenant_id = get_current_tenant_id() or ""
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     oidc_claims = _build_oidc_claims(user_id, settings)
 
@@ -439,8 +439,8 @@ async def _get_redis_client():
         client = await pool_mgr.get_redis_client()
         if client is not None:
             return client
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     return None
 

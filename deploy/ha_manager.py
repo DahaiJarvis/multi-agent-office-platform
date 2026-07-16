@@ -736,8 +736,8 @@ class HeartbeatMonitor:
                         record.consecutive_success += 1
                         record.last_heartbeat_time = time.time()
                         return
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
             if record.missed_count >= self._config.missed_threshold and record.is_alive:
                 record.is_alive = False
@@ -1004,14 +1004,14 @@ class DisasterRecoveryMonitor:
 
         try:
             lag_ms = await self._get_redis_replication_lag()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         if lag_ms == 0.0:
             try:
                 lag_ms = await self._get_postgres_replication_lag()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         try:
             from deploy.multi_region import list_regions
@@ -1019,8 +1019,8 @@ class DisasterRecoveryMonitor:
             for region in list_regions():
                 if region.data_replication_lag_ms > lag_ms:
                     lag_ms = region.data_replication_lag_ms
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         self._metrics.current_replication_lag_ms = lag_ms
         if lag_ms > self._metrics.max_replication_lag_ms:

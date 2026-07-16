@@ -294,8 +294,8 @@ class EmailAdapter(BaseAdapter):
             try:
                 from observability.metrics import record_email_sent
                 record_email_sent("EmailAgent", has_attachment=bool(attachments))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         return resp
 

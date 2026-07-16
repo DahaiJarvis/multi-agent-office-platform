@@ -268,8 +268,8 @@ class SessionManager:
             try:
                 from security.tenant import get_current_tenant_id
                 tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         session = SessionState(
             session_id=str(uuid.uuid4()),
@@ -298,8 +298,8 @@ class SessionManager:
             from observability.metrics import set_active_users
             active_count = await self._count_active_users(tenant_id)
             set_active_users(tenant_id or "default", active_count)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         return session
 
@@ -325,8 +325,8 @@ class SessionManager:
         try:
             from security.tenant import get_current_tenant_id
             tenant_id = get_current_tenant_id() or ""
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         if redis:
             # 优先尝试带租户前缀的键
@@ -493,8 +493,8 @@ class SessionManager:
             duration = (datetime.now() - session.created_at).total_seconds()
             user_tier = session.metadata.get("user_tier", "standard")
             record_session_duration(user_tier, duration)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         try:
             from agent.core.session.long_term_memory import get_long_term_memory
@@ -625,8 +625,8 @@ class SessionManager:
             try:
                 from security.tenant import get_current_tenant_id
                 tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         try:
             redis = await self._redis_or_fallback()
@@ -861,8 +861,8 @@ async def get_session_manager() -> SessionManager:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_session_manager() is not None:
             return ctx.get_session_manager()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _session_manager is None:
         _session_manager = SessionManager()
         try:
@@ -872,6 +872,6 @@ async def get_session_manager() -> SessionManager:
                 on_degraded=_session_manager.switch_to_memory_fallback,
                 on_recovered=_session_manager.switch_to_redis,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
     return _session_manager

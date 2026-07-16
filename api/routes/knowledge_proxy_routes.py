@@ -517,8 +517,8 @@ async def _ida_request_with_retry(
                 pass
             except AppException:
                 raise
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
         _ida_last_connect_ok = False
         logger.error("IDA 服务连接失败: %s", url)
         raise AppException(
@@ -739,8 +739,8 @@ async def proxy_upload_document(
                 pass
             except AppException:
                 raise
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
         _ida_last_connect_ok = False
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务连接失败，请确认服务是否正常运行")
     except httpx.TimeoutException:
@@ -884,8 +884,8 @@ async def proxy_qa_ask_stream(
                     return
                 except (httpx.ConnectError, httpx.TimeoutException):
                     pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
             _ida_last_connect_ok = False
             logger.error("IDA 流式问答连接失败: %s", str(e))
             yield _build_sse_error_event("知识库服务连接失败，请稍后重试", "IDA_SERVICE_ERROR")
@@ -953,8 +953,8 @@ async def proxy_parse_files(request: Request):
                 pass
             except AppException:
                 raise
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
         _ida_last_connect_ok = False
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务连接失败，请确认服务是否正常运行")
     except httpx.TimeoutException:
@@ -1011,8 +1011,8 @@ async def proxy_analyze_image(
                 pass
             except AppException:
                 raise
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
         _ida_last_connect_ok = False
         raise AppException(ErrorCode.SERVICE_UNAVAILABLE, message="知识库服务连接失败，请确认服务是否正常运行")
     except httpx.TimeoutException:

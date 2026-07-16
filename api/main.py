@@ -203,8 +203,8 @@ async def lifespan(app: FastAPI):
     try:
         from api.routes.knowledge_proxy_routes import close_knowledge_proxy_client
         await close_knowledge_proxy_client()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     logger.info("应用已关闭")
 

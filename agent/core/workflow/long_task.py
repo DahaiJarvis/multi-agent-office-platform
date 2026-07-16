@@ -387,8 +387,8 @@ class LongTaskManager:
                     "task_id": task_id,
                     "error": error,
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     def register_running_task(self, task_id: str, asyncio_task: asyncio.Task) -> None:
         """注册运行中的 asyncio.Task（用于取消）
@@ -482,8 +482,8 @@ async def execute_long_task_step(message: Any) -> Any:
                     "step_name": step_name,
                     "action": step_action,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
             # 执行步骤（通过 Agent 路由执行）
             try:
@@ -515,8 +515,8 @@ async def execute_long_task_step(message: Any) -> Any:
                         "step_name": step_name,
                         "success": result.get("status") == "success",
                     })
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
                 # 步骤失败时中断
                 if result.get("status") == "error":
@@ -572,8 +572,8 @@ def get_long_task_manager() -> LongTaskManager:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_long_task_manager() is not None:
             return ctx.get_long_task_manager()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _long_task_manager is None:
         _long_task_manager = LongTaskManager()
     return _long_task_manager

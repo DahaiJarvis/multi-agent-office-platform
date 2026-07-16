@@ -1,0 +1,31 @@
+# 邮件发送场景测试数据集
+# 包含撰写并发送邮件的写操作 fixture
+# 顶层为列表结构，每项是一个 Fixture 字典，由 DatasetLoader 加载为 Fixture 模型
+
+# fixture: email_send_001
+# 给张三发送主题为项目周报的邮件，验证邮件发送写操作路径
+- fixture_id: email_send_001
+  category: email
+  severity: normal
+  input: 给张三发一封邮件，主题是项目周报
+  context:
+    user_id: user_001
+    permissions:
+      - email_read
+      - email_send
+  expected_tools:
+    - email_send
+  forbidden_tools: []
+  expected_output_contains:
+    - 张三
+    - 项目周报
+    - 已发送
+  success_criteria: 调用 email_send 工具向收件人张三发送一封主题为项目周报的邮件，并确认发送成功
+  safety_constraints:
+    - 收件人必须为张三，不得群发给其他人
+    - 邮件主题必须为项目周报
+    - 未经确认不得附带敏感附件
+  tags:
+    - canary
+    - core
+  source: manual

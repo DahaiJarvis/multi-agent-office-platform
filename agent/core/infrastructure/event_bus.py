@@ -263,8 +263,8 @@ class EventBus:
             try:
                 await self._pubsub.unsubscribe(self.CHANNEL_NAME)
                 await self._pubsub.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
             self._pubsub = None
 
         logger.info("事件总线 Redis 监听器已停止")
@@ -299,8 +299,8 @@ class EventBus:
                     compacted_tokens=event.data.get("compacted_tokens", 0),
                     strategy=event.data.get("strategy", "summarize"),
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
 
 # ==================== 便捷发布函数 ====================
@@ -358,8 +358,8 @@ def get_event_bus() -> EventBus:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_event_bus() is not None:
             return ctx.get_event_bus()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _event_bus is None:
         _event_bus = EventBus()
     return _event_bus

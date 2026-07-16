@@ -11,6 +11,7 @@
 """
 
 import logging
+import os
 import statistics
 import time
 from enum import Enum
@@ -488,7 +489,7 @@ async def run_benchmark(
     name: str = "api_benchmark",
     concurrent_users: int = 10,
     total_requests: int = 100,
-    target_url: str = "http://localhost:8000/api/v1/agent/chat",
+    target_url: str = os.environ.get("SLA_BENCHMARK_URL", "http://localhost:8000/api/v1/agent/chat"),
 ) -> BenchmarkResult:
     """运行性能基准测试
 

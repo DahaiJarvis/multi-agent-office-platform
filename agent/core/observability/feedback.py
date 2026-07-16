@@ -93,8 +93,8 @@ class FeedbackService:
                 try:
                     old_data = json.loads(old_feedback_raw)
                     old_type = old_data.get("feedback_type", "")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
             # 存储反馈详情（覆盖同一消息的旧反馈）
             feedback_data = {
@@ -268,6 +268,89 @@ class FeedbackService:
         except Exception:
             return FeedbackStats()
 
+    async def get_thumbs_down_sessions(
+        self,
+        since_hours: int = 24,
+        agent_name: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """按时间段查询点踩 session 列表（新增，对应 spec 04 第 9.2 节）
+
+        供 EvalScheduler 扫描用户负反馈 session 使用。
+
+        扫描 feedback:* key 中 feedback_type=thumbs_down 的记录，
+        返回时间窗口内的点踩 session 列表。
+
+        Args:
+            since_hours: 查询最近 N 小时的点踩（默认 24）
+            agent_name: 限定 Agent 名称（None 表示不过滤）
+            limit: 返回数量上限
+
+        Returns:
+            点踩 session 列表，每项含 session_id / message_index / agent_name / comment / timestamp / user_id
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return []
+
+        cutoff_timestamp = time.time() - since_hours * 3600
+
+        try:
+            cursor = 0
+            results: list[dict[str, Any]] = []
+
+            while True:
+                cursor, keys = await redis.scan(
+                    cursor=cursor,
+                    match="feedback:*",
+                    count=100,
+                )
+
+                for key in keys:
+                    try:
+                        raw = await redis.get(key)
+                        if raw is None:
+                            continue
+                        data = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    # 只处理 thumbs_down
+                    if data.get("feedback_type") != "thumbs_down":
+                        continue
+
+                    # 时间窗口过滤
+                    feedback_ts = float(data.get("timestamp", 0))
+                    if feedback_ts < cutoff_timestamp:
+                        continue
+
+                    # 可选：按 agent_name 过滤
+                    feedback_agent = data.get("agent_name", "")
+                    if agent_name and feedback_agent != agent_name:
+                        continue
+
+                    results.append({
+                        "session_id": data.get("session_id", ""),
+                        "message_index": int(data.get("message_index", 0)),
+                        "agent_name": feedback_agent,
+                        "comment": data.get("comment", ""),
+                        "timestamp": feedback_ts,
+                        "user_id": data.get("user_id", ""),
+                    })
+
+                if cursor == 0:
+                    break
+                if len(results) >= limit:
+                    break
+
+        except Exception as e:
+            logger.warning("查询点踩 session 列表异常: %s", e)
+            return []
+
+        # 按时间倒序排序
+        results.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return results[:limit]
+
     async def close(self) -> None:
         """关闭 Redis 连接"""
         if self._redis:
@@ -290,8 +373,8 @@ def get_feedback_service() -> FeedbackService:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_feedback_service() is not None:
             return ctx.get_feedback_service()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _feedback_service is None:
         _feedback_service = FeedbackService()
     return _feedback_service

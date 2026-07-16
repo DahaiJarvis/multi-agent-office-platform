@@ -283,8 +283,8 @@ class ExecutionController:
             result_meta.duration_ms = (time.time() - start_time) * 1000
             logger.warning("熔断器拦截请求: agent=%s", agent_name)
             return None, result_meta
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         # 重试循环
         for attempt in range(self._config.max_retries + 1):
@@ -495,8 +495,8 @@ class ExecutionController:
             participants = getattr(team, "participants", None)
             if participants and len(participants) > 0:
                 return getattr(participants[0], "name", "")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
         return ""
 
     async def _record_circuit_success(self, agent_name: str) -> None:
@@ -513,8 +513,8 @@ class ExecutionController:
             from agent.core.infrastructure.circuit_breaker import get_circuit_breaker
             cb = get_circuit_breaker(f"agent_{agent_name}")
             await cb.record_success()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     async def _record_circuit_failure(self, agent_name: str) -> None:
         """记录熔断器失败
@@ -531,8 +531,8 @@ class ExecutionController:
             from agent.core.infrastructure.circuit_breaker import get_circuit_breaker
             cb = get_circuit_breaker(f"agent_{agent_name}")
             await cb.record_failure()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     async def _record_token_usage(self, result: Any, agent_name: str) -> None:
         """记录 Token 用量到预算管理器
@@ -565,8 +565,8 @@ class ExecutionController:
                 completion_tokens=completion_tokens,
                 agent_name=agent_name,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     def _classify_error(self, error: Exception) -> str:
         """错误分类

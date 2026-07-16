@@ -12,8 +12,9 @@
 
 import logging
 from datetime import datetime
+from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from api.models.response import HealthResponse
@@ -482,3 +483,1044 @@ async def heartbeat_status() -> dict:
 
     monitor = get_heartbeat_monitor()
     return monitor.get_status()
+
+
+# ==================== 检查点时间旅行与回放（spec 03） ====================
+
+
+def _require_admin(request: Request) -> None:
+    """校验管理员权限
+
+    Args:
+        request: FastAPI 请求对象
+
+    Raises:
+        AppException: 权限不足
+    """
+    user_roles = getattr(request.state, "user_roles", [])
+    if "admin" not in user_roles:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.PERMISSION_DENIED, message="需要管理员权限")
+
+
+class ReplayRequest(BaseModel):
+    """回放请求模型"""
+
+    from_step: int = Field(..., ge=1, description="回放起始步骤索引（从1开始）")
+    from_version: int | None = Field(None, ge=0, description="回放起始步骤的版本号，None表示最新版本")
+    overrides: dict[str, Any] | None = Field(None, description="覆盖配置")
+    use_mock_tools: bool = Field(True, description="是否使用Mock工具，默认True")
+
+
+class ReplayResponse(BaseModel):
+    """回放响应模型"""
+
+    new_execution_id: str = Field(..., description="回放生成的新执行记录ID")
+    source_execution_id: str = Field(..., description="原执行记录ID")
+    from_step: int = Field(..., description="回放起始步骤")
+    from_version: int | None = Field(None, description="回放起始版本")
+    status: str = Field(..., description="回放状态：running/completed/failed")
+    started_at: str = Field(..., description="回放开始时间ISO格式")
+
+
+@router.post(
+    "/executions/{execution_id}/replay",
+    response_model=ReplayResponse,
+    summary="从指定步骤回放执行任务",
+)
+async def replay_execution(
+    execution_id: str,
+    request: Request,
+    replay_request: ReplayRequest,
+) -> ReplayResponse:
+    """从指定步骤/版本回放执行任务
+
+    需要管理员权限。回放使用 Mock 工具客户端，生成新 execution_id，
+    不污染原执行记录。
+
+    Args:
+        execution_id: 原执行记录ID
+        request: FastAPI 请求对象（用于权限校验）
+        replay_request: 回放请求参数
+    """
+    _require_admin(request)
+
+    from datetime import datetime as _dt
+
+    from agent.core.workflow.task_checkpoint import get_task_checkpoint_store
+
+    store = get_task_checkpoint_store()
+    started_at = _dt.now().isoformat()
+
+    # spec 中 from_step 从 1 开始，内部 step_index 从 0 开始
+    from_step_index = replay_request.from_step - 1
+
+    # 合并 use_mock_tools 到 overrides
+    overrides = replay_request.overrides or {}
+    overrides["use_mock_tools"] = replay_request.use_mock_tools
+
+    try:
+        new_exec_id = await store.replay_from_step(
+            execution_id=execution_id,
+            from_step=from_step_index,
+            from_version=replay_request.from_version,
+            overrides=overrides,
+        )
+
+        # 查询回放任务状态
+        new_exec = await store.get_execution(new_exec_id)
+        status = "running"
+        if new_exec is not None:
+            status = new_exec.status.value
+
+        return ReplayResponse(
+            new_execution_id=new_exec_id,
+            source_execution_id=execution_id,
+            from_step=replay_request.from_step,
+            from_version=replay_request.from_version,
+            status=status,
+            started_at=started_at,
+        )
+    except ValueError as e:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.INVALID_PARAMETER, message=str(e))
+    except RuntimeError as e:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=str(e))
+
+
+@router.get(
+    "/executions/{execution_id}/versions",
+    summary="查询指定步骤的历史版本列表",
+)
+async def list_step_versions(
+    execution_id: str,
+    request: Request,
+    step_index: int = 0,
+) -> dict:
+    """查询指定步骤的全部历史版本
+
+    需要管理员权限。返回该步骤的全部检查点版本，按版本号升序排列。
+
+    Args:
+        execution_id: 执行记录ID
+        request: FastAPI 请求对象（用于权限校验）
+        step_index: 步骤索引（从0开始）
+    """
+    _require_admin(request)
+
+    from agent.core.workflow.task_checkpoint import get_task_checkpoint_store
+
+    store = get_task_checkpoint_store()
+    versions = await store.list_step_versions(execution_id, step_index)
+    return {
+        "execution_id": execution_id,
+        "step_index": step_index,
+        "total": len(versions),
+        "versions": [v.model_dump() for v in versions],
+    }
+
+
+@router.get(
+    "/executions/{execution_id}/state",
+    summary="重建指定步骤/版本的任务状态快照",
+)
+async def get_state_at_step(
+    execution_id: str,
+    request: Request,
+    step_index: int = 0,
+    version: int | None = None,
+) -> dict:
+    """重建任务在指定步骤/版本时的完整状态快照
+
+    需要管理员权限。用于时间旅行查看任务历史状态。
+
+    Args:
+        execution_id: 执行记录ID
+        request: FastAPI 请求对象（用于权限校验）
+        step_index: 目标步骤索引（从0开始）
+        version: 指定版本号，None 表示最新版本
+    """
+    _require_admin(request)
+
+    from agent.core.workflow.task_checkpoint import get_task_checkpoint_store
+
+    store = get_task_checkpoint_store()
+    try:
+        snapshot = await store.get_state_at_step(execution_id, step_index, version)
+        return {
+            "execution_id": execution_id,
+            "step_index": step_index,
+            "version": version,
+            "snapshot": snapshot.model_dump(),
+        }
+    except ValueError as e:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.INVALID_PARAMETER, message=str(e))
+
+
+# ==================== Trace-Eval-Improve 闭环管理（spec 04） ====================
+
+
+class RuleApproveRequest(BaseModel):
+    """规则审核请求"""
+
+    approved_by: str = Field(..., description="审核人")
+    reason: str = Field(default="", description="审核说明")
+
+
+class RuleRejectRequest(BaseModel):
+    """规则拒绝请求"""
+
+    reason: str = Field(default="", description="拒绝原因")
+
+
+class RegressionTriggerRequest(BaseModel):
+    """回归测试触发请求"""
+
+    fixture_ids: list[str] = Field(..., description="要回归测试的 Fixture ID 列表")
+    baseline_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="各 fixture 的 baseline 评分 {fixture_id: score}",
+    )
+    k: int = Field(default=1, ge=1, description="pass^k 的 k 值")
+
+
+class ScanTriggerRequest(BaseModel):
+    """闭环扫描触发请求"""
+
+    since_hours: int = Field(default=24, ge=1, description="扫描最近 N 小时")
+    agent_name: str | None = Field(default=None, description="限定 Agent")
+    include_thumbs_down: bool = Field(default=True, description="是否纳入用户负反馈")
+    max_batch_size: int = Field(default=50, ge=1, le=500, description="单批最大处理量")
+
+
+def _get_failure_archive():
+    """获取 FailureArchive 单例（延迟初始化）
+
+    使用模块级全局变量缓存 FailureArchive 实例，
+    避免每次请求都创建新实例（归档记录保存在内存中）。
+    """
+    global _failure_archive_instance
+    if _failure_archive_instance is None:
+        from agent.evaluation.improvement.failure_archive import FailureArchive
+        _failure_archive_instance = FailureArchive()
+    return _failure_archive_instance
+
+
+# FailureArchive 全局单例
+_failure_archive_instance: Any | None = None
+
+
+@router.get(
+    "/eval/archives",
+    summary="查询失败归档记录",
+)
+async def list_eval_archives(
+    request: Request,
+    improvement_status: str | None = None,
+    failure_pattern: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """查询失败案例归档记录
+
+    需要管理员权限。支持按改进状态和失败模式过滤。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        improvement_status: 按改进状态过滤（pending/improving/resolved）
+        failure_pattern: 按失败模式过滤（injection_attack/pii_leakage/...）
+        limit: 返回记录数量上限
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    records = archive.list_archives(
+        improvement_status=improvement_status,
+        failure_pattern=failure_pattern,
+    )
+    records = records[:limit]
+    return {
+        "items": [r.model_dump() for r in records],
+        "total": len(records),
+    }
+
+
+@router.get(
+    "/eval/archives/{archive_id}",
+    summary="查询单个失败归档记录",
+)
+async def get_eval_archive(
+    archive_id: str,
+    request: Request,
+) -> dict:
+    """查询单个失败案例归档记录详情
+
+    需要管理员权限。
+
+    Args:
+        archive_id: 归档记录 ID
+        request: FastAPI 请求对象（用于权限校验）
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    record = archive.get_archive(archive_id)
+    if record is None:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.NOT_FOUND, message=f"归档记录不存在: {archive_id}")
+    return record.model_dump()
+
+
+@router.get(
+    "/eval/rules",
+    summary="查询护栏规则候选列表",
+)
+async def list_eval_rules(
+    request: Request,
+    status: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """查询护栏规则候选列表
+
+    需要管理员权限。支持按状态过滤。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        status: 按状态过滤（candidate/sandboxed/approved/rejected/online）
+        limit: 返回记录数量上限
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    records = archive.list_rule_candidates(status=status)
+    records = records[:limit]
+    return {
+        "items": [r.model_dump() for r in records],
+        "total": len(records),
+    }
+
+
+@router.post(
+    "/eval/rules/{rule_id}/approve",
+    summary="审核通过规则候选",
+)
+async def approve_eval_rule(
+    rule_id: str,
+    request: Request,
+    approve_request: RuleApproveRequest,
+) -> dict:
+    """审核通过护栏规则候选
+
+    需要管理员权限。规则候选需已通过沙箱验证才能审核通过。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象（用于权限校验）
+        approve_request: 审核请求
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    success = archive.approve_rule(rule_id, approved_by=approve_request.approved_by)
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(
+            ErrorCode.CONFLICT,
+            message=f"规则审核失败: rule_id={rule_id}（可能未通过沙箱验证或不存在）",
+        )
+    return {
+        "success": True,
+        "rule_id": rule_id,
+        "approved_by": approve_request.approved_by,
+        "status": "approved",
+    }
+
+
+@router.post(
+    "/eval/rules/{rule_id}/reject",
+    summary="拒绝规则候选",
+)
+async def reject_eval_rule(
+    rule_id: str,
+    request: Request,
+    reject_request: RuleRejectRequest,
+) -> dict:
+    """拒绝护栏规则候选
+
+    需要管理员权限。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象（用于权限校验）
+        reject_request: 拒绝请求
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    success = archive.reject_rule(rule_id, reason=reject_request.reason)
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.NOT_FOUND, message=f"规则候选不存在: {rule_id}")
+    return {
+        "success": True,
+        "rule_id": rule_id,
+        "reason": reject_request.reason,
+        "status": "rejected",
+    }
+
+
+@router.post(
+    "/eval/rules/{rule_id}/online",
+    summary="规则上线",
+)
+async def online_eval_rule(
+    rule_id: str,
+    request: Request,
+) -> dict:
+    """将已审核通过的规则标记为上线
+
+    需要管理员权限。规则需已审核通过才能上线。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象（用于权限校验）
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    success = archive.mark_online(rule_id)
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(
+            ErrorCode.CONFLICT,
+            message=f"规则上线失败: rule_id={rule_id}（可能未审核通过或不存在）",
+        )
+    return {
+        "success": True,
+        "rule_id": rule_id,
+        "status": "online",
+    }
+
+
+@router.post(
+    "/eval/regression",
+    summary="触发回归测试",
+)
+async def trigger_regression(
+    request: Request,
+    regression_request: RegressionTriggerRequest,
+) -> dict:
+    """触发改进效果回归测试
+
+    需要管理员权限。对指定 Fixture 列表执行回归测试，对比 baseline 评分。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        regression_request: 回归测试请求
+    """
+    _require_admin(request)
+
+    from agent.evaluation.replay.regression_test_runner import RegressionTestRunner
+
+    runner = RegressionTestRunner()
+    report = await runner.run_regression(
+        fixture_ids=regression_request.fixture_ids,
+        baseline_scores=regression_request.baseline_scores,
+        k=regression_request.k,
+    )
+    return report.model_dump()
+
+
+@router.post(
+    "/eval/scan",
+    summary="手动触发闭环扫描",
+)
+async def trigger_eval_scan(
+    request: Request,
+    scan_request: ScanTriggerRequest,
+) -> dict:
+    """手动触发 Trace-Eval-Improve 闭环扫描
+
+    需要管理员权限。扫描失败 session 并执行完整闭环流程。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        scan_request: 扫描请求参数
+    """
+    _require_admin(request)
+
+    from agent.evaluation.replay.eval_scheduler import (
+        EvalScheduler,
+        FailureFilter,
+    )
+    from observability.tracing import span_cache
+    from agent.core.observability.feedback import get_feedback_service
+
+    scheduler = EvalScheduler(
+        span_cache=span_cache,
+        feedback_service=get_feedback_service(),
+    )
+
+    filt = FailureFilter(
+        since_hours=scan_request.since_hours,
+        agent_name=scan_request.agent_name,
+        include_thumbs_down=scan_request.include_thumbs_down,
+        max_batch_size=scan_request.max_batch_size,
+    )
+
+    failed_sessions = await scheduler.scan_failed_sessions(filt)
+
+    processed_reports: list[str] = []
+    for failed in failed_sessions:
+        report_id = await scheduler.process_failed_session(failed)
+        if report_id:
+            processed_reports.append(report_id)
+
+    return {
+        "scanned_failed_sessions": len(failed_sessions),
+        "processed_reports": processed_reports,
+        "processed_count": len(processed_reports),
+        "failed_sessions": [f.model_dump() for f in failed_sessions],
+    }
+
+
+@router.get(
+    "/eval/replay-records",
+    summary="查询回放记录列表",
+)
+async def list_replay_records(
+    request: Request,
+    original_session_id: str | None = None,
+) -> dict:
+    """查询 Trace 回放记录列表
+
+    需要管理员权限。可按原始 session ID 过滤。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        original_session_id: 按原始 session ID 过滤
+    """
+    _require_admin(request)
+
+    from agent.evaluation.replay.trace_replayer import TraceReplayer
+    from observability.tracing import span_cache
+
+    replayer = TraceReplayer(span_cache=span_cache)
+    records = replayer.list_replay_records(
+        original_session_id=original_session_id,
+    )
+    return {
+        "items": [
+            r.model_dump() if hasattr(r, "model_dump") else r
+            for r in records
+        ],
+        "total": len(records),
+    }
+
+
+# ==================== Harness 自改进闭环管理（spec 05） ====================
+
+
+class GuardrailRuleCreateRequest(BaseModel):
+    """规则候选创建请求（spec 05）"""
+
+    pattern: str = Field(..., description="失败模式: injection_attack/pii_leakage/tool_misuse/hallucination/policy_violation")
+    rule_type: str = Field(..., description="规则类型: regex/keyword/function/schema")
+    rule_spec: dict[str, Any] = Field(..., description="规则定义")
+    layer: str = Field(default="input", description="护栏层: input/tool/output")
+    action: str = Field(default="block", description="命中动作: block/redact/warn")
+    description: str = Field(default="", description="规则说明")
+    source_trace_id: str = Field(default="", description="来源 Trace ID")
+    tenant_id: str = Field(default="", description="租户ID")
+    created_by: str = Field(default="admin", description="创建者")
+
+
+class GuardrailRuleApproveRequest(BaseModel):
+    """规则审核请求（spec 05）"""
+
+    approved_by: str = Field(..., description="审核人")
+    reason: str = Field(default="", description="审核说明")
+
+
+class GuardrailRuleRejectRequest(BaseModel):
+    """规则拒绝请求（spec 05）"""
+
+    reason: str = Field(default="", description="拒绝原因")
+    operator: str = Field(default="", description="操作人")
+
+
+class GuardrailRuleRollbackRequest(BaseModel):
+    """规则回滚请求（spec 05）"""
+
+    target_version: int | None = Field(None, description="目标版本号，None表示回滚到上一活跃版本")
+    operator: str = Field(default="admin", description="操作人")
+    reason: str = Field(default="", description="回滚原因")
+
+
+def _get_rule_store():
+    """获取规则存储实例（spec 05）"""
+    from agent.evaluation.improvement.rule_store import GuardrailRuleStore
+    return GuardrailRuleStore()
+
+
+def _get_rule_rollback():
+    """获取规则回滚器实例（spec 05）"""
+    from agent.evaluation.improvement.rule_rollback import RuleRollback
+    return RuleRollback(_get_rule_store())
+
+
+def _get_rule_metrics_collector():
+    """获取规则效果监控器实例（spec 05）"""
+    from agent.evaluation.improvement.rule_metrics import RuleMetricsCollector
+    return RuleMetricsCollector()
+
+
+def _get_dynamic_rule_loader():
+    """获取动态规则加载器实例（spec 05）"""
+    from agent.evaluation.improvement.dynamic_loader import DynamicRuleLoader
+    return DynamicRuleLoader(_get_rule_store())
+
+
+@router.get(
+    "/guardrail/rules",
+    summary="查询护栏规则列表（spec 05）",
+)
+async def list_guardrail_rules(
+    request: Request,
+    status: str | None = None,
+    pattern: str | None = None,
+    layer: str | None = None,
+    tenant_id: str = "",
+    limit: int = 50,
+) -> dict:
+    """查询护栏规则列表
+
+    需要管理员权限。支持按状态、失败模式、护栏层、租户过滤。
+
+    Args:
+        request: FastAPI 请求对象
+        status: 按规则状态过滤（candidate/sandbox_passed/approved/active/disabled/...）
+        pattern: 按失败模式过滤
+        layer: 按护栏层过滤（input/tool/output）
+        tenant_id: 按租户过滤
+        limit: 返回上限
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    rules = await store.list_rules(
+        status=status,
+        pattern=pattern,
+        layer=layer,
+        tenant_id=tenant_id,
+        limit=limit,
+    )
+    return {
+        "items": rules,
+        "total": len(rules),
+        "filters": {
+            "status": status,
+            "pattern": pattern,
+            "layer": layer,
+            "tenant_id": tenant_id,
+        },
+    }
+
+
+@router.get(
+    "/guardrail/rules/{rule_id}",
+    summary="查询护栏规则详情（spec 05）",
+)
+async def get_guardrail_rule(
+    rule_id: str,
+    request: Request,
+) -> dict:
+    """查询护栏规则详情
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    rule = await store.get_rule(rule_id)
+    if not rule:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.NOT_FOUND, message=f"规则 {rule_id} 不存在")
+    return rule
+
+
+@router.post(
+    "/guardrail/rules",
+    summary="创建护栏规则候选（spec 05）",
+)
+async def create_guardrail_rule(
+    request: Request,
+    create_request: GuardrailRuleCreateRequest,
+) -> dict:
+    """手动创建护栏规则候选
+
+    需要管理员权限。创建后规则状态为 candidate，需经沙箱验证和人工审核后上线。
+
+    Args:
+        request: FastAPI 请求对象
+        create_request: 创建请求
+    """
+    _require_admin(request)
+
+    from agent.evaluation.improvement.models import (
+        GuardrailRuleCandidate,
+        RuleType,
+        RuleStatus,
+        GuardrailLayer,
+    )
+
+    try:
+        rule_type = RuleType(create_request.rule_type)
+    except ValueError:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.INVALID_PARAMETER, message=f"无效的规则类型: {create_request.rule_type}")
+
+    try:
+        layer = GuardrailLayer(create_request.layer)
+    except ValueError:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.INVALID_PARAMETER, message=f"无效的护栏层: {create_request.layer}")
+
+    candidate = GuardrailRuleCandidate(
+        pattern=create_request.pattern,
+        rule_type=rule_type,
+        rule_spec=create_request.rule_spec,
+        layer=layer,
+        action=create_request.action,
+        description=create_request.description,
+        source_trace_id=create_request.source_trace_id,
+        tenant_id=create_request.tenant_id,
+        created_by=create_request.created_by,
+        status=RuleStatus.CANDIDATE,
+    )
+
+    store = _get_rule_store()
+    rule_id = await store.save_candidate(candidate)
+    return {"rule_id": rule_id, "status": "candidate"}
+
+
+@router.post(
+    "/guardrail/rules/{rule_id}/approve",
+    summary="审核通过护栏规则（spec 05）",
+)
+async def approve_guardrail_rule(
+    rule_id: str,
+    request: Request,
+    approve_request: GuardrailRuleApproveRequest,
+) -> dict:
+    """审核通过护栏规则
+
+    将规则状态从 sandbox_passed 变更为 approved，进而变更为 active。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        approve_request: 审核请求
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    # 1. 审核通过：sandbox_passed -> approved
+    success = await store.update_status(
+        rule_id=rule_id,
+        new_status="approved",
+        operator=approve_request.approved_by,
+        reason=approve_request.reason,
+    )
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"规则 {rule_id} 审核失败")
+
+    # 2. 上线：approved -> active
+    await store.update_status(
+        rule_id=rule_id,
+        new_status="active",
+        operator=approve_request.approved_by,
+        reason="审核通过后自动上线",
+    )
+
+    # 3. 刷新动态规则缓存
+    try:
+        loader = _get_dynamic_rule_loader()
+        await loader.refresh()
+    except Exception as e:
+        logger.warning("刷新动态规则缓存失败（非致命）: %s", e)
+
+    return {"rule_id": rule_id, "status": "active", "approved_by": approve_request.approved_by}
+
+
+@router.post(
+    "/guardrail/rules/{rule_id}/reject",
+    summary="拒绝护栏规则（spec 05）",
+)
+async def reject_guardrail_rule(
+    rule_id: str,
+    request: Request,
+    reject_request: GuardrailRuleRejectRequest,
+) -> dict:
+    """拒绝护栏规则
+
+    将规则状态变更为 rejected。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        reject_request: 拒绝请求
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    success = await store.update_status(
+        rule_id=rule_id,
+        new_status="rejected",
+        operator=reject_request.operator,
+        reason=reject_request.reason,
+    )
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"规则 {rule_id} 拒绝失败")
+
+    return {"rule_id": rule_id, "status": "rejected", "reason": reject_request.reason}
+
+
+@router.post(
+    "/guardrail/rules/{rule_id}/disable",
+    summary="禁用护栏规则（spec 05）",
+)
+async def disable_guardrail_rule(
+    rule_id: str,
+    request: Request,
+    reject_request: GuardrailRuleRejectRequest,
+) -> dict:
+    """禁用护栏规则
+
+    将规则状态从 active 变更为 disabled。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        reject_request: 禁用请求
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    success = await store.update_status(
+        rule_id=rule_id,
+        new_status="disabled",
+        operator=reject_request.operator,
+        reason=reject_request.reason,
+    )
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"规则 {rule_id} 禁用失败")
+
+    # 刷新动态规则缓存
+    try:
+        loader = _get_dynamic_rule_loader()
+        await loader.refresh()
+    except Exception as e:
+        logger.warning("刷新动态规则缓存失败（非致命）: %s", e)
+
+    return {"rule_id": rule_id, "status": "disabled", "reason": reject_request.reason}
+
+
+@router.post(
+    "/guardrail/rules/{rule_id}/rollback",
+    summary="回滚护栏规则到指定版本（spec 05）",
+)
+async def rollback_guardrail_rule(
+    rule_id: str,
+    request: Request,
+    rollback_request: GuardrailRuleRollbackRequest,
+) -> dict:
+    """回滚护栏规则
+
+    按版本回滚已上线规则。target_version=None 时自动查找上一活跃版本。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        rollback_request: 回滚请求
+    """
+    _require_admin(request)
+
+    rollback = _get_rule_rollback()
+    success = await rollback.rollback(
+        rule_id=rule_id,
+        target_version=rollback_request.target_version,
+        operator=rollback_request.operator,
+        reason=rollback_request.reason,
+    )
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"规则 {rule_id} 回滚失败")
+
+    # 刷新动态规则缓存
+    try:
+        loader = _get_dynamic_rule_loader()
+        await loader.refresh()
+    except Exception as e:
+        logger.warning("刷新动态规则缓存失败（非致命）: %s", e)
+
+    return {
+        "rule_id": rule_id,
+        "rolled_back_to": rollback_request.target_version,
+        "operator": rollback_request.operator,
+        "reason": rollback_request.reason,
+    }
+
+
+@router.get(
+    "/guardrail/rules/{rule_id}/versions",
+    summary="查询规则版本链（spec 05）",
+)
+async def list_rule_versions(
+    rule_id: str,
+    request: Request,
+) -> dict:
+    """查询规则的所有历史版本
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    versions = await store.get_rule_versions(rule_id)
+    return {
+        "rule_id": rule_id,
+        "versions": [v.model_dump() if hasattr(v, "model_dump") else v for v in versions],
+        "total": len(versions),
+    }
+
+
+@router.get(
+    "/guardrail/rules/{rule_id}/metrics",
+    summary="查询规则效果指标（spec 05）",
+)
+async def get_rule_metrics(
+    rule_id: str,
+    request: Request,
+    window_days: int = 7,
+) -> dict:
+    """查询规则效果指标
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        window_days: 统计窗口天数
+    """
+    _require_admin(request)
+
+    collector = _get_rule_metrics_collector()
+    metrics = await collector.get_metrics(rule_id, window_days=window_days)
+    need_rollback, reason = await collector.check_rollback_needed(rule_id)
+
+    return {
+        "rule_id": rule_id,
+        "window_days": window_days,
+        "metrics": metrics.model_dump() if hasattr(metrics, "model_dump") else metrics,
+        "rollback_needed": need_rollback,
+        "rollback_reason": reason,
+    }
+
+
+@router.post(
+    "/guardrail/rules/refresh-cache",
+    summary="强制刷新动态规则缓存（spec 05）",
+)
+async def refresh_dynamic_rules_cache(request: Request) -> dict:
+    """强制刷新动态规则缓存
+
+    需要管理员权限。刷新后运行时护栏立即加载最新规则。
+
+    Args:
+        request: FastAPI 请求对象
+    """
+    _require_admin(request)
+
+    loader = _get_dynamic_rule_loader()
+    count = await loader.refresh()
+    return {"refreshed": True, "active_rules_count": count}
+
+
+@router.get(
+    "/guardrail/rules/active/list",
+    summary="查询当前活跃的动态规则（spec 05）",
+)
+async def list_active_dynamic_rules(
+    request: Request,
+    pattern: str | None = None,
+    tenant_id: str = "",
+) -> dict:
+    """查询当前活跃的动态规则
+
+    Args:
+        request: FastAPI 请求对象
+        pattern: 按失败模式过滤
+        tenant_id: 按租户过滤
+    """
+    _require_admin(request)
+
+    loader = _get_dynamic_rule_loader()
+    rules = await loader.get_active_rules(pattern=pattern, tenant_id=tenant_id)
+    return {
+        "items": rules,
+        "total": len(rules),
+    }
+
+
+@router.post(
+    "/guardrail/consume/{trace_id}",
+    summary="手动触发失败 Trace 消费（spec 05）",
+)
+async def consume_failure_trace(
+    trace_id: str,
+    request: Request,
+    failure_reason: str = "",
+) -> dict:
+    """手动触发失败 Trace 消费
+
+    需要管理员权限。将指定 Trace 作为失败案例消费，触发分类和规则生成流程。
+    trace_id 同时作为 session_id 用于从 SpanCache 获取 spans。
+
+    Args:
+        trace_id: 失败 Trace ID（或 session ID）
+        request: FastAPI 请求对象
+        failure_reason: 失败原因摘要
+    """
+    _require_admin(request)
+
+    from agent.evaluation.improvement.trace_consumer import FailureTraceConsumer
+    from agent.evaluation.improvement.failure_pattern import FailurePatternClassifier
+
+    consumer = FailureTraceConsumer(FailurePatternClassifier())
+
+    # 先从 SpanCache 获取 spans
+    spans = await consumer._get_session_spans(trace_id)
+
+    result = await consumer.consume({
+        "trace_id": trace_id,
+        "session_id": trace_id,
+        "failure_reason": failure_reason,
+        "spans": spans,
+    })
+
+    if result is None:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"消费失败 Trace {trace_id} 失败")
+
+    return {
+        "trace_id": trace_id,
+        "classification": result.model_dump() if hasattr(result, "model_dump") else result,
+        "route_to_human": consumer.should_route_to_human(result),
+    }

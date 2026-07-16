@@ -61,8 +61,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             try:
                 from security.tenant import clear_tenant_context
                 clear_tenant_context()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         return response
 

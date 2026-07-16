@@ -248,8 +248,8 @@ async def cached_model_call(
         if cached is not None:
             logger.debug("语义缓存命中: agent=%s query=%s", agent_name, query_text[:30])
             return cached
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 调用 LLM
     client = get_model_client(tier)
@@ -263,8 +263,8 @@ async def cached_model_call(
         from agent.core.performance.semantic_cache import get_semantic_cache
         cache = get_semantic_cache()
         await cache.set(query_text, result, agent_name=agent_name, ttl=ttl)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     return result
 
@@ -310,16 +310,16 @@ def _record_token_usage(result: Any, tier: str, agent_name: str) -> None:
                         completion_tokens=completion_tokens,
                         agent_name=agent_name,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
             loop.create_task(_safe_record())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         logger.debug(
             "Token 用量: agent=%s tier=%s prompt=%d completion=%d",
             agent_name, tier, prompt_tokens, completion_tokens,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)

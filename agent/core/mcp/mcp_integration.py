@@ -33,73 +33,74 @@ class MCPServerConfig:
     enabled: bool = True
 
 
-# MCP 服务注册表（静态默认配置，可被 Registry 动态覆盖）
+# MCP 服务注册表（默认配置，可通过环境变量覆盖，可被 Registry 动态覆盖）
+# 环境变量命名规则：MCP_<服务名>_URL，如 MCP_OA_URL、MCP_EMAIL_URL
 MCP_SERVER_REGISTRY: dict[str, MCPServerConfig] = {
     "oa": MCPServerConfig(
         name="oa-mcp-server",
         description="OA 审批系统 MCP 服务",
         transport="sse",
-        url="http://localhost:9001/sse",
+        url=os.environ.get("MCP_OA_URL", "http://localhost:9001/sse"),
     ),
     "email": MCPServerConfig(
         name="email-mcp-server",
         description="邮件系统 MCP 服务",
         transport="sse",
-        url="http://localhost:9002/sse",
+        url=os.environ.get("MCP_EMAIL_URL", "http://localhost:9002/sse"),
     ),
     "calendar": MCPServerConfig(
         name="calendar-mcp-server",
         description="日历系统 MCP 服务",
         transport="sse",
-        url="http://localhost:9003/sse",
+        url=os.environ.get("MCP_CALENDAR_URL", "http://localhost:9003/sse"),
     ),
     "crm": MCPServerConfig(
         name="crm-mcp-server",
         description="CRM 系统 MCP 服务",
         transport="sse",
-        url="http://localhost:9004/sse",
+        url=os.environ.get("MCP_CRM_URL", "http://localhost:9004/sse"),
     ),
     "approval": MCPServerConfig(
         name="approval-mcp-server",
         description="审批系统 MCP 服务",
         transport="sse",
-        url="http://localhost:9005/sse",
+        url=os.environ.get("MCP_APPROVAL_URL", "http://localhost:9005/sse"),
     ),
     "im": MCPServerConfig(
         name="im-mcp-server",
         description="IM 消息系统 MCP 服务",
         transport="sse",
-        url="http://localhost:9006/sse",
+        url=os.environ.get("MCP_IM_URL", "http://localhost:9006/sse"),
     ),
     "doc": MCPServerConfig(
         name="doc-mcp-server",
         description="文档系统 MCP 服务",
         transport="sse",
-        url="http://localhost:9007/sse",
+        url=os.environ.get("MCP_DOC_URL", "http://localhost:9007/sse"),
     ),
     "hr": MCPServerConfig(
         name="hr-mcp-server",
         description="HR 人事系统 MCP 服务",
         transport="sse",
-        url="http://localhost:9008/sse",
+        url=os.environ.get("MCP_HR_URL", "http://localhost:9008/sse"),
     ),
     "finance": MCPServerConfig(
         name="finance-mcp-server",
         description="财务系统 MCP 服务",
         transport="sse",
-        url="http://localhost:9009/sse",
+        url=os.environ.get("MCP_FINANCE_URL", "http://localhost:9009/sse"),
     ),
     "knowledge": MCPServerConfig(
         name="knowledge-mcp-server",
         description="知识库 MCP 服务 - 由智能文档助手提供",
         transport="sse",
-        url="http://localhost:9010/sse",
+        url=os.environ.get("MCP_KNOWLEDGE_URL", "http://localhost:9010/sse"),
     ),
     "web_search": MCPServerConfig(
         name="web-search-mcp-server",
         description="网络搜索 MCP 服务 - 提供联网搜索能力",
         transport="sse",
-        url="http://localhost:9011/sse",
+        url=os.environ.get("MCP_WEB_SEARCH_URL", "http://localhost:9011/sse"),
     ),
 }
 
@@ -984,8 +985,8 @@ async def call_tool_with_timeout(
                     circuit_breaker.config.recovery_timeout,
                     f"MCP 服务 [{server_name}] 当前不可用，请稍后重试"
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     # 启动溯源
     trace_id = ""
@@ -1000,8 +1001,8 @@ async def call_tool_with_timeout(
                 agent_name=agent_name,
                 input_params=tool_input,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     last_error: Exception | None = None
 
@@ -1028,8 +1029,8 @@ async def call_tool_with_timeout(
                             "MCP 响应校验失败: server=%s tool=%s errors=%s",
                             server_name, tool_name, validation.errors,
                         )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
             # 熔断器记录成功
             if circuit_breaker:
@@ -1047,8 +1048,8 @@ async def call_tool_with_timeout(
                         validation_passed=validation_passed,
                         validation_confidence=validation_confidence,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
             return result
 
@@ -1084,7 +1085,7 @@ async def call_tool_with_timeout(
                 status="error",
                 error=str(last_error),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     raise last_error or Exception("工具调用失败")

@@ -171,8 +171,8 @@ def get_pool_manager() -> ConnectionPoolManager:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_pool_manager() is not None:
             return ctx.get_pool_manager()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _pool_manager is None:
         from agent.core.infrastructure.config import get_settings
         settings = get_settings()

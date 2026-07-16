@@ -746,8 +746,8 @@ class FaultIsolationPolicy:
             prompt = registry.get_prompt(agent_name)
             if prompt:
                 return prompt
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         try:
             from agent.agents.domain import AGENT_PROMPTS
@@ -907,8 +907,8 @@ class FaultIsolationPolicy:
                     "message": message,
                 },
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
 
 # ==================== 全局实例 ====================

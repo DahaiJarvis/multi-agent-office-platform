@@ -1,5 +1,9 @@
 """多 LLM 模型路由器
 
+注意：本文件与 agent/core/performance/model_router.py 同名但职责不同。
+- 本文件（model/model_router.py）：跨 LLM 提供商路由，消除供应商锁定
+- performance/model_router.py：同提供商内模型分级路由，按任务复杂度选型
+
 支持多个 LLM 提供商，消除供应商锁定风险：
   - OpenAI (GPT-4o / GPT-4o-mini)
   - Anthropic (Claude 3.5 Sonnet / Claude 3 Haiku)

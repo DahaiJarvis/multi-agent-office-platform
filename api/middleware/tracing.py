@@ -39,8 +39,8 @@ class TracingMiddleware(BaseHTTPMiddleware):
         try:
             from observability.metrics import record_request
             record_request(request.method, request.url.path, response.status_code, duration_ms / 1000)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Duration-Ms"] = f"{duration_ms:.1f}"

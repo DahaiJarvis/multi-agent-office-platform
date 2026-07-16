@@ -165,6 +165,17 @@ class StepCheckpoint(BaseModel):
     reasoning_chain: str = Field(default="", description="该步骤的推理链 JSON 字符串")
     created_at: float = Field(default_factory=time.time)
 
+    # ===== 新增字段（spec 03 第 4.4 节）：版本链与回放溯源 =====
+    version: int = Field(default=0, description="版本号，同 step_index 从0递增")
+    source: str = Field(
+        default="original",
+        description="检查点来源：original(原始执行) / replay(回放生成) / retry(重试生成)",
+    )
+    source_execution_id: str = Field(
+        default="",
+        description="回放溯源：若 source=replay，记录原 execution_id",
+    )
+
 
 class TaskExecution(BaseModel):
     """任务执行记录数据模型
@@ -220,6 +231,16 @@ class TaskExecution(BaseModel):
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
 
+    # ===== 新增字段（spec 03 第 4.5 节）：回放溯源 =====
+    source: str = Field(
+        default="original",
+        description="执行来源：original(原始执行) / replay(回放生成)",
+    )
+    source_execution_id: str = Field(
+        default="",
+        description="回放溯源：若 source=replay，记录原 execution_id",
+    )
+
 
 class TaskCheckpointStore:
     """任务检查点存储管理器
@@ -255,9 +276,16 @@ class TaskCheckpointStore:
     HEARTBEAT_TTL = 60
     HEARTBEAT_TIMEOUT = 120
 
+    # ===== 新增常量（spec 03 第 3.1/4.1 节）：版本链与回放锁 =====
+    VERSIONS_LIST_SUFFIX = ":versions"
+    VERSION_INDEX_SUFFIX = ":version"
+    REPLAY_LOCK_SUFFIX = ":replay:lock"
+    MAX_VERSIONS_PER_STEP = 20  # 单步骤版本链最大长度
+    REPLAY_LOCK_TTL = 600       # 回放互斥锁 TTL（秒）
+
     def __init__(self) -> None:
         """初始化任务检查点存储管理器
-        
+
         初始化Redis连接、内存存储和降级标志。
         采用延迟初始化策略，Redis连接在首次使用时建立。
         """
@@ -265,6 +293,10 @@ class TaskCheckpointStore:
         self._memory_store: dict[str, str] = {}
         self._memory_session_index: dict[str, str] = {}
         self._use_memory_fallback: bool = False
+        # 内存降级模式下的版本链存储：{execution_id: [StepCheckpoint, ...]}
+        self._memory_versions: dict[str, list[StepCheckpoint]] = {}
+        # 内存降级模式下的回放锁：{execution_id: lock_holder}
+        self._memory_replay_locks: dict[str, str] = {}
 
     async def _get_redis(self) -> Any:
         """获取Redis客户端连接
@@ -437,45 +469,68 @@ class TaskCheckpointStore:
         else:
             self._memory_store[task.execution_id] = task.model_dump_json()
 
-    async def save_checkpoint(self, execution_id: str, checkpoint: StepCheckpoint) -> None:
-        """保存步骤检查点
-        
-        将步骤检查点追加到任务执行记录中，用于任务恢复。
-        检查点保存遵循"最新覆盖"原则：同一步骤的旧检查点
-        会被新检查点替换，确保恢复时使用最新状态。
-        
+    async def save_checkpoint(
+        self,
+        execution_id: str,
+        checkpoint: StepCheckpoint,
+        overwrite: bool = False,
+    ) -> str:
+        """保存步骤检查点（改造后支持 append-only 版本链）
+
+        在保留原覆盖式逻辑的前提下，新增 overwrite 参数：
+            - overwrite=True：使用原覆盖式逻辑（兼容旧调用方显式指定）
+            - overwrite=False（默认）：采用 append-only 版本链存储
+
         Args:
             execution_id: 任务执行记录ID
             checkpoint: 步骤检查点对象
-        
-        检查点保存流程：
-            1. 获取任务执行记录
-            2. 移除同步骤索引的旧检查点（如果存在）
-            3. 追加新检查点
-            4. 更新当前步骤索引
-            5. 持久化更新后的记录
-        
-        设计原理：
-            检查点列表按步骤索引顺序存储，支持快速定位。
-            同步骤覆盖机制避免重复检查点，节省存储空间。
-            current_step指向下一个待执行步骤，便于恢复时
-            知道从哪里继续。
+            overwrite: 是否使用覆盖式存储，默认 False 使用 append-only
+
+        Returns:
+            版本号字符串（append-only 模式）或空字符串（overwrite 模式）
+
+        存储流程（append-only 模式）：
+            1. 为 checkpoint 分配版本号（同 step_index 递增）
+            2. RPUSH 到 task_exec:{id}:versions 列表
+            3. SET task_exec:{id}:version:{step_index}:{version} 索引
+            4. 更新 task_exec:{id} 的 current_step 和 updated_at
+            5. 触发版本链长度检查，超限淘汰最旧版本
         """
         task = await self.get_execution(execution_id)
         if task is None:
             logger.warning("保存检查点失败: 任务 %s 不存在", execution_id)
-            return
+            return ""
 
-        task.checkpoints = [c for c in task.checkpoints if c.step_index != checkpoint.step_index]
-        task.checkpoints.append(checkpoint)
+        if overwrite:
+            # 原覆盖式逻辑（保留，向后兼容）
+            task.checkpoints = [c for c in task.checkpoints if c.step_index != checkpoint.step_index]
+            task.checkpoints.append(checkpoint)
+            task.current_step = checkpoint.step_index + 1
+            task.updated_at = time.time()
+            await self.update_execution(task)
+            logger.info(
+                "检查点已保存(覆盖式): execution=%s step=%d/%d status=%s",
+                execution_id, checkpoint.step_index + 1, len(task.steps), checkpoint.status.value,
+            )
+            return ""
+
+        # append-only 版本链模式（spec 03 第 5.1 节）
+        version = await self._append_version(execution_id, checkpoint)
         task.current_step = checkpoint.step_index + 1
         task.updated_at = time.time()
-
+        # 同步更新 checkpoints 字段（向后兼容读取场景，保留最新版本）
+        task.checkpoints = [c for c in task.checkpoints if c.step_index != checkpoint.step_index]
+        task.checkpoints.append(checkpoint)
         await self.update_execution(task)
+
+        # 版本链长度检查，超限淘汰最旧版本
+        await self._evict_oldest_version(execution_id, checkpoint.step_index)
+
         logger.info(
-            "检查点已保存: execution=%s step=%d/%d status=%s",
-            execution_id, checkpoint.step_index + 1, len(task.steps), checkpoint.status.value,
+            "检查点已保存(append-only): execution=%s step=%d version=%d status=%s",
+            execution_id, checkpoint.step_index, version, checkpoint.status.value,
         )
+        return str(version)
 
     async def update_step_status(
         self,
@@ -546,8 +601,8 @@ class TaskCheckpointStore:
                 hb_key = f"{self.HEARTBEAT_KEY_PREFIX}{execution_id}"
                 await redis.set(hb_key, str(now), ex=self.HEARTBEAT_TTL)
                 await redis.zadd(self.RUNNING_ZSET_KEY, {execution_id: now})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         task = await self.get_execution(execution_id)
         if task is not None:
@@ -625,8 +680,8 @@ class TaskCheckpointStore:
                     if task.status == TaskStatus.RUNNING and now - task.heartbeat_at > self.HEARTBEAT_TIMEOUT:
                         await self.mark_interrupted(eid)
                         interrupted.append(task)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
         return interrupted
 
@@ -654,8 +709,320 @@ class TaskCheckpointStore:
                 await redis.zrem(self.RUNNING_ZSET_KEY, execution_id)
                 hb_key = f"{self.HEARTBEAT_KEY_PREFIX}{execution_id}"
                 await redis.delete(hb_key)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
+
+    # ==================== 新增方法（spec 03）：版本链与回放 ====================
+
+    async def _append_version(
+        self,
+        execution_id: str,
+        checkpoint: StepCheckpoint,
+    ) -> int:
+        """追加版本到版本链，返回分配的版本号
+
+        版本号分配规则：同 step_index 的版本号从 0 递增。
+        不同 step_index 的版本号独立计数。
+
+        Returns:
+            分配的版本号
+        """
+        # 计算下一个版本号：同 step_index 的最大版本号 + 1（淘汰后版本号不连续，避免冲突）
+        existing = await self.list_step_versions(execution_id, checkpoint.step_index)
+        if existing:
+            next_version = max(c.version for c in existing) + 1
+        else:
+            next_version = 0
+        checkpoint.version = next_version
+
+        redis = await self._get_redis()
+        if redis is not None:
+            try:
+                versions_key = f"{self.EXEC_KEY_PREFIX}{execution_id}{self.VERSIONS_LIST_SUFFIX}"
+                index_key = (
+                    f"{self.EXEC_KEY_PREFIX}{execution_id}{self.VERSION_INDEX_SUFFIX}"
+                    f":{checkpoint.step_index}:{next_version}"
+                )
+                # 管道批量执行：RPUSH 版本链 + SET 版本索引
+                pipe = redis.pipeline()
+                pipe.rpush(versions_key, checkpoint.model_dump_json())
+                pipe.expire(versions_key, self.EXEC_TTL)
+                pipe.set(index_key, checkpoint.model_dump_json(), ex=self.EXEC_TTL)
+                await pipe.execute()
+            except Exception as e:
+                logger.warning("版本链追加失败(execution=%s): %s", execution_id, e)
+        else:
+            # 内存降级模式
+            if execution_id not in self._memory_versions:
+                self._memory_versions[execution_id] = []
+            self._memory_versions[execution_id].append(checkpoint)
+
+        return next_version
+
+    async def _evict_oldest_version(
+        self,
+        execution_id: str,
+        step_index: int,
+    ) -> None:
+        """淘汰指定步骤的最旧版本
+
+        当某步骤的版本数超过 MAX_VERSIONS_PER_STEP 时，
+        删除最旧版本（版本号最小的）以控制存储空间。
+        """
+        versions = await self.list_step_versions(execution_id, step_index)
+        if len(versions) <= self.MAX_VERSIONS_PER_STEP:
+            return
+
+        # 需要淘汰的数量
+        evict_count = len(versions) - self.MAX_VERSIONS_PER_STEP
+
+        redis = await self._get_redis()
+        if redis is not None:
+            try:
+                versions_key = f"{self.EXEC_KEY_PREFIX}{execution_id}{self.VERSIONS_LIST_SUFFIX}"
+                for i in range(evict_count):
+                    evict_version = versions[i].version
+                    index_key = (
+                        f"{self.EXEC_KEY_PREFIX}{execution_id}{self.VERSION_INDEX_SUFFIX}"
+                        f":{step_index}:{evict_version}"
+                    )
+                    pipe = redis.pipeline()
+                    pipe.lrem(versions_key, 1, versions[i].model_dump_json())
+                    pipe.delete(index_key)
+                    await pipe.execute()
+                    logger.info(
+                        "版本链淘汰: execution=%s step=%d version=%d",
+                        execution_id, step_index, evict_version,
+                    )
+            except Exception as e:
+                logger.warning("版本链淘汰失败(execution=%s): %s", execution_id, e)
+        else:
+            # 内存降级模式：按 version 升序排序，淘汰最旧的 evict_count 个版本
+            if execution_id in self._memory_versions:
+                step_versions = sorted(
+                    [c for c in self._memory_versions[execution_id] if c.step_index == step_index],
+                    key=lambda c: c.version,
+                )
+                evict_versions = {c.version for c in step_versions[:evict_count]}
+                self._memory_versions[execution_id] = [
+                    c for c in self._memory_versions[execution_id]
+                    if not (c.step_index == step_index and c.version in evict_versions)
+                ]
+
+    async def list_step_versions(
+        self,
+        execution_id: str,
+        step_index: int,
+    ) -> list[StepCheckpoint]:
+        """列出指定步骤的所有历史版本（时间旅行基础）
+
+        从版本链中筛选出指定 step_index 的全部版本，按版本号升序返回。
+
+        Args:
+            execution_id: 任务执行记录ID
+            step_index: 步骤索引
+
+        Returns:
+            该步骤的全部历史版本列表，按版本号升序排列
+            若任务不存在或无版本记录，返回空列表
+        """
+        redis = await self._get_redis()
+        if redis is not None:
+            try:
+                versions_key = f"{self.EXEC_KEY_PREFIX}{execution_id}{self.VERSIONS_LIST_SUFFIX}"
+                raw_list = await redis.lrange(versions_key, 0, -1)
+                if not raw_list:
+                    return []
+                checkpoints: list[StepCheckpoint] = []
+                for raw in raw_list:
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8")
+                    try:
+                        cp = StepCheckpoint.model_validate_json(raw)
+                        if cp.step_index == step_index:
+                            checkpoints.append(cp)
+                    except Exception:
+                        continue
+                checkpoints.sort(key=lambda c: c.version)
+                return checkpoints
+            except Exception as e:
+                logger.warning("版本链查询失败(execution=%s): %s", execution_id, e)
+                return []
+        else:
+            # 内存降级模式
+            versions = self._memory_versions.get(execution_id, [])
+            checkpoints = [c for c in versions if c.step_index == step_index]
+            checkpoints.sort(key=lambda c: c.version)
+            return checkpoints
+
+    async def get_state_at_step(
+        self,
+        execution_id: str,
+        step_index: int,
+        version: int | None = None,
+    ) -> TaskExecution:
+        """获取任务在指定步骤/版本时的完整状态快照
+
+        重建任务在指定步骤执行完毕后的完整状态，用于时间旅行和回放。
+
+        Args:
+            execution_id: 任务执行记录ID
+            step_index: 目标步骤索引
+            version: 指定版本号，None 表示该步骤的最新版本
+
+        Returns:
+            重建后的 TaskExecution 对象
+
+        Raises:
+            ValueError: 任务不存在、步骤索引越界、版本号不存在时抛出
+        """
+        task = await self.get_execution(execution_id)
+        if task is None:
+            raise ValueError(f"任务不存在: {execution_id}")
+
+        # 步骤索引越界检查（基于 task.steps 长度）
+        if task.steps and step_index >= len(task.steps):
+            raise ValueError(
+                f"步骤索引越界: step_index={step_index}, max={len(task.steps) - 1}"
+            )
+        if step_index < 0:
+            raise ValueError(f"步骤索引越界: step_index={step_index}")
+
+        # 读取版本链全部版本
+        redis = await self._get_redis()
+        all_versions: list[StepCheckpoint] = []
+        if redis is not None:
+            try:
+                versions_key = f"{self.EXEC_KEY_PREFIX}{execution_id}{self.VERSIONS_LIST_SUFFIX}"
+                raw_list = await redis.lrange(versions_key, 0, -1)
+                for raw in raw_list:
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8")
+                    try:
+                        all_versions.append(StepCheckpoint.model_validate_json(raw))
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.warning("状态快照重建读取版本链失败: %s", e)
+        else:
+            all_versions = list(self._memory_versions.get(execution_id, []))
+
+        # 如果版本链为空，回退到 task.checkpoints（向后兼容无版本链的旧任务）
+        if not all_versions and task.checkpoints:
+            all_versions = list(task.checkpoints)
+
+        # 筛选 step_index <= 目标步骤的所有版本
+        relevant = [c for c in all_versions if c.step_index <= step_index]
+        if not relevant:
+            raise ValueError(f"步骤索引越界或无版本记录: step_index={step_index}")
+
+        # 每个 step_index 取指定版本（默认最新版本）
+        step_indices = sorted({c.step_index for c in relevant})
+        selected: list[StepCheckpoint] = []
+        for si in step_indices:
+            step_versions = [c for c in relevant if c.step_index == si]
+            step_versions.sort(key=lambda c: c.version)
+            if version is not None and si == step_index:
+                # 目标步骤取指定版本
+                target = next((c for c in step_versions if c.version == version), None)
+                if target is None:
+                    raise ValueError(
+                        f"版本号不存在: step_index={step_index} version={version}"
+                    )
+                selected.append(target)
+            else:
+                # 非目标步骤取最新版本
+                selected.append(step_versions[-1])
+
+        # 组装新的 TaskExecution 快照
+        snapshot = task.model_copy(deep=True)
+        snapshot.checkpoints = selected
+        snapshot.current_step = step_index + 1
+        snapshot.status = TaskStatus.RUNNING
+        return snapshot
+
+    async def _acquire_replay_lock(
+        self,
+        execution_id: str,
+    ) -> bool:
+        """获取回放互斥锁
+
+        使用 Redis SET NX EX 实现分布式锁，
+        防止同一任务并发回放导致状态污染。
+
+        Returns:
+            True 表示获取成功，False 表示已有回放进行中
+        """
+        lock_holder = f"{uuid.uuid4().hex[:12]}:{time.time()}"
+        redis = await self._get_redis()
+        if redis is not None:
+            try:
+                lock_key = f"{self.EXEC_KEY_PREFIX}{execution_id}{self.REPLAY_LOCK_SUFFIX}"
+                result = await redis.set(lock_key, lock_holder, ex=self.REPLAY_LOCK_TTL, nx=True)
+                if result:
+                    return True
+                return False
+            except Exception as e:
+                logger.warning("获取回放锁失败(execution=%s): %s", execution_id, e)
+                return False
+        else:
+            # 内存降级模式
+            if execution_id in self._memory_replay_locks:
+                return False
+            self._memory_replay_locks[execution_id] = lock_holder
+            return True
+
+    async def _release_replay_lock(
+        self,
+        execution_id: str,
+    ) -> None:
+        """释放回放互斥锁"""
+        redis = await self._get_redis()
+        if redis is not None:
+            try:
+                lock_key = f"{self.EXEC_KEY_PREFIX}{execution_id}{self.REPLAY_LOCK_SUFFIX}"
+                await redis.delete(lock_key)
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
+        else:
+            self._memory_replay_locks.pop(execution_id, None)
+
+    async def replay_from_step(
+        self,
+        execution_id: str,
+        from_step: int,
+        from_version: int | None = None,
+        overrides: dict[str, Any] | None = None,
+    ) -> str:
+        """从指定步骤/版本回放执行
+
+        回放流程：
+            1. 获取回放互斥锁（防止并发回放污染）
+            2. 重建 from_step 时的状态快照（调用 get_state_at_step）
+            3. 应用 overrides（修改输入数据/替换 Agent）
+            4. 生成新的 execution_id（不污染原执行记录）
+            5. 从 from_step 重新执行后续步骤（使用 Mock 工具客户端）
+            6. 将回放轨迹记录到新 execution_id 的版本链
+            7. 释放回放互斥锁
+
+        Returns:
+            新生成的 execution_id，记录回放轨迹
+
+        Raises:
+            ValueError: 任务不存在、步骤越界、版本不存在时抛出
+            RuntimeError: 回放互斥锁获取失败（已有回放进行中）时抛出
+        """
+        # 延迟导入避免循环依赖
+        from agent.core.workflow.execution_replayer import get_execution_replayer
+
+        replayer = get_execution_replayer()
+        return await replayer.replay(
+            execution_id=execution_id,
+            from_step=from_step,
+            from_version=from_version,
+            overrides=overrides,
+            checkpoint_store=self,
+        )
 
 
 _task_checkpoint_store: TaskCheckpointStore | None = None
@@ -686,8 +1053,8 @@ def get_task_checkpoint_store() -> TaskCheckpointStore:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_task_checkpoint_store() is not None:
             return ctx.get_task_checkpoint_store()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _task_checkpoint_store is None:
         _task_checkpoint_store = TaskCheckpointStore()
     return _task_checkpoint_store

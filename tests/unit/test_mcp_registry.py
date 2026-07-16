@@ -172,8 +172,10 @@ class TestRegistryInMemory:
             await register_service(RegisterRequest(name="service-b", url="http://b:9002/sse"))
 
         result = await list_services()
-        assert len(result) == 2
-        names = [s["name"] for s in result]
+        assert result["success"] is True
+        assert result["total"] == 2
+        services = result["data"]
+        names = [s["name"] for s in services]
         assert "service-a" in names
         assert "service-b" in names
 
@@ -190,5 +192,7 @@ class TestRegistryInMemory:
             ))
 
         result = await get_service("test-service")
-        assert result["name"] == "test-service"
-        assert len(result["tools"]) == 2
+        assert result["success"] is True
+        service_data = result["data"]
+        assert service_data["name"] == "test-service"
+        assert len(service_data["tools"]) == 2

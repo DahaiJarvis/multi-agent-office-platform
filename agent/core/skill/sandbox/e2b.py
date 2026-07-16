@@ -235,8 +235,8 @@ class E2BSandbox(SandboxBackend):
                     remote_path = f"/home/user/skill/{file_path.name}"
                     try:
                         sbx.files.write(remote_path, file_path.read_text(encoding="utf-8", errors="replace"))
-                    except Exception:
-                        pass  # 非关键文件，上传失败不影响执行
+                    except Exception as e:
+                        logger.debug("操作失败，已忽略: %s", e)  # 非关键文件，上传失败不影响执行
 
             # 构建执行代码：设置环境变量 + 执行脚本
             args_json = json.dumps(args, ensure_ascii=False)
@@ -299,10 +299,10 @@ exec(open('/home/user/skill/scripts/{script_name}').read())
                             local_path = os.path.join(output_dir, f.name)
                             with open(local_path, "w", encoding="utf-8") as lf:
                                 lf.write(content if isinstance(content, str) else str(content))
-                        except Exception:
-                            pass
-            except Exception:
-                pass  # 输出文件下载非关键
+                        except Exception as e:
+                            logger.debug("操作失败，已忽略: %s", e)
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)  # 输出文件下载非关键
 
             result = ExecutionResult(
                 skill_name=skill_name,
@@ -336,14 +336,14 @@ exec(open('/home/user/skill/scripts/{script_name}').read())
             if sbx is not None:
                 try:
                     sbx.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
     async def cleanup(self) -> None:
         """清理 E2B 沙箱资源"""
         if self._sandbox_client is not None:
             try:
                 self._sandbox_client.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
             self._sandbox_client = None

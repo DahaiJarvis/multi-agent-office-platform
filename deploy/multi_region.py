@@ -642,8 +642,8 @@ async def _measure_region_replication_lag(region: DeployRegion) -> float:
             if response.status_code == 200:
                 data = response.json()
                 return float(data.get("replication_lag_ms", 0))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     return region.data_replication_lag_ms
 

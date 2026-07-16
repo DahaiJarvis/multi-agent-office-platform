@@ -1595,8 +1595,8 @@ class TaskExecutionEngine:
                             ctx = chain.to_context_text()
                             if ctx:
                                 reasoning_parts.append(ctx)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("推理链解析失败，已忽略: %s", e)
                 if reasoning_parts:
                     task_parts.append("[推理依据]\n" + "\n".join(reasoning_parts))
 
@@ -2078,8 +2078,8 @@ class TaskExecutionEngine:
                     "status": execution.status.value,
                 },
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("事件发布失败，已忽略: %s", e)
 
     async def _publish_step_event(
         self,
@@ -2122,8 +2122,8 @@ class TaskExecutionEngine:
                 execution.session_id,
                 step_data,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("事件发布失败，已忽略: %s", e)
 
     async def get_execution_status(self, execution_id: str) -> dict[str, Any] | None:
         """查询任务执行状态
@@ -2206,8 +2206,8 @@ def get_task_execution_engine() -> TaskExecutionEngine:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_task_execution_engine() is not None:
             return ctx.get_task_execution_engine()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("获取任务执行引擎失败，已忽略: %s", e)
     if _task_execution_engine is None:
         _task_execution_engine = TaskExecutionEngine()
     return _task_execution_engine
