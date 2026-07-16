@@ -12,8 +12,9 @@
 
 import logging
 from datetime import datetime
+from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 from api.models.response import HealthResponse
@@ -482,3 +483,177 @@ async def heartbeat_status() -> dict:
 
     monitor = get_heartbeat_monitor()
     return monitor.get_status()
+
+
+# ==================== 检查点时间旅行与回放（spec 03） ====================
+
+
+def _require_admin(request: Request) -> None:
+    """校验管理员权限
+
+    Args:
+        request: FastAPI 请求对象
+
+    Raises:
+        AppException: 权限不足
+    """
+    user_roles = getattr(request.state, "user_roles", [])
+    if "admin" not in user_roles:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.PERMISSION_DENIED, message="需要管理员权限")
+
+
+class ReplayRequest(BaseModel):
+    """回放请求模型"""
+
+    from_step: int = Field(..., ge=1, description="回放起始步骤索引（从1开始）")
+    from_version: int | None = Field(None, ge=0, description="回放起始步骤的版本号，None表示最新版本")
+    overrides: dict[str, Any] | None = Field(None, description="覆盖配置")
+    use_mock_tools: bool = Field(True, description="是否使用Mock工具，默认True")
+
+
+class ReplayResponse(BaseModel):
+    """回放响应模型"""
+
+    new_execution_id: str = Field(..., description="回放生成的新执行记录ID")
+    source_execution_id: str = Field(..., description="原执行记录ID")
+    from_step: int = Field(..., description="回放起始步骤")
+    from_version: int | None = Field(None, description="回放起始版本")
+    status: str = Field(..., description="回放状态：running/completed/failed")
+    started_at: str = Field(..., description="回放开始时间ISO格式")
+
+
+@router.post(
+    "/executions/{execution_id}/replay",
+    response_model=ReplayResponse,
+    summary="从指定步骤回放执行任务",
+)
+async def replay_execution(
+    execution_id: str,
+    request: Request,
+    replay_request: ReplayRequest,
+) -> ReplayResponse:
+    """从指定步骤/版本回放执行任务
+
+    需要管理员权限。回放使用 Mock 工具客户端，生成新 execution_id，
+    不污染原执行记录。
+
+    Args:
+        execution_id: 原执行记录ID
+        request: FastAPI 请求对象（用于权限校验）
+        replay_request: 回放请求参数
+    """
+    _require_admin(request)
+
+    from datetime import datetime as _dt
+
+    from agent.core.workflow.task_checkpoint import get_task_checkpoint_store
+
+    store = get_task_checkpoint_store()
+    started_at = _dt.now().isoformat()
+
+    # spec 中 from_step 从 1 开始，内部 step_index 从 0 开始
+    from_step_index = replay_request.from_step - 1
+
+    # 合并 use_mock_tools 到 overrides
+    overrides = replay_request.overrides or {}
+    overrides["use_mock_tools"] = replay_request.use_mock_tools
+
+    try:
+        new_exec_id = await store.replay_from_step(
+            execution_id=execution_id,
+            from_step=from_step_index,
+            from_version=replay_request.from_version,
+            overrides=overrides,
+        )
+
+        # 查询回放任务状态
+        new_exec = await store.get_execution(new_exec_id)
+        status = "running"
+        if new_exec is not None:
+            status = new_exec.status.value
+
+        return ReplayResponse(
+            new_execution_id=new_exec_id,
+            source_execution_id=execution_id,
+            from_step=replay_request.from_step,
+            from_version=replay_request.from_version,
+            status=status,
+            started_at=started_at,
+        )
+    except ValueError as e:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.INVALID_PARAMETER, message=str(e))
+    except RuntimeError as e:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=str(e))
+
+
+@router.get(
+    "/executions/{execution_id}/versions",
+    summary="查询指定步骤的历史版本列表",
+)
+async def list_step_versions(
+    execution_id: str,
+    request: Request,
+    step_index: int = 0,
+) -> dict:
+    """查询指定步骤的全部历史版本
+
+    需要管理员权限。返回该步骤的全部检查点版本，按版本号升序排列。
+
+    Args:
+        execution_id: 执行记录ID
+        request: FastAPI 请求对象（用于权限校验）
+        step_index: 步骤索引（从0开始）
+    """
+    _require_admin(request)
+
+    from agent.core.workflow.task_checkpoint import get_task_checkpoint_store
+
+    store = get_task_checkpoint_store()
+    versions = await store.list_step_versions(execution_id, step_index)
+    return {
+        "execution_id": execution_id,
+        "step_index": step_index,
+        "total": len(versions),
+        "versions": [v.model_dump() for v in versions],
+    }
+
+
+@router.get(
+    "/executions/{execution_id}/state",
+    summary="重建指定步骤/版本的任务状态快照",
+)
+async def get_state_at_step(
+    execution_id: str,
+    request: Request,
+    step_index: int = 0,
+    version: int | None = None,
+) -> dict:
+    """重建任务在指定步骤/版本时的完整状态快照
+
+    需要管理员权限。用于时间旅行查看任务历史状态。
+
+    Args:
+        execution_id: 执行记录ID
+        request: FastAPI 请求对象（用于权限校验）
+        step_index: 目标步骤索引（从0开始）
+        version: 指定版本号，None 表示最新版本
+    """
+    _require_admin(request)
+
+    from agent.core.workflow.task_checkpoint import get_task_checkpoint_store
+
+    store = get_task_checkpoint_store()
+    try:
+        snapshot = await store.get_state_at_step(execution_id, step_index, version)
+        return {
+            "execution_id": execution_id,
+            "step_index": step_index,
+            "version": version,
+            "snapshot": snapshot.model_dump(),
+        }
+    except ValueError as e:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.INVALID_PARAMETER, message=str(e))
