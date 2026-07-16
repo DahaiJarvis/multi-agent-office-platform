@@ -109,6 +109,7 @@ MAX_ROUNDS = {
     CollaborationMode.DIRECT: 5,      # 单 Agent 模式，轮次较少
     CollaborationMode.SELECTOR: 15,   # 多 Agent 协作，允许更多轮次
     CollaborationMode.SWARM: 20,      # 复杂任务，允许最多轮次
+    CollaborationMode.HANDOFF: 10,    # handoff 链路较短，10 轮足够
 }
 
 
@@ -188,6 +189,9 @@ async def create_team(intent: IntentResult) -> Any:
 
     if mode == CollaborationMode.SWARM:
         return await _create_swarm_team(intent, max_rounds)
+
+    if mode == CollaborationMode.HANDOFF:
+        return await _create_handoff_team(intent, max_rounds)
 
     raise ValueError(f"不支持的协作模式: {mode}")
 
@@ -411,6 +415,78 @@ async def _create_swarm_team(intent: IntentResult, max_rounds: int) -> Any:
     logger.info(
         "创建 Swarm: participants=%s review=%s",
         participant_names,
+        intent.review_required,
+    )
+    return team
+
+
+async def _create_handoff_team(intent: IntentResult, max_rounds: int) -> Any:
+    """创建 Handoff 协作模式团队
+
+    构建一个不含 Supervisor 的轻量 Swarm 团队：
+    - 参与者由 HandoffRegistry 根据 from_agent 的可达目标确定
+    - 每个 Agent 的 handoffs 配置为 Registry 中注册的目标列表
+    - 若 intent.review_required，注入 Reviewer
+
+    与 _create_swarm_team 的区别：
+    -------------------------------------------------------------------------
+    1. 不创建 Supervisor Agent
+    2. 参与者列表由 HandoffRegistry.get_targets() 决定，而非固定全员
+    3. 初始执行 Agent 为 intent.target_agent，由其自主 handoff
+    -------------------------------------------------------------------------
+
+    Args:
+        intent: 意图分类结果，target_agent 为初始 Agent
+        max_rounds: 最大轮次
+
+    Returns:
+        Swarm 团队实例
+    """
+    from agent.teams.handoff_primitive import get_handoff_registry
+
+    registry = get_handoff_registry()
+
+    # 确定参与者：初始 Agent + 其可达目标 + 目标的可达目标（两层）
+    participant_names: set[str] = {intent.target_agent}
+    initial_targets = registry.get_targets(intent.target_agent)
+    participant_names.update(initial_targets)
+    # 扩展一层：目标 Agent 的可 handoff 目标
+    for target in initial_targets:
+        participant_names.update(registry.get_targets(target))
+
+    # 注入 Reviewer（如果需要审核）
+    # SEC-2: 敏感操作不可通过 handoff 绕过审核
+    if intent.review_required:
+        participant_names.add("Reviewer")
+
+    # 为每个 Agent 创建带 handoffs 的实例（复用现有 _create_swarm_agent_with_handoffs）
+    participants: list[AssistantAgent] = []
+    for name in participant_names:
+        handoff_targets = [
+            n for n in registry.get_targets(name) if n in participant_names
+        ]
+        # Reviewer 不可被 handoff 绕过，其 handoffs 配置为空
+        if name == "Reviewer":
+            handoff_targets = []
+        agent = await _create_swarm_agent_with_handoffs(name, handoff_targets)
+        participants.append(agent)
+
+    # 终止条件复用 Swarm 的约定
+    termination = (
+        TextMentionTermination("TASK_COMPLETE")
+        | TextMentionTermination("TEAM_TASK_COMPLETE")
+        | MaxMessageTermination(max_rounds)
+    )
+
+    team = Swarm(
+        participants=participants,
+        termination_condition=termination,
+    )
+
+    logger.info(
+        "创建 Handoff 团队: initial=%s participants=%s review=%s",
+        intent.target_agent,
+        sorted(participant_names),
         intent.review_required,
     )
     return team

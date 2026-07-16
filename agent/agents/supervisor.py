@@ -91,12 +91,19 @@ class CollaborationMode(str, Enum):
         - 适用于跨系统操作或复杂多步任务
         - 包含 Supervisor + 多个领域 Agent + OfficeAssistant + Reviewer
         - 执行路径：用户 -> Supervisor -> Agent1/Agent2/... -> Reviewer -> 结果
+
+    HANDOFF：
+        - Agent 间显式移交控制权，无需 Supervisor 全局规划
+        - 适用于路径确定的跨领域转交，如客服转接、文档解析后发邮件
+        - 包含参与 handoff 链路的领域 Agent（不含 Supervisor）
+        - 执行路径：用户 -> 初始 Agent -> handoff -> 目标 Agent -> 结果
     -------------------------------------------------------------------------
     """
 
     DIRECT = "direct"
     SELECTOR = "selector"
     SWARM = "swarm"
+    HANDOFF = "handoff"  # Agent 间显式移交控制权，无需 Supervisor
 
 
 class IntentResult(BaseModel):
@@ -188,6 +195,9 @@ INTENT_ROUTING_TABLE: dict[str, dict[str, Any]] = {
     "cross_system": {"agent": "Swarm", "mode": "swarm", "review": True},
     "complex_task": {"agent": "Swarm", "mode": "swarm", "review": True},
     "general": {"agent": "OfficeAssistant", "mode": "direct", "review": False},
+    # handoff 模式意图（路径确定的跨领域转交）
+    "customer_service_route": {"agent": "OfficeAssistant", "mode": "handoff", "review": False},
+    "document_then_send": {"agent": "KnowledgeAgent", "mode": "handoff", "review": True},
 }
 
 # 需要审核的敏感操作关键词
