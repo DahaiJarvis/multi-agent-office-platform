@@ -37,15 +37,13 @@ import time
 import uuid
 from contextlib import nullcontext
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent.evaluation.fixtures.fixture_schema import Fixture
 from agent.evaluation.replay.deterministic_mode import DeterministicMode
-
-if TYPE_CHECKING:
-    from agent.evaluation.runners.harness_runner import SingleEvalResult
+from agent.evaluation.runners.harness_runner import SingleEvalResult
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +102,8 @@ class ReplayResult(BaseModel):
         default_factory=list,
         description="回放工具调用轨迹",
     )
-    # SingleEvalResult 尚未实现，使用 Any 占位，真实集成时替换为 SingleEvalResult
-    new_result: Any | None = Field(default=None, description="回放执行结果（SingleEvalResult）")
+    # 回放执行结果，类型为 SingleEvalResult（from agent.evaluation.runners.harness_runner）
+    new_result: SingleEvalResult | None = Field(default=None, description="回放执行结果")
     trajectory_diff: TrajectoryDiff | None = Field(default=None, description="轨迹差异")
     fixture_generated: Fixture | None = Field(default=None, description="自动生成的 Fixture")
     reproduced: bool = Field(default=False, description="是否成功复现")
@@ -556,6 +554,16 @@ class TraceReplayer:
                 trajectory = list(getattr(result, "trajectory", []) or [])
             else:
                 output = str(result)
+
+            # 回放轨迹为空时降级为复用原始轨迹
+            # 场景：route_and_execute 因外部依赖不可用（如 PostgreSQL/Redis）返回空轨迹
+            # 此时返回 None 触发调用方的降级逻辑，复用原始轨迹
+            if not trajectory:
+                logger.debug(
+                    "真实回放未产生轨迹，降级为复用原始轨迹: new_session=%s",
+                    new_session_id,
+                )
+                return None
 
             logger.info(
                 "真实回放成功: new_session=%s output_len=%d trajectory_steps=%d",

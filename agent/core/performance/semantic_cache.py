@@ -245,8 +245,8 @@ class SemanticCache:
         if self._config.enable_embedding:
             try:
                 embedding = await self._get_embedding(query) or []
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         # 写入 L1
         self._l1.set(query_hash, response)

@@ -65,8 +65,8 @@ async def execute_tool(
     try:
         from observability.metrics import record_tool_usage
         record_tool_usage(tool_name, result.get("status", "unknown"))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     return result
 

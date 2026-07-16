@@ -58,8 +58,8 @@ class AppContext:
                 on_degraded=self._session_manager.switch_to_memory_fallback,
                 on_recovered=self._session_manager.switch_to_redis,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
         logger.info("会话管理器初始化完成")
 
         from agent.core.infrastructure.event_bus import EventBus
@@ -147,21 +147,21 @@ class AppContext:
         if self._scheduler_worker:
             try:
                 await self._scheduler_worker.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         if self._event_bus:
             try:
                 await self._event_bus.stop_redis_listener()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         try:
             from agent.core.observability.audit import get_audit_logger
             audit = get_audit_logger()
             await audit.flush_buffer()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         if self._session_manager:
             await self._session_manager.close()
@@ -169,14 +169,14 @@ class AppContext:
         try:
             from agent.core.mcp.mcp_integration import close_all_connections
             await close_all_connections()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         if self._pool_manager:
             try:
                 await self._pool_manager.shutdown()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         self._initialized = False
         logger.info("应用上下文已关闭")

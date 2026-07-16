@@ -4,7 +4,7 @@
   1. 端到端回放流程：创建任务 -> 保存检查点 -> 回放 -> 验证新 execution
   2. 向后兼容性：旧调用方零改动正常工作
   3. 回放隔离：原执行记录在回放前后保持一致
-  4. MockToolClient 隔离：回放过程无真实工具调用
+  4. ReplayToolClient 隔离：回放过程无真实工具调用
   5. 版本链淘汰端到端：大量版本写入后正确淘汰
   6. 回放互斥锁：并发回放被正确阻止
   7. 溯源能力：回放生成的检查点能溯源到原任务
@@ -30,7 +30,7 @@ from agent.core.workflow.task_checkpoint import (
     TaskStatus,
 )
 from agent.core.workflow.execution_replayer import ExecutionReplayer
-from agent.core.workflow.mock_tool_client import MockToolClient
+from agent.core.workflow.replay_tool_client import ReplayToolClient
 
 
 # ==================== 辅助函数 ====================
@@ -295,13 +295,13 @@ class TestReplayIsolation:
 
     @pytest.mark.asyncio
     async def test_replay_uses_mock_tool_client_only(self):
-        """回放过程仅使用 MockToolClient，无真实工具调用"""
+        """回放过程仅使用 ReplayToolClient，无真实工具调用"""
         store = _make_store()
         task = _make_task(steps_count=3, execution_id="exec-iso-002")
         await _prepare_executed_task(store, task, completed_steps=2)
 
-        # 直接验证 MockToolClient 行为
-        mock_client = MockToolClient({
+        # 直接验证 ReplayToolClient 行为
+        mock_client = ReplayToolClient({
             "Agent_2": {"result": "mocked_output"},
         })
 
@@ -602,7 +602,7 @@ class TestOverridesInjection:
 
     @pytest.mark.asyncio
     async def test_use_mock_tools_false_skips_mock_client(self):
-        """use_mock_tools=False 时不使用 MockToolClient"""
+        """use_mock_tools=False 时不使用 ReplayToolClient"""
         store = _make_store()
         task = _make_task(steps_count=3, execution_id="exec-override-004")
         await _prepare_executed_task(store, task, completed_steps=1)

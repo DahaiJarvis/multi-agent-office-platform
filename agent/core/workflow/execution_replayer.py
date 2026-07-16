@@ -13,7 +13,7 @@
     7. 释放互斥锁并返回新 execution_id
 
 安全约束：
-    - 回放默认使用 MockToolClient，禁止真实工具调用
+    - 回放默认使用 ReplayToolClient，禁止真实工具调用
     - 回放生成新 execution_id，原执行记录只读不写
     - 回放 API 需要管理员权限校验
 
@@ -25,7 +25,7 @@ import time
 import uuid
 from typing import Any
 
-from agent.core.workflow.mock_tool_client import MockToolClient
+from agent.core.workflow.replay_tool_client import ReplayToolClient
 from agent.core.workflow.task_checkpoint import (
     StepCheckpoint,
     StepStatus,
@@ -255,11 +255,11 @@ class ExecutionReplayer:
     ) -> None:
         """执行剩余步骤
 
-        从 from_step 开始逐步骤执行。回放模式下使用 MockToolClient 隔离真实工具调用，
+        从 from_step 开始逐步骤执行。回放模式下使用 ReplayToolClient 隔离真实工具调用，
         基于原执行记录的 output_data 生成一致的 Mock 响应。
 
         安全约束：
-            - use_mock_tools=True 时强制使用 MockToolClient
+            - use_mock_tools=True 时强制使用 ReplayToolClient
             - 回放生成的检查点标记 source="replay"
             - 原执行记录只读不写
 
@@ -280,10 +280,10 @@ class ExecutionReplayer:
                 if cp.agent_name:
                     original_outputs[cp.agent_name] = cp.output_data
 
-        # 初始化 MockToolClient
-        mock_client: MockToolClient | None = None
+        # 初始化 ReplayToolClient
+        mock_client: ReplayToolClient | None = None
         if use_mock_tools:
-            mock_client = MockToolClient(original_outputs)
+            mock_client = ReplayToolClient(original_outputs)
 
         # 读取 overrides 中的 agent_override 和 input_data
         agent_override = execution.intent_result.get("_replay_agent_override", {})
@@ -309,7 +309,7 @@ class ExecutionReplayer:
             if str(step_index) in input_override:
                 step_input.update(input_override[str(step_index)])
 
-            # 如果有 MockToolClient，调用一次记录调用（验证 Mock 隔离）
+            # 如果有 ReplayToolClient，调用一次记录调用（验证 Mock 隔离）
             if mock_client is not None and original_agent:
                 await mock_client.call_tool(original_agent, step_input)
 

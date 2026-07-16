@@ -1,5 +1,9 @@
 """评估调度器
 
+注意：本文件与 agent/evaluation/replay/eval_scheduler.py 同名但职责不同。
+- 本文件（runners/eval_scheduler.py）：spec 01 评估调度，定时扫描失败 trace 触发评估
+- replay/eval_scheduler.py：spec 04 闭环调度，驱动 Trace-Eval-Improve 完整闭环
+
 定时扫描失败 trace，触发评估与 fixture 转化。
 对应 spec 文档 3.11 节。
 

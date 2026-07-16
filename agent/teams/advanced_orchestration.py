@@ -88,8 +88,8 @@ def _extract_agent_response(result: Any) -> str:
             if content_parts:
                 # 优先返回最后一条非工具消息（即 Agent 的最终回复）
                 return content_parts[-1]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     return str(result)
 

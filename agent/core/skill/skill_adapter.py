@@ -1296,8 +1296,8 @@ class SkillRegistry:
                 skill = BUILTIN_SKILLS.get(skill_id)
                 if skill and skill.prompt_extension:
                     builtin_parts.append(f"- {skill.name}: {skill.prompt_extension}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         if not builtin_parts:
             return ""
@@ -1325,8 +1325,8 @@ class SkillRegistry:
             try:
                 from observability.metrics import record_skill_usage
                 record_skill_usage(doc.manifest.name, agent_name)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         # 获取该 Agent 绑定的内置技能 ID 集合，用于冲突提示
         agent_builtin_ids = set(self._builtin_bindings.get(agent_name, []))
@@ -1735,15 +1735,15 @@ class SkillRegistry:
             tool_reg = get_native_tool_registry()
             if tool_reg and tool_reg.get(tool_name):
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         try:
             from agent.core.mcp.mcp_integration import get_tool_server_name
             if get_tool_server_name(tool_name) is not None:
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         return False
 
@@ -2700,8 +2700,8 @@ class SkillRegistry:
                     from agent.core.session.session_manager import get_session_manager
                     session_mgr = await get_session_manager()
                     await session_mgr.delete_session(session.session_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
         return result
 

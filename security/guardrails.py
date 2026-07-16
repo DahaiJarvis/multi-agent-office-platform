@@ -381,8 +381,8 @@ async def check_tool_call_guardrails(
         try:
             from observability.metrics import record_guardrail_block
             record_guardrail_block("tool_whitelist", "block")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
         return GuardrailResult(
             passed=False,
             action=GuardrailAction.BLOCK,
@@ -404,8 +404,8 @@ async def check_tool_call_guardrails(
         try:
             from observability.metrics import record_guardrail_block
             record_guardrail_block("permission", "block")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
         return GuardrailResult(
             passed=False,
             action=GuardrailAction.BLOCK,
@@ -426,8 +426,8 @@ async def check_tool_call_guardrails(
             try:
                 from observability.metrics import record_guardrail_block
                 record_guardrail_block("sensitive_action", "confirm")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
             approval_id = await _create_approval_for_sensitive_action(
                 tool_name=tool_name,
                 tool_input=tool_input,
@@ -465,8 +465,8 @@ async def check_tool_call_guardrails(
             try:
                 from observability.metrics import record_guardrail_block
                 record_guardrail_block("tool_schema", "block")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
             return GuardrailResult(
                 passed=False,
                 action=GuardrailAction.BLOCK,
@@ -642,8 +642,8 @@ def _check_tool_whitelist(tool_name: str) -> dict[str, Any]:
             from agent.tools.registry import get_native_tool_registry
             native_registry = get_native_tool_registry()
             registered_in_native = native_registry.get_meta(tool_name) is not None
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     registered = registered_in_mcp or registered_in_native
 
@@ -1005,10 +1005,10 @@ async def _create_approval_for_sensitive_action(
             try:
                 from security.tenant import get_current_tenant_id
                 get_current_tenant_id()
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         # 从 SENSITIVE_ACTIONS 获取审批链配置
         approval_chain: list[dict[str, Any]] = []

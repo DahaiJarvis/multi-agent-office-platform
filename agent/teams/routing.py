@@ -235,8 +235,8 @@ async def route_and_execute(
     # 记录意图分布业务指标
     try:
         record_intent_distribution(intent.intent, intent.confidence)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 记录意图分类 Span（用于 Langfuse 追踪）
     try:
@@ -261,8 +261,8 @@ async def route_and_execute(
             },
             duration_ms=intent_duration,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 发布意图分类事件（用于事件驱动架构）
     try:
@@ -276,8 +276,8 @@ async def route_and_execute(
                 "mode": intent.collaboration_mode.value,
             },
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 步骤 3：置信度校验
     # 当置信度低于阈值时，不直接执行，而是请求用户澄清
@@ -286,8 +286,8 @@ async def route_and_execute(
         # 记录需要用户澄清的业务指标
         try:
             record_clarification(intent.intent)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
         return {
             "status": "clarification_needed",
             "message": f"我不太确定您的意图（置信度: {intent.confidence:.0%}），请更详细地描述您的需求。",
@@ -343,8 +343,8 @@ async def route_and_execute(
                 "mode": intent.collaboration_mode.value,
             },
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 步骤 6：执行任务
     # 调用 ExecutionController 执行，包含超时控制、重试逻辑、上下文压缩
@@ -360,16 +360,16 @@ async def route_and_execute(
             record_agent_call(intent.target_agent, "error", duration)
             try:
                 record_business_task(intent.intent, intent.target_agent, "timeout", duration)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
             try:
                 await publish_event(EventType.ERROR, session_id, {
                     "agent_name": intent.target_agent,
                     "error": "timeout",
                     "duration_ms": round(duration * 1000),
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
             return {
                 "status": "error",
                 "message": f"任务执行超时（超过 {controller._config.max_runtime}s），请简化请求或稍后重试。",
@@ -383,8 +383,8 @@ async def route_and_execute(
             record_agent_call(intent.target_agent, "error", duration)
             try:
                 record_business_task(intent.intent, intent.target_agent, "error", duration)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
             logger.error("任务执行失败: agent=%s error=%s", intent.target_agent, exec_meta.message)
             try:
                 await publish_event(EventType.ERROR, session_id, {
@@ -392,8 +392,8 @@ async def route_and_execute(
                     "error": exec_meta.message,
                     "duration_ms": round(duration * 1000),
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
             return {
                 "status": "error",
                 "message": f"任务执行失败: {exec_meta.message}",
@@ -409,8 +409,8 @@ async def route_and_execute(
         record_agent_call(intent.target_agent, "success", duration)
         try:
             record_business_task(intent.intent, intent.target_agent, "success", duration)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         # 记录审计日志
         try:
@@ -430,8 +430,8 @@ async def route_and_execute(
                     "compacted": exec_meta.compacted,
                 },
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         # 记录 Langfuse 追踪
         langfuse_tracer.trace_agent_call(
@@ -462,8 +462,8 @@ async def route_and_execute(
             await span_cache.increment_agent_stats(
                 intent.target_agent, duration * 1000, success=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         # 发布 Agent 完成事件
         try:
@@ -474,8 +474,8 @@ async def route_and_execute(
                 "retries": exec_meta.retries,
                 "compacted": exec_meta.compacted,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         return {
             "status": "success",
@@ -491,8 +491,8 @@ async def route_and_execute(
         record_agent_call(intent.target_agent, "error", duration)
         try:
             record_business_task(intent.intent, intent.target_agent, "error", duration)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
         logger.error("任务执行失败: agent=%s error=%s", intent.target_agent, e)
 
         # 记录失败统计
@@ -500,8 +500,8 @@ async def route_and_execute(
             await span_cache.increment_agent_stats(
                 intent.target_agent, duration * 1000, success=False,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         # 记录失败审计日志
         try:
@@ -520,8 +520,8 @@ async def route_and_execute(
                     "error": str(e)[:200],
                 },
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         return {
             "status": "error",
@@ -538,8 +538,8 @@ async def route_and_execute(
             try:
                 from security.tenant import get_current_tenant_id
                 tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
             if session and session.message_history:
                 await extract_and_store_knowledge(
                     user_id=user_id,
@@ -547,8 +547,8 @@ async def route_and_execute(
                     messages=session.message_history,
                     tenant_id=tenant_id,
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
 
 async def _build_contextual_task(
@@ -737,8 +737,8 @@ async def route_and_execute_stream(
             },
             duration_ms=intent_duration,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 输出意图分类结果
     yield {
@@ -758,8 +758,8 @@ async def route_and_execute_stream(
             "target_agent": intent.target_agent,
             "mode": intent.collaboration_mode.value,
         })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 步骤 2：置信度校验
     if intent.confidence < CONFIDENCE_THRESHOLD:
@@ -876,8 +876,8 @@ async def route_and_execute_stream(
             "intent": intent.intent,
             "mode": intent.collaboration_mode.value,
         })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 步骤 5：流式执行任务
     full_response = ""
@@ -1026,8 +1026,8 @@ async def route_and_execute_stream(
                 "error": str(e),
                 "duration_ms": round(duration * 1000),
             })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         yield {
             "type": "error",
@@ -1046,8 +1046,8 @@ async def route_and_execute_stream(
             "status": "success",
             "duration_ms": round(duration * 1000),
         })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 记录 Langfuse 追踪
     try:
@@ -1062,8 +1062,8 @@ async def route_and_execute_stream(
                 "mode": intent.collaboration_mode.value,
             },
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     yield {
         "type": "complete",

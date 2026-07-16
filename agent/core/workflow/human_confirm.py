@@ -505,8 +505,8 @@ def get_human_confirm_manager() -> HumanConfirmManager:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_human_confirm_manager() is not None:
             return ctx.get_human_confirm_manager()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _human_confirm_manager is None:
         _human_confirm_manager = HumanConfirmManager()
     return _human_confirm_manager

@@ -1,13 +1,13 @@
-"""回放专用 Mock 工具客户端
+"""回放专用工具客户端
 
 在回放过程中替代真实的 MCP 工具客户端，确保回放不会产生
 任何真实副作用（如发送邮件、创建审批、修改日历等）。
 
 安全保证：
-    - 所有工具调用返回预设的 Mock 响应
+    - 所有工具调用返回预设的回放响应
     - 不建立任何网络连接
     - 不访问任何真实数据源
-    - Mock 响应基于原执行记录中的 output_data 生成
+    - 响应基于原执行记录中的 output_data 生成
 
 对应规格文档：docs/spec/03-检查点时间旅行-spec.md 第 7.2 节
 """
@@ -18,25 +18,25 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-class MockToolClient:
-    """回放专用 Mock 工具客户端
+class ReplayToolClient:
+    """回放专用工具客户端
 
     在回放过程中替代真实的 MCP 工具客户端，确保回放不会产生
     任何真实副作用（如发送邮件、创建审批、修改日历等）。
 
     安全保证：
-        - 所有工具调用返回预设的 Mock 响应
+        - 所有工具调用返回预设的回放响应
         - 不建立任何网络连接
         - 不访问任何真实数据源
-        - Mock 响应基于原执行记录中的 output_data 生成
+        - 响应基于原执行记录中的 output_data 生成
     """
 
     def __init__(self, original_outputs: dict[str, Any]) -> None:
-        """初始化 Mock 工具客户端
+        """初始化回放工具客户端
 
         Args:
             original_outputs: 原执行记录中各步骤的输出数据，
-                              用于生成一致的 Mock 响应。
+                              用于生成一致的回放响应。
                               键为工具名称或步骤名称，值为输出数据字典。
         """
         self._original_outputs = original_outputs
@@ -48,20 +48,20 @@ class MockToolClient:
         tool_name: str,
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
-        """调用工具（Mock 实现）
+        """调用工具（回放模式）
 
-        返回预设的 Mock 响应，不产生任何真实副作用。
+        返回预设的回放响应，不产生任何真实副作用。
 
         Args:
             tool_name: 工具名称
             arguments: 调用参数
 
         Returns:
-            Mock 响应字典
+            回放响应字典
         """
         self._call_count += 1
         logger.info(
-            "MockToolClient 工具调用(count=%d): tool=%s args_keys=%s",
+            "ReplayToolClient 工具调用(count=%d): tool=%s args_keys=%s",
             self._call_count,
             tool_name,
             list(arguments.keys()) if arguments else [],
@@ -71,7 +71,7 @@ class MockToolClient:
         if tool_name in self._original_outputs:
             return self._original_outputs[tool_name]
 
-        # 通用 Mock 响应：标记为回放 mock 结果
+        # 通用回放响应：标记为回放结果
         return {
             "status": "mocked",
             "tool": tool_name,

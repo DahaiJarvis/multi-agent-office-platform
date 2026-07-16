@@ -104,6 +104,8 @@ class MockChatCompletionClient:
         """根据消息内容匹配响应
 
         遍历 responses 中的关键词，匹配用户消息返回对应响应。
+        使用最长匹配策略：当多个关键词同时匹配时，返回最长关键词对应的响应，
+        避免短关键词误匹配（如"邮件"匹配"发邮件"场景）。
         无匹配时返回默认响应。
         """
         user_content = ""
@@ -118,11 +120,17 @@ class MockChatCompletionClient:
 
         user_content = user_content.lower()
 
+        # 最长匹配策略：收集所有匹配的关键词，选择最长的一个
+        best_keyword: str | None = None
+        best_response = self._default_response
         for keyword, response in self._responses.items():
-            if keyword.lower() in user_content:
-                return response
+            kw_lower = keyword.lower()
+            if kw_lower in user_content:
+                if best_keyword is None or len(kw_lower) > len(best_keyword):
+                    best_keyword = kw_lower
+                    best_response = response
 
-        return self._default_response
+        return best_response
 
     async def create(
         self,
@@ -374,10 +382,12 @@ INTENT_MOCK_RESPONSES: dict[str, str] = {
     "拒绝": '{"intent": "approval_action", "confidence": 0.9, "sub_tasks": []}',
     "邮件": '{"intent": "email_query", "confidence": 0.9, "sub_tasks": []}',
     "发邮件": '{"intent": "email_send", "confidence": 0.95, "sub_tasks": []}',
+    "发一封": '{"intent": "email_send", "confidence": 0.95, "sub_tasks": []}',
     "日程": '{"intent": "calendar_query", "confidence": 0.9, "sub_tasks": []}',
     "会议": '{"intent": "calendar_create", "confidence": 0.9, "sub_tasks": []}',
     "客户": '{"intent": "crm_query", "confidence": 0.9, "sub_tasks": []}',
     "请假": '{"intent": "hr_action", "confidence": 0.95, "sub_tasks": []}',
+    "天假": '{"intent": "hr_action", "confidence": 0.95, "sub_tasks": []}',
     "考勤": '{"intent": "hr_query", "confidence": 0.9, "sub_tasks": []}',
     "报销": '{"intent": "finance_action", "confidence": 0.95, "sub_tasks": []}',
     "知识": '{"intent": "knowledge_query", "confidence": 0.9, "sub_tasks": []}',

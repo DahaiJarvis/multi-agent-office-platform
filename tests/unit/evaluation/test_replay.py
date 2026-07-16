@@ -78,15 +78,14 @@ class TestDeterministicMode:
             assert client is not None
             assert client.call_count == 0
 
-    def test_mock_client_responses_match(self):
+    async def test_mock_client_responses_match(self):
         """测试 mock 客户端返回预设响应"""
         mode = DeterministicMode(mock_responses={"未读": "3 封未读邮件"})
         with mode():
             from autogen_core.models import UserMessage
             client = mode.mock_client
-            import asyncio
-            result = asyncio.get_event_loop().run_until_complete(
-                client.create(messages=[UserMessage(content="查询未读邮件", source="user")])
+            result = await client.create(
+                messages=[UserMessage(content="查询未读邮件", source="user")]
             )
             assert "3 封未读邮件" in result.content
 

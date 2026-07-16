@@ -175,8 +175,8 @@ class MCPTracer:
                 status=status,
                 duration=trace.duration_ms / 1000.0,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         # 检查是否需要告警
         self._check_alert(trace)

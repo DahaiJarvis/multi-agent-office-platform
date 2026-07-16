@@ -93,8 +93,8 @@ class FeedbackService:
                 try:
                     old_data = json.loads(old_feedback_raw)
                     old_type = old_data.get("feedback_type", "")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
             # 存储反馈详情（覆盖同一消息的旧反馈）
             feedback_data = {
@@ -373,8 +373,8 @@ def get_feedback_service() -> FeedbackService:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_feedback_service() is not None:
             return ctx.get_feedback_service()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _feedback_service is None:
         _feedback_service = FeedbackService()
     return _feedback_service

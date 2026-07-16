@@ -150,8 +150,8 @@ def record_audit(event: AuditEvent) -> None:
         try:
             from security.tenant import get_current_tenant_id
             event.tenant_id = get_current_tenant_id() or ""
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     event.risk_level = _determine_risk_level(event)
     event_json = event.model_dump_json()

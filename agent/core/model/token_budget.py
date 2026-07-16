@@ -136,8 +136,8 @@ class TokenBudgetManager:
         try:
             from observability.metrics import record_llm_usage
             record_llm_usage(model, prompt_tokens, completion_tokens)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         # 异步更新 Redis 中的用量统计
         await self._update_usage_stats(user_id, session_id, usage, tenant_id, agent_name)
@@ -507,8 +507,8 @@ def get_token_budget_manager() -> TokenBudgetManager:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_token_budget_manager() is not None:
             return ctx.get_token_budget_manager()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _budget_manager is None:
         _budget_manager = TokenBudgetManager()
     return _budget_manager

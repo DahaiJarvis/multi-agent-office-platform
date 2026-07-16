@@ -318,8 +318,8 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
                 if event_bus_gen is not None:
                     try:
                         await event_bus_gen.aclose()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("操作失败，已忽略: %s", e)
 
             if full_message:
                 try:

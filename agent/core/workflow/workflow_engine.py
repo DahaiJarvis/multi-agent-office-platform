@@ -811,8 +811,8 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
         try:
             from observability.metrics import record_workflow_execution
             record_workflow_execution(workflow_id, "success")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     except Exception as e:
         # 执行失败，记录错误信息
@@ -824,8 +824,8 @@ async def execute_workflow(workflow_id: str, input_data: dict[str, Any] | None =
         try:
             from observability.metrics import record_workflow_execution
             record_workflow_execution(workflow_id, "error")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
     # 记录执行完成时间并持久化
     execution.completed_at = time.time()
@@ -1461,8 +1461,8 @@ def _resolve_value(token: str, context: dict[str, Any]) -> Any:
                     # 路径中的某层不存在，返回原始 token
                     return token
             return val
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 4. 整数字面量
     try:

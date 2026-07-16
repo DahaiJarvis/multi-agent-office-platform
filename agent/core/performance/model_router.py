@@ -1,5 +1,9 @@
 """模型分级路由
 
+注意：本文件与 agent/core/model/model_router.py 同名但职责不同。
+- 本文件（performance/model_router.py）：同提供商内模型分级路由，按任务复杂度选型
+- model/model_router.py：跨 LLM 提供商路由，消除供应商锁定
+
 根据任务复杂度自动选择合适的模型级别，实现成本与性能的平衡。
 
 模型分级策略:

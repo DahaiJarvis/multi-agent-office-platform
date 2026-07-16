@@ -24,7 +24,7 @@ from agent.core.workflow.task_checkpoint import (
     TaskStatus,
     FailurePolicy,
 )
-from agent.core.workflow.mock_tool_client import MockToolClient
+from agent.core.workflow.replay_tool_client import ReplayToolClient
 from agent.core.workflow.execution_replayer import ExecutionReplayer
 
 
@@ -483,17 +483,17 @@ class TestReplayLock:
         assert r2 is True
 
 
-# ==================== MockToolClient 测试 ====================
+# ==================== ReplayToolClient 测试 ====================
 
 
-class TestMockToolClient:
+class TestReplayToolClient:
     """测试 Mock 工具客户端"""
 
     @pytest.mark.asyncio
     async def test_call_tool_returns_preset_output(self):
         """调用工具返回预设输出"""
         outputs = {"send_email": {"status": "sent", "id": "mock-001"}}
-        client = MockToolClient(outputs)
+        client = ReplayToolClient(outputs)
 
         result = await client.call_tool("send_email", {"to": "test@test.com"})
         assert result == {"status": "sent", "id": "mock-001"}
@@ -501,7 +501,7 @@ class TestMockToolClient:
     @pytest.mark.asyncio
     async def test_call_tool_generic_mock_response(self):
         """未预设的工具返回通用 Mock 响应"""
-        client = MockToolClient({})
+        client = ReplayToolClient({})
         result = await client.call_tool("unknown_tool", {"arg": "val"})
 
         assert result["status"] == "mocked"
@@ -510,7 +510,7 @@ class TestMockToolClient:
     @pytest.mark.asyncio
     async def test_call_count_increments(self):
         """调用次数递增"""
-        client = MockToolClient({})
+        client = ReplayToolClient({})
         assert client.call_count == 0
 
         await client.call_tool("tool1", {})
@@ -521,7 +521,7 @@ class TestMockToolClient:
     @pytest.mark.asyncio
     async def test_no_real_side_effects(self):
         """Mock 客户端不产生真实副作用"""
-        client = MockToolClient({})
+        client = ReplayToolClient({})
         result = await client.call_tool("send_email", {"to": "real@test.com"})
 
         # 结果是 mock 响应，不包含真实发送信息

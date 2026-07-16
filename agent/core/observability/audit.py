@@ -171,8 +171,8 @@ class AuditLogger:
             try:
                 from security.tenant import get_current_tenant_id
                 tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         event = AuditEvent(
             event_type=event_type,
@@ -327,8 +327,8 @@ class AuditLogger:
 
         try:
             os.makedirs(self.FALLBACK_DIR, exist_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         today = datetime.now().strftime("%Y%m%d")
         filepath = os.path.join(self.FALLBACK_DIR, f"audit_{today}.jsonl")
@@ -464,8 +464,8 @@ def get_audit_logger() -> AuditLogger:
                 on_degraded=_audit_logger.switch_to_file_fallback,
                 on_recovered=_audit_logger.switch_to_postgres,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
     return _audit_logger
 
 

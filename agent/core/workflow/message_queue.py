@@ -844,8 +844,8 @@ def get_scheduled_task_manager() -> ScheduledTaskManager:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_scheduled_task_manager() is not None:
             return ctx.get_scheduled_task_manager()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _scheduled_task_manager is None:
         _scheduled_task_manager = ScheduledTaskManager()
     return _scheduled_task_manager

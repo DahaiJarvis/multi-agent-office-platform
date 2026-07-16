@@ -294,8 +294,8 @@ class ApprovalFlowManager:
             try:
                 from observability.metrics import record_approval_action
                 record_approval_action("approve")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         # 更新 Redis
         await self._update_approval(approval)
@@ -334,8 +334,8 @@ class ApprovalFlowManager:
         try:
             from observability.metrics import record_approval_action
             record_approval_action("reject")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("操作失败，已忽略: %s", e)
 
         logger.info("审批单已拒绝: id=%s approver=%s reason=%s", approval_id, approver, reason)
         return approval
@@ -503,8 +503,8 @@ def get_approval_flow_manager() -> ApprovalFlowManager:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_approval_flow_manager() is not None:
             return ctx.get_approval_flow_manager()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _approval_flow_manager is None:
         _approval_flow_manager = ApprovalFlowManager()
     return _approval_flow_manager

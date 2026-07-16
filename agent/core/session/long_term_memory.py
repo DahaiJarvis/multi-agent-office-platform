@@ -194,8 +194,8 @@ class LongTermMemory:
             try:
                 from security.tenant import get_current_tenant_id
                 tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("获取租户ID失败，使用默认空值: %s", e)
 
         pool = await self._get_pool()
         if pool is None:
@@ -277,8 +277,8 @@ class LongTermMemory:
         try:
             from security.tenant import get_current_tenant_id
             tenant_id = get_current_tenant_id() or ""
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("获取租户ID失败，使用默认空值: %s", e)
 
         try:
             async with pool() as session:
@@ -352,8 +352,8 @@ class LongTermMemory:
             try:
                 from security.tenant import get_current_tenant_id
                 tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("获取租户ID失败，使用默认空值: %s", e)
 
         pool = await self._get_pool()
         if pool is None:
@@ -491,8 +491,8 @@ class LongTermMemory:
             try:
                 from security.tenant import get_current_tenant_id
                 tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("获取租户ID失败，使用默认空值: %s", e)
 
         pool = await self._get_pool()
         if pool is None:
@@ -592,8 +592,8 @@ class LongTermMemory:
             try:
                 from security.tenant import get_current_tenant_id
                 tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("获取租户ID失败，使用默认空值: %s", e)
 
         pool = await self._get_pool()
         if pool is None:
@@ -867,7 +867,8 @@ class LongTermMemory:
 
                 rows = []
                 for idx, row in enumerate(result.mappings().all()):
-                    # 关键词召回使用基于排序位置的占位分（1.0 递减）
+                    # 关键词召回评分：当前使用基于排序位置的简化评分（1.0 递减），
+                    # 后续 spec 02 向量检索能力完善后，将融合向量相似度评分替代此占位分
                     keyword_score = max(0.0, 1.0 - idx * 0.1)
                     rows.append({
                         "id": row["id"],
@@ -1019,8 +1020,8 @@ class LongTermMemory:
             try:
                 from security.tenant import get_current_tenant_id
                 tenant_id = get_current_tenant_id() or ""
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("获取租户ID失败，使用默认空值: %s", e)
 
         pool = await self._get_pool()
         if pool is None:

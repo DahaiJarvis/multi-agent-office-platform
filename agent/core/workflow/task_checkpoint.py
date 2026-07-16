@@ -601,8 +601,8 @@ class TaskCheckpointStore:
                 hb_key = f"{self.HEARTBEAT_KEY_PREFIX}{execution_id}"
                 await redis.set(hb_key, str(now), ex=self.HEARTBEAT_TTL)
                 await redis.zadd(self.RUNNING_ZSET_KEY, {execution_id: now})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
         task = await self.get_execution(execution_id)
         if task is not None:
@@ -680,8 +680,8 @@ class TaskCheckpointStore:
                     if task.status == TaskStatus.RUNNING and now - task.heartbeat_at > self.HEARTBEAT_TIMEOUT:
                         await self.mark_interrupted(eid)
                         interrupted.append(task)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("操作失败，已忽略: %s", e)
 
         return interrupted
 
@@ -709,8 +709,8 @@ class TaskCheckpointStore:
                 await redis.zrem(self.RUNNING_ZSET_KEY, execution_id)
                 hb_key = f"{self.HEARTBEAT_KEY_PREFIX}{execution_id}"
                 await redis.delete(hb_key)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
 
     # ==================== 新增方法（spec 03）：版本链与回放 ====================
 
@@ -982,8 +982,8 @@ class TaskCheckpointStore:
             try:
                 lock_key = f"{self.EXEC_KEY_PREFIX}{execution_id}{self.REPLAY_LOCK_SUFFIX}"
                 await redis.delete(lock_key)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("操作失败，已忽略: %s", e)
         else:
             self._memory_replay_locks.pop(execution_id, None)
 
@@ -1053,8 +1053,8 @@ def get_task_checkpoint_store() -> TaskCheckpointStore:
         ctx = get_app_context()
         if ctx.initialized and ctx.get_task_checkpoint_store() is not None:
             return ctx.get_task_checkpoint_store()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
     if _task_checkpoint_store is None:
         _task_checkpoint_store = TaskCheckpointStore()
     return _task_checkpoint_store

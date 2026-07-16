@@ -196,8 +196,8 @@ def _check_tool_dependency(
             status.satisfied = True
             status.message = f"工具 {tool_name} 已注册（原生工具）"
             return status
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     # 检查 MCP 工具注册表
     try:
@@ -209,8 +209,8 @@ def _check_tool_dependency(
                     status.satisfied = True
                     status.message = f"工具 {tool_name} 已注册（MCP 工具）"
                     return status
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("操作失败，已忽略: %s", e)
 
     status.satisfied = False
     status.message = f"工具 {tool_name} 未注册"

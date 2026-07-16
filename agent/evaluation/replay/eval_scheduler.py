@@ -1,5 +1,9 @@
 """失败 Trace 识别与调度（闭环版）
 
+注意：本文件与 agent/evaluation/runners/eval_scheduler.py 同名但职责不同。
+- 本文件（replay/eval_scheduler.py）：spec 04 闭环调度，驱动 Trace-Eval-Improve 完整闭环
+- runners/eval_scheduler.py：spec 01 评估调度，定时扫描失败 trace 触发评估
+
 对应 spec 04 第 3.1 节 F1 功能。
 
 周期性扫描失败 session，驱动 Trace-Eval-Improve 闭环：
