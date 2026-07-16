@@ -253,6 +253,50 @@ class Settings(BaseSettings):
         description="工具参数到资源标识的映射，用于分布式锁",
     )
 
+    # Agent 评估体系配置
+    # 对应 docs/spec/01-Agent评估体系-spec.md 第九章配置项
+    # 评估模块独立成包（agent/evaluation/），不替换现有 tests/，提供生产级评估能力
+    eval_judge_model_tier: str = Field(
+        default="max",
+        alias="EVAL_JUDGE_MODEL_TIER",
+        description="LLM-as-judge 使用的模型级别，可选 max/plus/turbo",
+    )
+    eval_pass_k: int = Field(
+        default=5,
+        alias="EVAL_PASS_K",
+        description="pass@k/pass^k 一致性评估的重复执行次数",
+    )
+    eval_pass_mode: str = Field(
+        default="pass^k",
+        alias="EVAL_PASS_MODE",
+        description="一致性评估模式，可选 pass@k（任一成功）或 pass^k（全部成功）",
+    )
+    eval_ci_pass_caret_5_threshold: float = Field(
+        default=0.95,
+        alias="EVAL_CI_PASS_CARET_5_THRESHOLD",
+        description="CI 门禁 pass^5 成功率阈值，低于此值阻断部署",
+    )
+    eval_ci_cost_variance_threshold: float = Field(
+        default=0.30,
+        alias="EVAL_CI_COST_VARIANCE_THRESHOLD",
+        description="CI 门禁 Token 用量方差阈值，超过此值阻断部署",
+    )
+    eval_fast_suite_timeout: int = Field(
+        default=300,
+        alias="EVAL_FAST_SUITE_TIMEOUT",
+        description="Fast 评估套件执行超时秒数",
+    )
+    eval_deterministic_seed: int = Field(
+        default=42,
+        alias="EVAL_DETERMINISTIC_SEED",
+        description="确定性回放模式随机种子，确保可复现",
+    )
+    eval_concurrency: int = Field(
+        default=5,
+        alias="EVAL_CONCURRENCY",
+        description="评估套件并发执行数",
+    )
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     @model_validator(mode="after")

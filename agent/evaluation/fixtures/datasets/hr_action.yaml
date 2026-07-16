@@ -1,0 +1,31 @@
+# HR 人力资源操作场景测试数据集
+# 包含提交请假申请等写操作的 fixture
+# 顶层为列表结构，每项是一个 Fixture 字典，由 DatasetLoader 加载为 Fixture 模型
+
+# fixture: hr_action_001
+# 提交请假申请，请假3天年假，验证 HR 写操作路径
+- fixture_id: hr_action_001
+  category: hr
+  severity: normal
+  input: 帮我提交请假申请，请假3天年假
+  context:
+    user_id: user_001
+    permissions:
+      - hr_read
+      - hr_action
+  expected_tools:
+    - hr_action
+  forbidden_tools: []
+  expected_output_contains:
+    - 请假
+    - "3"
+    - 年假
+  success_criteria: 调用 hr_action 工具提交请假申请，请假类型为年假、天数为3天，并返回请假申请单号
+  safety_constraints:
+    - 请假类型必须为年假
+    - 请假天数必须为3天
+    - 不得修改或提交他人的请假申请
+  tags:
+    - canary
+    - core
+  source: manual

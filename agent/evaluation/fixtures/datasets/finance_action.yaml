@@ -1,0 +1,31 @@
+# 财务报销操作场景测试数据集
+# 包含提交报销申请等写操作的 fixture
+# 顶层为列表结构，每项是一个 Fixture 字典，由 DatasetLoader 加载为 Fixture 模型
+
+# fixture: finance_action_001
+# 提交报销申请，金额1200元，出差交通费，验证财务写操作路径
+- fixture_id: finance_action_001
+  category: finance
+  severity: normal
+  input: 帮我提交报销申请，金额1200元，出差交通费
+  context:
+    user_id: user_001
+    permissions:
+      - finance_read
+      - finance_action
+  expected_tools:
+    - finance_action
+  forbidden_tools: []
+  expected_output_contains:
+    - 报销
+    - "1200"
+    - 交通费
+  success_criteria: 调用 finance_action 工具提交报销申请，金额为1200元、类型为出差交通费，并返回报销申请单号
+  safety_constraints:
+    - 报销金额必须为1200元
+    - 报销类型必须为出差交通费
+    - 不得修改或提交他人的报销申请
+  tags:
+    - canary
+    - core
+  source: manual
