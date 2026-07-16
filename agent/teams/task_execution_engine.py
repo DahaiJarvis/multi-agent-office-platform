@@ -49,6 +49,7 @@ from agent.core.workflow.human_confirm import (
     get_human_confirm_manager,
 )
 from agent.core.session.session_manager import SessionState, get_session_manager
+from agent.core.reasoning.chain import ReasoningChain, ReasoningStep, ReasoningType
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,23 @@ class TaskExecutionEngine:
                 "collaboration_mode": intent.collaboration_mode.value,
             },
         )
+
+        # 初始化推理链，记录意图分类的推理过程
+        reasoning_chain = ReasoningChain(task_message=user_message)
+        if hasattr(intent, "reasoning") and intent.reasoning:
+            reasoning_chain.add_step(ReasoningStep(
+                reasoning_type=ReasoningType.INTENT,
+                agent_name="IntentClassifier",
+                input_context=user_message,
+                thought_process=intent.reasoning,
+                conclusion=f"意图: {intent.intent}, 目标Agent: {intent.target_agent}, 协作模式: {intent.collaboration_mode.value}",
+                confidence=intent.confidence,
+            ))
+            # 将推理链记录到意图分类检查点
+            intent_checkpoint.reasoning_chain = ReasoningChain(
+                steps=[reasoning_chain.steps[-1]]
+            ).model_dump_json()
+
         execution.checkpoints.append(intent_checkpoint)
 
         # 规划执行步骤
@@ -243,6 +261,9 @@ class TaskExecutionEngine:
                     err = checkpoint.error
                     if err:
                         done_info["error"] = err
+                # 携带推理链，供前端展示推理过程
+                if checkpoint.reasoning_chain:
+                    done_info["reasoning_chain"] = checkpoint.reasoning_chain
                 yield {"type": "step_done", **done_info}
 
                 # 如果步骤需要人工确认（WAITING_CONFIRM），暂停执行
@@ -362,6 +383,23 @@ class TaskExecutionEngine:
                 "collaboration_mode": intent.collaboration_mode.value,
             },
         )
+
+        # 初始化推理链，记录意图分类的推理过程
+        reasoning_chain = ReasoningChain(task_message=user_message)
+        if hasattr(intent, "reasoning") and intent.reasoning:
+            reasoning_chain.add_step(ReasoningStep(
+                reasoning_type=ReasoningType.INTENT,
+                agent_name="IntentClassifier",
+                input_context=user_message,
+                thought_process=intent.reasoning,
+                conclusion=f"意图: {intent.intent}, 目标Agent: {intent.target_agent}, 协作模式: {intent.collaboration_mode.value}",
+                confidence=intent.confidence,
+            ))
+            # 将推理链记录到意图分类检查点
+            intent_checkpoint.reasoning_chain = ReasoningChain(
+                steps=[reasoning_chain.steps[-1]]
+            ).model_dump_json()
+
         execution.checkpoints.append(intent_checkpoint)
 
         # 规划执行步骤
@@ -1451,6 +1489,31 @@ class TaskExecutionEngine:
             execution.error = f"等待人工确认: {step_name}"
             await self._store.update_execution(execution)
 
+        # 提取 Agent 输出中的 CoT 推理过程
+        if checkpoint.status == StepStatus.COMPLETED and checkpoint.output_data:
+            output_msg = checkpoint.output_data.get("message", "")
+            if output_msg and "<reasoning>" in output_msg and "</reasoning>" in output_msg:
+                try:
+                    r_start = output_msg.index("<reasoning>") + len("<reasoning>")
+                    r_end = output_msg.index("</reasoning>")
+                    reasoning_text = output_msg[r_start:r_end].strip()
+                    # 构建推理步骤
+                    reasoning_step = ReasoningStep(
+                        reasoning_type=ReasoningType.EXECUTION,
+                        agent_name=agent_name,
+                        input_context=step_name,
+                        thought_process=reasoning_text,
+                        conclusion=output_msg[:200].replace("<reasoning>", "").replace("</reasoning>", "").strip(),
+                    )
+                    checkpoint.reasoning_chain = ReasoningChain(
+                        steps=[reasoning_step]
+                    ).model_dump_json()
+                    # 从输出消息中移除推理标签
+                    clean_msg = output_msg[:output_msg.index("<reasoning>")] + output_msg[r_end + len("</reasoning>"):]
+                    checkpoint.output_data["message"] = clean_msg.strip()
+                except (ValueError, IndexError):
+                    pass
+
         # 发布步骤完成/失败事件（WAITING_CONFIRM 不发布完成事件，等确认后再继续）
         if checkpoint.status == StepStatus.COMPLETED:
             await self._publish_step_event(execution, "step_completed", checkpoint)
@@ -1522,6 +1585,20 @@ class TaskExecutionEngine:
                             prev_results.append(f"[{cp.agent_name}的结果] {msg}")
                 if prev_results:
                     task_parts.append("[前置步骤结果]\n" + "\n".join(prev_results))
+
+                # 注入前序步骤的推理依据
+                reasoning_parts = []
+                for cp in execution.checkpoints:
+                    if cp.reasoning_chain and cp.status == StepStatus.COMPLETED:
+                        try:
+                            chain = ReasoningChain.model_validate_json(cp.reasoning_chain)
+                            ctx = chain.to_context_text()
+                            if ctx:
+                                reasoning_parts.append(ctx)
+                        except Exception:
+                            pass
+                if reasoning_parts:
+                    task_parts.append("[推理依据]\n" + "\n".join(reasoning_parts))
 
                 task = "\n\n".join(task_parts)
             else:

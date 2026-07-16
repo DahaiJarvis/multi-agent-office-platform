@@ -12,6 +12,8 @@ export interface TaskActivity {
   detail?: string
   stepIndex?: number
   totalSteps?: number
+  reasoningType?: string
+  reasoningChain?: string
 }
 
 export interface Message {

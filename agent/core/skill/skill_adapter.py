@@ -49,7 +49,28 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-SKILLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "skills")
+SKILLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "skills")
+
+# 外部 Skills 搜索目录（Claude/OpenClaw 等）
+# 额外扫描目录（builtin 和外部 skills 不在 skills/ 一级目录下，需单独扫描）
+_EXTRA_SCAN_DIRS = [
+    os.path.join(SKILLS_DIR, "builtin"),
+    os.path.join(SKILLS_DIR, "external", "anthropic"),
+    os.path.join(SKILLS_DIR, "external", "openclaw"),
+]
+
+# Skill 来源枚举
+SKILL_SOURCE_BUILTIN = "builtin"
+SKILL_SOURCE_LOCAL = "local"
+SKILL_SOURCE_ANTHROPIC = "anthropic"
+SKILL_SOURCE_OPENCLAW = "openclaw"
+
+# 来源目录到来源标识的映射
+_SOURCE_DIR_MAP: dict[str, str] = {
+    os.path.join(SKILLS_DIR, "builtin"): SKILL_SOURCE_BUILTIN,
+    os.path.join(SKILLS_DIR, "external", "anthropic"): SKILL_SOURCE_ANTHROPIC,
+    os.path.join(SKILLS_DIR, "external", "openclaw"): SKILL_SOURCE_OPENCLAW,
+}
 
 SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
@@ -277,7 +298,7 @@ class SkillManifest(BaseModel):
     """SKILL.md 的 YAML Front Matter 模型"""
 
     name: str = Field(min_length=1, max_length=64, description="Skill 名称")
-    description: str = Field(default="", max_length=512, description="Skill 描述")
+    description: str = Field(default="", max_length=2048, description="Skill 描述")
     version: str = Field(default="1.0.0", description="版本号")
     author: str = Field(default="", description="作者")
     category: str = Field(default="custom", description="分类")
@@ -290,6 +311,10 @@ class SkillManifest(BaseModel):
     created_at: str = Field(default="", description="创建时间")
     updated_at: str = Field(default="", description="更新时间")
     enabled: bool = Field(default=True, description="是否启用")
+
+    # 来源信息（由系统自动填充，不由 SKILL.md 声明）
+    source: str = Field(default=SKILL_SOURCE_LOCAL, description="Skill 来源: builtin/local/anthropic/openclaw")
+    skill_dir: str = Field(default="", description="Skill 目录的绝对路径，用于定位 scripts 等资源")
 
 
 class SkillDocument(BaseModel):
@@ -720,6 +745,8 @@ class SkillRegistry:
     def __init__(self, skills_dir: str | None = None) -> None:
         self._skills_dir = skills_dir or SKILLS_DIR
         self._skills: dict[str, SkillDocument] = {}
+        # Skill 名称到目录绝对路径的映射，用于定位 scripts 等资源
+        self._skill_dir_map: dict[str, str] = {}
         self._agent_bindings: dict[str, list[str]] = {}
         # 内置技能绑定：从 AGENT_SKILL_BINDINGS 初始化，统一由 SkillRegistry 管理
         self._builtin_bindings: dict[str, list[str]] = {}
@@ -912,7 +939,15 @@ class SkillRegistry:
         return self._is_tool_available(tool_name)
 
     def load_all(self) -> dict[str, SkillDocument]:
-        """加载 skills/ 目录下所有 SKILL.md 和 SkillPack
+        """加载 skills/ 目录及外部目录下所有 SKILL.md 和 SkillPack
+
+        扫描顺序：
+          1. skills/ 一级子目录（现有内置和本地 skills）
+          2. skills/builtin/ 一级子目录（内置 skills，与步骤1不重复因为 builtin 在 skills/ 下）
+          3. skills/external/anthropic/ 一级子目录（Claude 官方 skills）
+          4. skills/external/openclaw/ 一级子目录（OpenClaw 精选 skills）
+
+        同名 Skill 以先加载者优先，后续同名 Skill 跳过并记录警告。
 
         同时加载 SkillPack 格式的 skill.yaml、dependencies.yaml、
         tools.yaml、tests/test_cases.yaml 等扩展文件。
@@ -923,63 +958,91 @@ class SkillRegistry:
         if self._loaded:
             return self._skills
 
+        # 构建扫描目录列表：主目录 + 外部目录
+        scan_dirs: list[tuple[Path, str]] = []
         skills_dir = Path(self._skills_dir)
-        if not skills_dir.is_dir():
+        if skills_dir.is_dir():
+            scan_dirs.append((skills_dir, SKILL_SOURCE_LOCAL))
+        for ext_dir_str in _EXTRA_SCAN_DIRS:
+            ext_dir = Path(ext_dir_str)
+            if ext_dir.is_dir():
+                source = _SOURCE_DIR_MAP.get(ext_dir_str, "unknown")
+                scan_dirs.append((ext_dir, source))
+
+        if not scan_dirs:
             logger.warning("Skills 目录不存在: %s", self._skills_dir)
             self._loaded = True
             return self._skills
 
-        for skill_dir in skills_dir.iterdir():
-            if not skill_dir.is_dir():
-                continue
-            skill_md = skill_dir / "SKILL.md"
-            if not skill_md.is_file():
-                continue
-
-            try:
-                file_size = skill_md.stat().st_size
-                if file_size > SKILL_MAX_SIZE:
-                    logger.warning("SKILL.md 文件过大，跳过: %s (%d bytes)", skill_md, file_size)
+        for scan_dir, source in scan_dirs:
+            for skill_dir in scan_dir.iterdir():
+                if not skill_dir.is_dir():
+                    continue
+                skill_md = skill_dir / "SKILL.md"
+                if not skill_md.is_file():
                     continue
 
-                doc = _parse_skill_md(str(skill_md))
-                name = doc.name
-                self._skills[name] = doc
+                try:
+                    file_size = skill_md.stat().st_size
+                    if file_size > SKILL_MAX_SIZE:
+                        logger.warning("SKILL.md 文件过大，跳过: %s (%d bytes)", skill_md, file_size)
+                        continue
 
-                # 加载 SkillPack 扩展文件
-                pack_manifest = _parse_skill_yaml(skill_dir)
-                if pack_manifest:
-                    self._pack_manifests[name] = pack_manifest
-                    # 用 skill.yaml 的版本号覆盖 SKILL.md 的版本号
-                    doc.manifest.version = pack_manifest.version
-                    # 加载依赖声明
-                    self._pack_dependencies[name] = _parse_dependencies_yaml(skill_dir)
-                    # 加载工具绑定
-                    self._pack_tools[name] = _parse_tools_yaml(skill_dir)
-                    # 加载测试用例
-                    self._pack_test_suites[name] = _parse_test_cases_yaml(skill_dir)
-                    # 加载 Prompt 模板
-                    if pack_manifest.entry.system_prompt_template:
-                        self._pack_system_prompts[name] = _read_prompt_template(
-                            skill_dir, pack_manifest.entry.system_prompt_template
+                    doc = _parse_skill_md(str(skill_md))
+                    name = doc.name
+
+                    # 同名 Skill 以先加载者优先
+                    if name in self._skills:
+                        logger.warning(
+                            "Skill 名称冲突，跳过: %s (来源=%s，已被 %s 占用)",
+                            name, source, self._skills[name].manifest.source,
                         )
-                    if pack_manifest.entry.few_shot_file:
-                        self._pack_few_shots[name] = _read_prompt_template(
-                            skill_dir, pack_manifest.entry.few_shot_file
+                        continue
+
+                    # 填充来源信息
+                    doc.manifest.source = source
+                    doc.manifest.skill_dir = str(skill_dir.resolve())
+                    self._skill_dir_map[name] = str(skill_dir.resolve())
+
+                    self._skills[name] = doc
+
+                    # 加载 SkillPack 扩展文件
+                    pack_manifest = _parse_skill_yaml(skill_dir)
+                    if pack_manifest:
+                        self._pack_manifests[name] = pack_manifest
+                        # 用 skill.yaml 的版本号覆盖 SKILL.md 的版本号
+                        doc.manifest.version = pack_manifest.version
+                        # 加载依赖声明
+                        self._pack_dependencies[name] = _parse_dependencies_yaml(skill_dir)
+                        # 加载工具绑定
+                        self._pack_tools[name] = _parse_tools_yaml(skill_dir)
+                        # 加载测试用例
+                        self._pack_test_suites[name] = _parse_test_cases_yaml(skill_dir)
+                        # 加载 Prompt 模板
+                        if pack_manifest.entry.system_prompt_template:
+                            self._pack_system_prompts[name] = _read_prompt_template(
+                                skill_dir, pack_manifest.entry.system_prompt_template
+                            )
+                        if pack_manifest.entry.few_shot_file:
+                            self._pack_few_shots[name] = _read_prompt_template(
+                                skill_dir, pack_manifest.entry.few_shot_file
+                            )
+                        logger.info(
+                            "加载 SkillPack: %s (version=%s, deps=%d, tools=%d, tests=%d)",
+                            name, pack_manifest.version,
+                            len(self._pack_dependencies[name].skills),
+                            len(self._pack_tools[name].tools),
+                            len(self._pack_test_suites[name].test_cases),
                         )
+
                     logger.info(
-                        "加载 SkillPack: %s (version=%s, deps=%d, tools=%d, tests=%d)",
-                        name, pack_manifest.version,
-                        len(self._pack_dependencies[name].skills),
-                        len(self._pack_tools[name].tools),
-                        len(self._pack_test_suites[name].test_cases),
+                        "加载 Skill: %s (category=%s, version=%s, source=%s)",
+                        name, doc.manifest.category, doc.manifest.version, source,
                     )
-
-                logger.info("加载 Skill: %s (category=%s, version=%s)", name, doc.manifest.category, doc.manifest.version)
-            except SkillParseError as e:
-                logger.warning("Skill 加载失败: %s", e)
-            except Exception as e:
-                logger.warning("Skill 加载异常: %s - %s", skill_dir.name, e)
+                except SkillParseError as e:
+                    logger.warning("Skill 加载失败: %s", e)
+                except Exception as e:
+                    logger.warning("Skill 加载异常: %s - %s", skill_dir.name, e)
 
         self._loaded = True
         logger.info("Skills 加载完成: 共 %d 个", len(self._skills))
@@ -993,7 +1056,12 @@ class SkillRegistry:
         Args:
             skill_name: Skill 名称
         """
-        skill_dir = Path(self._skills_dir) / skill_name
+        # 优先从目录映射获取路径，回退到主目录拼接
+        skill_dir_str = self._skill_dir_map.get(skill_name)
+        if skill_dir_str:
+            skill_dir = Path(skill_dir_str)
+        else:
+            skill_dir = Path(self._skills_dir) / skill_name
         if not skill_dir.is_dir():
             return
 
@@ -1504,6 +1572,11 @@ class SkillRegistry:
             doc.manifest.created_at = now
         doc.manifest.updated_at = now
 
+        # 更新来源信息
+        doc.manifest.source = SKILL_SOURCE_LOCAL
+        doc.manifest.skill_dir = str(skill_dir.resolve())
+        self._skill_dir_map[skill_name] = str(skill_dir.resolve())
+
         self._skills[skill_name] = doc
 
         # 重新加载 SkillPack 扩展数据
@@ -1838,13 +1911,52 @@ class SkillRegistry:
             SKILL.md 原始内容，未找到时返回 None
         """
         skill_name = _normalize_skill_name(skill_name)
-        skill_md = Path(self._skills_dir) / skill_name / "SKILL.md"
+        # 优先从目录映射获取路径
+        skill_dir_str = self._skill_dir_map.get(skill_name)
+        if skill_dir_str:
+            skill_md = Path(skill_dir_str) / "SKILL.md"
+        else:
+            skill_md = Path(self._skills_dir) / skill_name / "SKILL.md"
         if not skill_md.is_file():
             return None
         try:
             return skill_md.read_text(encoding="utf-8")
         except OSError:
             return None
+
+    def get_skill_dir(self, skill_name: str) -> str | None:
+        """获取 Skill 目录的绝对路径
+
+        Args:
+            skill_name: Skill 名称
+
+        Returns:
+            Skill 目录绝对路径，未找到时返回 None
+        """
+        if not self._loaded:
+            self.load_all()
+        skill_name = _normalize_skill_name(skill_name)
+        return self._skill_dir_map.get(skill_name)
+
+    def get_skill_scripts_dir(self, skill_name: str) -> str | None:
+        """获取 Skill 的 scripts 目录路径
+
+        外部 Skills（如 Claude 的 docx/xlsx 等）在 scripts/ 子目录下
+        存放可执行的 Python 脚本。
+
+        Args:
+            skill_name: Skill 名称
+
+        Returns:
+            scripts 目录绝对路径，不存在时返回 None
+        """
+        skill_dir = self.get_skill_dir(skill_name)
+        if not skill_dir:
+            return None
+        scripts_dir = Path(skill_dir) / "scripts"
+        if scripts_dir.is_dir():
+            return str(scripts_dir)
+        return None
 
     # ==================== SkillPack 查询 ====================
 
