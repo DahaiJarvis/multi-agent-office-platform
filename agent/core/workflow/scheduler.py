@@ -4,6 +4,7 @@
 执行任务并通过渠道适配器推送结果。
 
 同时包含业务指标聚合定时任务，每小时从 Prometheus 采集数据写入 Redis 缓存。
+另外包含 Trace-Eval-Improve 闭环评估任务，每 24h 扫描失败 session。
 
 运行流程：
   1. 每秒扫描 Redis ZSET 中到期的任务
@@ -11,6 +12,7 @@
   3. 执行结果 -> 通过渠道适配器推送
   4. 更新 next_run_at
   5. 每小时聚合业务指标到 Redis 缓存
+  6. 每 24h 执行 Trace-Eval-Improve 闭环评估（spec 04）
 """
 
 import asyncio
@@ -23,11 +25,15 @@ logger = logging.getLogger(__name__)
 # 业务指标聚合间隔（秒）
 ANALYTICS_AGGREGATE_INTERVAL = 3600
 
+# Trace-Eval-Improve 闭环评估间隔（秒），默认 24h
+EVAL_LOOP_INTERVAL = 86400
+
 
 class SchedulerWorker:
     """定时任务扫描器
 
     定期扫描 Redis ZSET 中到期的任务，执行并推送结果。
+    同时运行业务指标聚合和 Trace-Eval-Improve 闭环评估后台任务。
     """
 
     def __init__(self, poll_interval: float = 1.0) -> None:
@@ -35,6 +41,7 @@ class SchedulerWorker:
         self._running = False
         self._task: asyncio.Task | None = None
         self._analytics_task: asyncio.Task | None = None
+        self._eval_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """启动扫描循环"""
@@ -44,12 +51,13 @@ class SchedulerWorker:
         self._running = True
         self._task = asyncio.create_task(self._poll_loop())
         self._analytics_task = asyncio.create_task(self._analytics_aggregate_loop())
+        self._eval_task = asyncio.create_task(self._eval_loop())
         logger.info("定时任务扫描器已启动: poll_interval=%.1fs", self._poll_interval)
 
     async def stop(self) -> None:
         """停止扫描循环"""
         self._running = False
-        for task in (self._task, self._analytics_task):
+        for task in (self._task, self._analytics_task, self._eval_task):
             if task:
                 task.cancel()
                 try:
@@ -181,6 +189,52 @@ class SchedulerWorker:
                 await aggregate_daily_metrics()
             except Exception as e:
                 logger.error("业务指标聚合失败: %s", e)
+
+    async def _eval_loop(self) -> None:
+        """Trace-Eval-Improve 闭环评估循环（新增，对应 spec 04 第 9.2 节）
+
+        每 24h 执行一次 Trace-Eval-Improve 闭环评估：
+          1. 扫描近 24h 的失败 session
+          2. 对每个失败 session 执行回放、评估、归档
+          3. 生成改进项（护栏规则候选）
+
+        降级策略：
+          - EvalScheduler 初始化失败时跳过本轮
+          - 单轮评估异常不影响下一轮
+        """
+        logger.info("Trace-Eval-Improve 闭环评估循环已启动: interval=%ds", EVAL_LOOP_INTERVAL)
+
+        while self._running:
+            try:
+                await asyncio.sleep(EVAL_LOOP_INTERVAL)
+            except asyncio.CancelledError:
+                break
+
+            if not self._running:
+                break
+
+            try:
+                await self._run_eval_scheduled()
+            except Exception as e:
+                logger.error("Trace-Eval-Improve 闭环评估失败: %s", e)
+
+    async def _run_eval_scheduled(self) -> None:
+        """执行一次 Trace-Eval-Improve 闭环评估
+
+        延迟初始化 EvalScheduler，调用 run_scheduled 执行完整闭环。
+        """
+        try:
+            from agent.evaluation.replay.eval_scheduler import EvalScheduler
+            from observability.tracing import span_cache
+            from agent.core.observability.feedback import get_feedback_service
+
+            scheduler = EvalScheduler(
+                span_cache=span_cache,
+                feedback_service=get_feedback_service(),
+            )
+            await scheduler.run_scheduled()
+        except Exception as e:
+            logger.error("执行 Trace-Eval-Improve 闭环评估异常: %s", e)
 
 
 # 全局调度器实例

@@ -124,7 +124,8 @@ class TraceToFixtureConverter:
           2. 使用 LLM 或规则分析失败原因
           3. 提取原 trajectory 中的工具调用作为 expected_tools
           4. 根据失败模式生成 safety_constraints
-          5. 构造 Fixture 并写入 fixtures/datasets/ 目录
+          5. 对 PII / 凭据脱敏（REQ-10）
+          6. 构造 Fixture 并写入 fixtures/datasets/ 目录
 
         Args:
             session_id: 失败会话 ID
@@ -156,13 +157,17 @@ class TraceToFixtureConverter:
         if analysis.expected_tools:
             expected_tools = list(dict.fromkeys(analysis.expected_tools + expected_tools))
 
-        # 5. 构造 Fixture
+        # 5. 脱敏处理（REQ-10：落盘 Fixture 不得包含明文 PII）
+        sanitized_input = self._sanitize(user_input)
+        sanitized_context = self._sanitize_context(self._extract_context(spans))
+
+        # 6. 构造 Fixture
         fixture = Fixture(
             fixture_id=f"replay-{session_id[:8]}",
             category=analysis.category,
             severity="adversarial" if analysis.is_safety_issue else "edge",
-            input=user_input,
-            context=self._extract_context(spans),
+            input=sanitized_input,
+            context=sanitized_context,
             expected_tools=expected_tools,
             forbidden_tools=analysis.forbidden_tools,
             success_criteria=analysis.success_criteria,
@@ -172,7 +177,7 @@ class TraceToFixtureConverter:
             source_trace_id=session_id,
         )
 
-        # 6. 写入 datasets 目录
+        # 7. 写入 datasets 目录
         self._save_fixture(fixture)
 
         logger.info(
@@ -184,6 +189,55 @@ class TraceToFixtureConverter:
         )
 
         return fixture
+
+    def _sanitize(self, text: str) -> str:
+        """脱敏处理（对应 spec 04 第 3.3 节，REQ-10）
+
+        复用 security/desensitize.py 对 PII 信息脱敏。
+        落盘 Fixture 不得包含明文 PII。
+
+        Args:
+            text: 待脱敏文本
+
+        Returns:
+            脱敏后的文本
+        """
+        if not text:
+            return ""
+
+        try:
+            from security.desensitize import desensitize_content
+            return desensitize_content(text)
+        except ImportError:
+            logger.debug("security.desensitize 不可用，跳过脱敏")
+            return text
+        except Exception as e:
+            logger.warning("脱敏处理异常: %s", e)
+            return text
+
+    def _sanitize_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        """脱敏 context 中的字符串值
+
+        对 context 中所有字符串类型的值进行脱敏处理。
+
+        Args:
+            context: 原始上下文字典
+
+        Returns:
+            脱敏后的上下文字典
+        """
+        if not context:
+            return {}
+
+        sanitized: dict[str, Any] = {}
+        for key, value in context.items():
+            if isinstance(value, str):
+                sanitized[key] = self._sanitize(value)
+            elif isinstance(value, dict):
+                sanitized[key] = self._sanitize_context(value)
+            else:
+                sanitized[key] = value
+        return sanitized
 
     async def _analyze_failure(self, spans: list[dict], failure_reason: str) -> FailureAnalysis:
         """分析失败原因

@@ -560,6 +560,229 @@ class SpanCache:
         except Exception as e:
             logger.warning("SpanCache 更新 Agent 统计失败: %s", e)
 
+    async def get_failed_sessions(
+        self,
+        since_hours: int = 24,
+        agent_name: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """获取失败 session 列表（新增，对应 spec 04 第 3.6 节）
+
+        扫描 trace:* key 中含 status=failed 的 agent_call span，
+        返回去重后的失败 session 列表。
+
+        筛选条件：
+          - span_type 包含 "agent_call"
+          - metadata.status 为 failed/error
+          - 时间在 since_hours 内
+          - 可选按 agent_name 过滤
+
+        Args:
+            since_hours: 扫描最近 N 小时（默认 24）
+            agent_name: 限定 Agent 名称（None 表示不过滤）
+            limit: 返回数量上限
+
+        Returns:
+            失败 session 列表，每项含 session_id / agent_name / status / timestamp / duration_ms
+        """
+        redis = await self._get_redis()
+        if redis is None:
+            return []
+
+        # 计算时间阈值
+        cutoff_timestamp = time.time() - since_hours * 3600
+
+        # 扫描所有 trace:* key
+        try:
+            cursor = 0
+            failed_sessions: list[dict] = []
+            seen_session_ids: set[str] = set()
+
+            while True:
+                cursor, keys = await redis.scan(
+                    cursor=cursor,
+                    match="trace:*",
+                    count=100,
+                )
+
+                for key in keys:
+                    session_id = key.split(":", 1)[1] if ":" in key else key
+                    if session_id in seen_session_ids:
+                        continue
+
+                    try:
+                        raw_spans = await redis.hgetall(key)
+                    except Exception:
+                        continue
+
+                    for span_json in raw_spans.values():
+                        try:
+                            span = json.loads(span_json)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+
+                        # 检查 span_type 是否为 agent_call
+                        span_type = span.get("span_type", "")
+                        if "agent_call" not in span_type and "agent" not in span_type:
+                            continue
+
+                        # 检查状态是否失败
+                        metadata = span.get("metadata", {}) or {}
+                        status = str(metadata.get("status", "")).lower()
+                        if status not in ("failed", "error"):
+                            continue
+
+                        # 检查时间窗口
+                        span_timestamp = span.get("timestamp", 0)
+                        if span_timestamp < cutoff_timestamp:
+                            continue
+
+                        # 可选：按 agent_name 过滤
+                        span_agent = str(metadata.get("agent_name", ""))
+                        if agent_name and span_agent != agent_name:
+                            continue
+
+                        # 记录失败 session
+                        seen_session_ids.add(session_id)
+                        failed_sessions.append({
+                            "session_id": session_id,
+                            "agent_name": span_agent,
+                            "status": status,
+                            "timestamp": span_timestamp,
+                            "duration_ms": span.get("duration_ms", 0),
+                            "span_type": span_type,
+                        })
+                        break  # 同一 session 只记录一个失败 span
+
+                if cursor == 0:
+                    break
+                if len(failed_sessions) >= limit:
+                    break
+
+        except Exception as e:
+            logger.warning("SpanCache 扫描失败 session 异常: %s", e)
+            return []
+
+        # 按时间倒序排序
+        failed_sessions.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return failed_sessions[:limit]
+
+    async def get_session_summary(
+        self,
+        session_id: str,
+    ) -> dict:
+        """获取 session 摘要（新增，对应 spec 04 第 3.6 节）
+
+        聚合 session 的 span 信息，返回：
+          - input: 用户输入（来自 intent_classification span）
+          - output: 最终输出（来自最后一个 agent_call span）
+          - trajectory: 工具调用轨迹
+          - duration: 总耗时
+          - status: 会话状态
+          - agent_name: Agent 名称
+
+        供 TraceReplayer 与 TraceToFixtureConverter 使用。
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            session 摘要字典
+        """
+        spans = await self.get_session_spans(session_id)
+        if not spans:
+            return {
+                "session_id": session_id,
+                "input": "",
+                "output": "",
+                "trajectory": [],
+                "duration_ms": 0.0,
+                "status": "unknown",
+                "agent_name": "",
+                "span_count": 0,
+            }
+
+        # 提取用户输入（intent_classification span）
+        user_input = ""
+        for span in spans:
+            span_type = span.get("span_type", "")
+            if "intent" in span_type:
+                input_data = span.get("input", {})
+                if isinstance(input_data, dict):
+                    user_input = str(
+                        input_data.get("user_message")
+                        or input_data.get("text")
+                        or input_data.get("input")
+                        or ""
+                    )
+                elif isinstance(input_data, str):
+                    user_input = input_data
+                if user_input:
+                    break
+
+        # 提取最终输出（最后一个 agent_call span 的 output）
+        output = ""
+        agent_name = ""
+        status = "success"
+        for span in reversed(spans):
+            span_type = span.get("span_type", "")
+            if "agent" in span_type:
+                output_data = span.get("output", {})
+                if isinstance(output_data, dict):
+                    output = str(
+                        output_data.get("text")
+                        or output_data.get("response")
+                        or output_data.get("output")
+                        or ""
+                    )
+                elif isinstance(output_data, str):
+                    output = output_data
+
+                metadata = span.get("metadata", {}) or {}
+                agent_name = str(metadata.get("agent_name", ""))
+                span_status = str(metadata.get("status", "")).lower()
+                if span_status in ("failed", "error"):
+                    status = "failed"
+                break
+
+        # 提取工具调用轨迹
+        trajectory: list[dict] = []
+        total_duration = 0.0
+        for span in spans:
+            span_type = span.get("span_type", "")
+            total_duration += float(span.get("duration_ms", 0))
+
+            if "tool" in span_type:
+                tool_name = ""
+                if ":" in span_type:
+                    tool_name = span_type.split(":", 1)[1]
+                metadata = span.get("metadata", {}) or {}
+                if not tool_name:
+                    tool_name = str(metadata.get("tool_name", ""))
+
+                trajectory.append({
+                    "tool": tool_name,
+                    "status": str(metadata.get("status", "success")),
+                    "duration_ms": float(span.get("duration_ms", 0)),
+                })
+
+        # 检查是否有失败的工具调用
+        for item in trajectory:
+            if item.get("status", "").lower() in ("failed", "error"):
+                status = "failed"
+                break
+
+        return {
+            "session_id": session_id,
+            "input": user_input,
+            "output": output,
+            "trajectory": trajectory,
+            "duration_ms": total_duration,
+            "status": status,
+            "agent_name": agent_name,
+            "span_count": len(spans),
+        }
+
 
 # 全局 Langfuse 追踪器
 langfuse_tracer = LangfuseTracer()

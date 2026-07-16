@@ -933,3 +933,171 @@ async def _create_approval_for_sensitive_action(
     except Exception as e:
         logger.warning("创建审批单失败（非致命）: tool=%s error=%s", tool_name, e)
         return None
+
+
+# ==================== 动态规则加载（spec 04 第 9.2 节） ====================
+
+# 全局动态规则缓存（从 FailureArchive 的 approved 规则加载）
+_dynamic_rules: list[dict[str, Any]] = []
+_dynamic_rules_loaded_at: float = 0.0
+_DYNAMIC_RULES_REFRESH_INTERVAL = 300  # 5 分钟刷新一次
+
+
+async def load_dynamic_rules(force_refresh: bool = False) -> list[dict[str, Any]]:
+    """加载动态护栏规则（新增，对应 spec 04 第 9.2 节）
+
+    从 FailureArchive 加载已审核通过且上线的护栏规则候选，
+    供 check_input_guardrails / check_tool_call_guardrails / check_output_guardrails 使用。
+
+    规则来源：FailureArchive.get_approved_rules()
+    刷新策略：每 5 分钟刷新一次，force_refresh=True 时立即刷新
+
+    Args:
+        force_refresh: 是否强制刷新缓存
+
+    Returns:
+        已上线的规则列表，每项含 rule_id / pattern / rule_type / rule_definition
+    """
+    global _dynamic_rules, _dynamic_rules_loaded_at
+
+    import time as _time
+
+    # 检查缓存是否有效
+    if (
+        not force_refresh
+        and _dynamic_rules
+        and (_time.time() - _dynamic_rules_loaded_at) < _DYNAMIC_RULES_REFRESH_INTERVAL
+    ):
+        return _dynamic_rules
+
+    # 从 FailureArchive 加载规则
+    try:
+        from agent.evaluation.improvement.failure_archive import FailureArchive
+
+        archive = FailureArchive()
+        approved_rules = archive.get_approved_rules()
+
+        _dynamic_rules = [
+            {
+                "rule_id": r.rule_id,
+                "pattern": r.pattern,
+                "rule_type": r.rule_type,
+                "rule_definition": r.rule_definition,
+            }
+            for r in approved_rules
+        ]
+        _dynamic_rules_loaded_at = _time.time()
+
+        logger.info("加载动态护栏规则: %d 条", len(_dynamic_rules))
+        return _dynamic_rules
+
+    except Exception as e:
+        logger.warning("加载动态护栏规则失败: %s", e)
+        return _dynamic_rules
+
+
+async def check_dynamic_input_rules(content: str) -> dict[str, Any]:
+    """检查动态输入护栏规则（新增）
+
+    对用户输入应用已上线的动态输入护栏规则。
+
+    Args:
+        content: 用户输入内容
+
+    Returns:
+        检查结果字典，含 passed / action / reason / rule_id
+    """
+    rules = await load_dynamic_rules()
+
+    for rule in rules:
+        if rule.get("rule_type") != "input_guardrail":
+            continue
+
+        rule_def = rule.get("rule_definition", {})
+        check_type = rule_def.get("check_type", "")
+
+        if check_type == "regex":
+            import re
+            patterns = rule_def.get("patterns", [])
+            for pattern in patterns:
+                try:
+                    if re.search(pattern, content, re.IGNORECASE):
+                        return {
+                            "passed": False,
+                            "action": rule_def.get("action", "block"),
+                            "reason": f"动态规则命中: {rule_def.get('description', '')}",
+                            "rule_id": rule.get("rule_id"),
+                        }
+                except re.error:
+                    continue
+
+    return {"passed": True, "action": "pass", "reason": "", "rule_id": ""}
+
+
+async def check_dynamic_tool_rules(
+    tool_name: str,
+    tool_input: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """检查动态工具护栏规则（新增）
+
+    对工具调用应用已上线的动态工具护栏规则。
+
+    Args:
+        tool_name: 工具名称
+        tool_input: 工具输入参数
+
+    Returns:
+        检查结果字典，含 passed / action / reason / rule_id
+    """
+    rules = await load_dynamic_rules()
+
+    for rule in rules:
+        if rule.get("rule_type") != "tool_guardrail":
+            continue
+
+        rule_def = rule.get("rule_definition", {})
+        check_type = rule_def.get("check_type", "")
+
+        if check_type == "tool_whitelist":
+            forbidden_tools = rule_def.get("forbidden_tools", [])
+            if tool_name in forbidden_tools:
+                return {
+                    "passed": False,
+                    "action": rule_def.get("action", "block"),
+                    "reason": f"动态规则禁止调用工具: {tool_name}",
+                    "rule_id": rule.get("rule_id"),
+                }
+
+    return {"passed": True, "action": "pass", "reason": "", "rule_id": ""}
+
+
+async def check_dynamic_output_rules(content: str) -> dict[str, Any]:
+    """检查动态输出护栏规则（新增）
+
+    对 Agent 输出应用已上线的动态输出护栏规则。
+
+    Args:
+        content: Agent 输出内容
+
+    Returns:
+        检查结果字典，含 passed / action / reason / rule_id
+    """
+    rules = await load_dynamic_rules()
+
+    for rule in rules:
+        if rule.get("rule_type") != "output_guardrail":
+            continue
+
+        rule_def = rule.get("rule_definition", {})
+        check_type = rule_def.get("check_type", "")
+
+        if check_type == "pii_detection":
+            if has_pii(content):
+                return {
+                    "passed": False,
+                    "action": rule_def.get("action", "redact"),
+                    "reason": f"动态规则检测到 PII: {rule_def.get('description', '')}",
+                    "rule_id": rule.get("rule_id"),
+                }
+
+    return {"passed": True, "action": "pass", "reason": "", "rule_id": ""}

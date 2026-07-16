@@ -657,3 +657,363 @@ async def get_state_at_step(
     except ValueError as e:
         from api.errors import AppException, ErrorCode
         raise AppException(ErrorCode.INVALID_PARAMETER, message=str(e))
+
+
+# ==================== Trace-Eval-Improve 闭环管理（spec 04） ====================
+
+
+class RuleApproveRequest(BaseModel):
+    """规则审核请求"""
+
+    approved_by: str = Field(..., description="审核人")
+    reason: str = Field(default="", description="审核说明")
+
+
+class RuleRejectRequest(BaseModel):
+    """规则拒绝请求"""
+
+    reason: str = Field(default="", description="拒绝原因")
+
+
+class RegressionTriggerRequest(BaseModel):
+    """回归测试触发请求"""
+
+    fixture_ids: list[str] = Field(..., description="要回归测试的 Fixture ID 列表")
+    baseline_scores: dict[str, float] = Field(
+        default_factory=dict,
+        description="各 fixture 的 baseline 评分 {fixture_id: score}",
+    )
+    k: int = Field(default=1, ge=1, description="pass^k 的 k 值")
+
+
+class ScanTriggerRequest(BaseModel):
+    """闭环扫描触发请求"""
+
+    since_hours: int = Field(default=24, ge=1, description="扫描最近 N 小时")
+    agent_name: str | None = Field(default=None, description="限定 Agent")
+    include_thumbs_down: bool = Field(default=True, description="是否纳入用户负反馈")
+    max_batch_size: int = Field(default=50, ge=1, le=500, description="单批最大处理量")
+
+
+def _get_failure_archive():
+    """获取 FailureArchive 单例（延迟初始化）
+
+    使用模块级全局变量缓存 FailureArchive 实例，
+    避免每次请求都创建新实例（归档记录保存在内存中）。
+    """
+    global _failure_archive_instance
+    if _failure_archive_instance is None:
+        from agent.evaluation.improvement.failure_archive import FailureArchive
+        _failure_archive_instance = FailureArchive()
+    return _failure_archive_instance
+
+
+# FailureArchive 全局单例
+_failure_archive_instance: Any | None = None
+
+
+@router.get(
+    "/eval/archives",
+    summary="查询失败归档记录",
+)
+async def list_eval_archives(
+    request: Request,
+    improvement_status: str | None = None,
+    failure_pattern: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """查询失败案例归档记录
+
+    需要管理员权限。支持按改进状态和失败模式过滤。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        improvement_status: 按改进状态过滤（pending/improving/resolved）
+        failure_pattern: 按失败模式过滤（injection_attack/pii_leakage/...）
+        limit: 返回记录数量上限
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    records = archive.list_archives(
+        improvement_status=improvement_status,
+        failure_pattern=failure_pattern,
+    )
+    records = records[:limit]
+    return {
+        "items": [r.model_dump() for r in records],
+        "total": len(records),
+    }
+
+
+@router.get(
+    "/eval/archives/{archive_id}",
+    summary="查询单个失败归档记录",
+)
+async def get_eval_archive(
+    archive_id: str,
+    request: Request,
+) -> dict:
+    """查询单个失败案例归档记录详情
+
+    需要管理员权限。
+
+    Args:
+        archive_id: 归档记录 ID
+        request: FastAPI 请求对象（用于权限校验）
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    record = archive.get_archive(archive_id)
+    if record is None:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.NOT_FOUND, message=f"归档记录不存在: {archive_id}")
+    return record.model_dump()
+
+
+@router.get(
+    "/eval/rules",
+    summary="查询护栏规则候选列表",
+)
+async def list_eval_rules(
+    request: Request,
+    status: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """查询护栏规则候选列表
+
+    需要管理员权限。支持按状态过滤。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        status: 按状态过滤（candidate/sandboxed/approved/rejected/online）
+        limit: 返回记录数量上限
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    records = archive.list_rule_candidates(status=status)
+    records = records[:limit]
+    return {
+        "items": [r.model_dump() for r in records],
+        "total": len(records),
+    }
+
+
+@router.post(
+    "/eval/rules/{rule_id}/approve",
+    summary="审核通过规则候选",
+)
+async def approve_eval_rule(
+    rule_id: str,
+    request: Request,
+    approve_request: RuleApproveRequest,
+) -> dict:
+    """审核通过护栏规则候选
+
+    需要管理员权限。规则候选需已通过沙箱验证才能审核通过。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象（用于权限校验）
+        approve_request: 审核请求
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    success = archive.approve_rule(rule_id, approved_by=approve_request.approved_by)
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(
+            ErrorCode.CONFLICT,
+            message=f"规则审核失败: rule_id={rule_id}（可能未通过沙箱验证或不存在）",
+        )
+    return {
+        "success": True,
+        "rule_id": rule_id,
+        "approved_by": approve_request.approved_by,
+        "status": "approved",
+    }
+
+
+@router.post(
+    "/eval/rules/{rule_id}/reject",
+    summary="拒绝规则候选",
+)
+async def reject_eval_rule(
+    rule_id: str,
+    request: Request,
+    reject_request: RuleRejectRequest,
+) -> dict:
+    """拒绝护栏规则候选
+
+    需要管理员权限。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象（用于权限校验）
+        reject_request: 拒绝请求
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    success = archive.reject_rule(rule_id, reason=reject_request.reason)
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.NOT_FOUND, message=f"规则候选不存在: {rule_id}")
+    return {
+        "success": True,
+        "rule_id": rule_id,
+        "reason": reject_request.reason,
+        "status": "rejected",
+    }
+
+
+@router.post(
+    "/eval/rules/{rule_id}/online",
+    summary="规则上线",
+)
+async def online_eval_rule(
+    rule_id: str,
+    request: Request,
+) -> dict:
+    """将已审核通过的规则标记为上线
+
+    需要管理员权限。规则需已审核通过才能上线。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象（用于权限校验）
+    """
+    _require_admin(request)
+
+    archive = _get_failure_archive()
+    success = archive.mark_online(rule_id)
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(
+            ErrorCode.CONFLICT,
+            message=f"规则上线失败: rule_id={rule_id}（可能未审核通过或不存在）",
+        )
+    return {
+        "success": True,
+        "rule_id": rule_id,
+        "status": "online",
+    }
+
+
+@router.post(
+    "/eval/regression",
+    summary="触发回归测试",
+)
+async def trigger_regression(
+    request: Request,
+    regression_request: RegressionTriggerRequest,
+) -> dict:
+    """触发改进效果回归测试
+
+    需要管理员权限。对指定 Fixture 列表执行回归测试，对比 baseline 评分。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        regression_request: 回归测试请求
+    """
+    _require_admin(request)
+
+    from agent.evaluation.replay.regression_test_runner import RegressionTestRunner
+
+    runner = RegressionTestRunner()
+    report = await runner.run_regression(
+        fixture_ids=regression_request.fixture_ids,
+        baseline_scores=regression_request.baseline_scores,
+        k=regression_request.k,
+    )
+    return report.model_dump()
+
+
+@router.post(
+    "/eval/scan",
+    summary="手动触发闭环扫描",
+)
+async def trigger_eval_scan(
+    request: Request,
+    scan_request: ScanTriggerRequest,
+) -> dict:
+    """手动触发 Trace-Eval-Improve 闭环扫描
+
+    需要管理员权限。扫描失败 session 并执行完整闭环流程。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        scan_request: 扫描请求参数
+    """
+    _require_admin(request)
+
+    from agent.evaluation.replay.eval_scheduler import (
+        EvalScheduler,
+        FailureFilter,
+    )
+    from observability.tracing import span_cache
+    from agent.core.observability.feedback import get_feedback_service
+
+    scheduler = EvalScheduler(
+        span_cache=span_cache,
+        feedback_service=get_feedback_service(),
+    )
+
+    filt = FailureFilter(
+        since_hours=scan_request.since_hours,
+        agent_name=scan_request.agent_name,
+        include_thumbs_down=scan_request.include_thumbs_down,
+        max_batch_size=scan_request.max_batch_size,
+    )
+
+    failed_sessions = await scheduler.scan_failed_sessions(filt)
+
+    processed_reports: list[str] = []
+    for failed in failed_sessions:
+        report_id = await scheduler.process_failed_session(failed)
+        if report_id:
+            processed_reports.append(report_id)
+
+    return {
+        "scanned_failed_sessions": len(failed_sessions),
+        "processed_reports": processed_reports,
+        "processed_count": len(processed_reports),
+        "failed_sessions": [f.model_dump() for f in failed_sessions],
+    }
+
+
+@router.get(
+    "/eval/replay-records",
+    summary="查询回放记录列表",
+)
+async def list_replay_records(
+    request: Request,
+    original_session_id: str | None = None,
+) -> dict:
+    """查询 Trace 回放记录列表
+
+    需要管理员权限。可按原始 session ID 过滤。
+
+    Args:
+        request: FastAPI 请求对象（用于权限校验）
+        original_session_id: 按原始 session ID 过滤
+    """
+    _require_admin(request)
+
+    from agent.evaluation.replay.trace_replayer import TraceReplayer
+    from observability.tracing import span_cache
+
+    replayer = TraceReplayer(span_cache=span_cache)
+    records = replayer.list_replay_records(
+        original_session_id=original_session_id,
+    )
+    return {
+        "items": [
+            r.model_dump() if hasattr(r, "model_dump") else r
+            for r in records
+        ],
+        "total": len(records),
+    }
