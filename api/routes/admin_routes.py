@@ -1017,3 +1017,510 @@ async def list_replay_records(
         ],
         "total": len(records),
     }
+
+
+# ==================== Harness 自改进闭环管理（spec 05） ====================
+
+
+class GuardrailRuleCreateRequest(BaseModel):
+    """规则候选创建请求（spec 05）"""
+
+    pattern: str = Field(..., description="失败模式: injection_attack/pii_leakage/tool_misuse/hallucination/policy_violation")
+    rule_type: str = Field(..., description="规则类型: regex/keyword/function/schema")
+    rule_spec: dict[str, Any] = Field(..., description="规则定义")
+    layer: str = Field(default="input", description="护栏层: input/tool/output")
+    action: str = Field(default="block", description="命中动作: block/redact/warn")
+    description: str = Field(default="", description="规则说明")
+    source_trace_id: str = Field(default="", description="来源 Trace ID")
+    tenant_id: str = Field(default="", description="租户ID")
+    created_by: str = Field(default="admin", description="创建者")
+
+
+class GuardrailRuleApproveRequest(BaseModel):
+    """规则审核请求（spec 05）"""
+
+    approved_by: str = Field(..., description="审核人")
+    reason: str = Field(default="", description="审核说明")
+
+
+class GuardrailRuleRejectRequest(BaseModel):
+    """规则拒绝请求（spec 05）"""
+
+    reason: str = Field(default="", description="拒绝原因")
+    operator: str = Field(default="", description="操作人")
+
+
+class GuardrailRuleRollbackRequest(BaseModel):
+    """规则回滚请求（spec 05）"""
+
+    target_version: int | None = Field(None, description="目标版本号，None表示回滚到上一活跃版本")
+    operator: str = Field(default="admin", description="操作人")
+    reason: str = Field(default="", description="回滚原因")
+
+
+def _get_rule_store():
+    """获取规则存储实例（spec 05）"""
+    from agent.evaluation.improvement.rule_store import GuardrailRuleStore
+    return GuardrailRuleStore()
+
+
+def _get_rule_rollback():
+    """获取规则回滚器实例（spec 05）"""
+    from agent.evaluation.improvement.rule_rollback import RuleRollback
+    return RuleRollback(_get_rule_store())
+
+
+def _get_rule_metrics_collector():
+    """获取规则效果监控器实例（spec 05）"""
+    from agent.evaluation.improvement.rule_metrics import RuleMetricsCollector
+    return RuleMetricsCollector()
+
+
+def _get_dynamic_rule_loader():
+    """获取动态规则加载器实例（spec 05）"""
+    from agent.evaluation.improvement.dynamic_loader import DynamicRuleLoader
+    return DynamicRuleLoader(_get_rule_store())
+
+
+@router.get(
+    "/guardrail/rules",
+    summary="查询护栏规则列表（spec 05）",
+)
+async def list_guardrail_rules(
+    request: Request,
+    status: str | None = None,
+    pattern: str | None = None,
+    layer: str | None = None,
+    tenant_id: str = "",
+    limit: int = 50,
+) -> dict:
+    """查询护栏规则列表
+
+    需要管理员权限。支持按状态、失败模式、护栏层、租户过滤。
+
+    Args:
+        request: FastAPI 请求对象
+        status: 按规则状态过滤（candidate/sandbox_passed/approved/active/disabled/...）
+        pattern: 按失败模式过滤
+        layer: 按护栏层过滤（input/tool/output）
+        tenant_id: 按租户过滤
+        limit: 返回上限
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    rules = await store.list_rules(
+        status=status,
+        pattern=pattern,
+        layer=layer,
+        tenant_id=tenant_id,
+        limit=limit,
+    )
+    return {
+        "items": rules,
+        "total": len(rules),
+        "filters": {
+            "status": status,
+            "pattern": pattern,
+            "layer": layer,
+            "tenant_id": tenant_id,
+        },
+    }
+
+
+@router.get(
+    "/guardrail/rules/{rule_id}",
+    summary="查询护栏规则详情（spec 05）",
+)
+async def get_guardrail_rule(
+    rule_id: str,
+    request: Request,
+) -> dict:
+    """查询护栏规则详情
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    rule = await store.get_rule(rule_id)
+    if not rule:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.NOT_FOUND, message=f"规则 {rule_id} 不存在")
+    return rule
+
+
+@router.post(
+    "/guardrail/rules",
+    summary="创建护栏规则候选（spec 05）",
+)
+async def create_guardrail_rule(
+    request: Request,
+    create_request: GuardrailRuleCreateRequest,
+) -> dict:
+    """手动创建护栏规则候选
+
+    需要管理员权限。创建后规则状态为 candidate，需经沙箱验证和人工审核后上线。
+
+    Args:
+        request: FastAPI 请求对象
+        create_request: 创建请求
+    """
+    _require_admin(request)
+
+    from agent.evaluation.improvement.models import (
+        GuardrailRuleCandidate,
+        RuleType,
+        RuleStatus,
+        GuardrailLayer,
+    )
+
+    try:
+        rule_type = RuleType(create_request.rule_type)
+    except ValueError:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.INVALID_PARAMETER, message=f"无效的规则类型: {create_request.rule_type}")
+
+    try:
+        layer = GuardrailLayer(create_request.layer)
+    except ValueError:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.INVALID_PARAMETER, message=f"无效的护栏层: {create_request.layer}")
+
+    candidate = GuardrailRuleCandidate(
+        pattern=create_request.pattern,
+        rule_type=rule_type,
+        rule_spec=create_request.rule_spec,
+        layer=layer,
+        action=create_request.action,
+        description=create_request.description,
+        source_trace_id=create_request.source_trace_id,
+        tenant_id=create_request.tenant_id,
+        created_by=create_request.created_by,
+        status=RuleStatus.CANDIDATE,
+    )
+
+    store = _get_rule_store()
+    rule_id = await store.save_candidate(candidate)
+    return {"rule_id": rule_id, "status": "candidate"}
+
+
+@router.post(
+    "/guardrail/rules/{rule_id}/approve",
+    summary="审核通过护栏规则（spec 05）",
+)
+async def approve_guardrail_rule(
+    rule_id: str,
+    request: Request,
+    approve_request: GuardrailRuleApproveRequest,
+) -> dict:
+    """审核通过护栏规则
+
+    将规则状态从 sandbox_passed 变更为 approved，进而变更为 active。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        approve_request: 审核请求
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    # 1. 审核通过：sandbox_passed -> approved
+    success = await store.update_status(
+        rule_id=rule_id,
+        new_status="approved",
+        operator=approve_request.approved_by,
+        reason=approve_request.reason,
+    )
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"规则 {rule_id} 审核失败")
+
+    # 2. 上线：approved -> active
+    await store.update_status(
+        rule_id=rule_id,
+        new_status="active",
+        operator=approve_request.approved_by,
+        reason="审核通过后自动上线",
+    )
+
+    # 3. 刷新动态规则缓存
+    try:
+        loader = _get_dynamic_rule_loader()
+        await loader.refresh()
+    except Exception as e:
+        logger.warning("刷新动态规则缓存失败（非致命）: %s", e)
+
+    return {"rule_id": rule_id, "status": "active", "approved_by": approve_request.approved_by}
+
+
+@router.post(
+    "/guardrail/rules/{rule_id}/reject",
+    summary="拒绝护栏规则（spec 05）",
+)
+async def reject_guardrail_rule(
+    rule_id: str,
+    request: Request,
+    reject_request: GuardrailRuleRejectRequest,
+) -> dict:
+    """拒绝护栏规则
+
+    将规则状态变更为 rejected。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        reject_request: 拒绝请求
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    success = await store.update_status(
+        rule_id=rule_id,
+        new_status="rejected",
+        operator=reject_request.operator,
+        reason=reject_request.reason,
+    )
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"规则 {rule_id} 拒绝失败")
+
+    return {"rule_id": rule_id, "status": "rejected", "reason": reject_request.reason}
+
+
+@router.post(
+    "/guardrail/rules/{rule_id}/disable",
+    summary="禁用护栏规则（spec 05）",
+)
+async def disable_guardrail_rule(
+    rule_id: str,
+    request: Request,
+    reject_request: GuardrailRuleRejectRequest,
+) -> dict:
+    """禁用护栏规则
+
+    将规则状态从 active 变更为 disabled。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        reject_request: 禁用请求
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    success = await store.update_status(
+        rule_id=rule_id,
+        new_status="disabled",
+        operator=reject_request.operator,
+        reason=reject_request.reason,
+    )
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"规则 {rule_id} 禁用失败")
+
+    # 刷新动态规则缓存
+    try:
+        loader = _get_dynamic_rule_loader()
+        await loader.refresh()
+    except Exception as e:
+        logger.warning("刷新动态规则缓存失败（非致命）: %s", e)
+
+    return {"rule_id": rule_id, "status": "disabled", "reason": reject_request.reason}
+
+
+@router.post(
+    "/guardrail/rules/{rule_id}/rollback",
+    summary="回滚护栏规则到指定版本（spec 05）",
+)
+async def rollback_guardrail_rule(
+    rule_id: str,
+    request: Request,
+    rollback_request: GuardrailRuleRollbackRequest,
+) -> dict:
+    """回滚护栏规则
+
+    按版本回滚已上线规则。target_version=None 时自动查找上一活跃版本。
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        rollback_request: 回滚请求
+    """
+    _require_admin(request)
+
+    rollback = _get_rule_rollback()
+    success = await rollback.rollback(
+        rule_id=rule_id,
+        target_version=rollback_request.target_version,
+        operator=rollback_request.operator,
+        reason=rollback_request.reason,
+    )
+    if not success:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"规则 {rule_id} 回滚失败")
+
+    # 刷新动态规则缓存
+    try:
+        loader = _get_dynamic_rule_loader()
+        await loader.refresh()
+    except Exception as e:
+        logger.warning("刷新动态规则缓存失败（非致命）: %s", e)
+
+    return {
+        "rule_id": rule_id,
+        "rolled_back_to": rollback_request.target_version,
+        "operator": rollback_request.operator,
+        "reason": rollback_request.reason,
+    }
+
+
+@router.get(
+    "/guardrail/rules/{rule_id}/versions",
+    summary="查询规则版本链（spec 05）",
+)
+async def list_rule_versions(
+    rule_id: str,
+    request: Request,
+) -> dict:
+    """查询规则的所有历史版本
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+    """
+    _require_admin(request)
+
+    store = _get_rule_store()
+    versions = await store.get_rule_versions(rule_id)
+    return {
+        "rule_id": rule_id,
+        "versions": [v.model_dump() if hasattr(v, "model_dump") else v for v in versions],
+        "total": len(versions),
+    }
+
+
+@router.get(
+    "/guardrail/rules/{rule_id}/metrics",
+    summary="查询规则效果指标（spec 05）",
+)
+async def get_rule_metrics(
+    rule_id: str,
+    request: Request,
+    window_days: int = 7,
+) -> dict:
+    """查询规则效果指标
+
+    Args:
+        rule_id: 规则 ID
+        request: FastAPI 请求对象
+        window_days: 统计窗口天数
+    """
+    _require_admin(request)
+
+    collector = _get_rule_metrics_collector()
+    metrics = await collector.get_metrics(rule_id, window_days=window_days)
+    need_rollback, reason = await collector.check_rollback_needed(rule_id)
+
+    return {
+        "rule_id": rule_id,
+        "window_days": window_days,
+        "metrics": metrics.model_dump() if hasattr(metrics, "model_dump") else metrics,
+        "rollback_needed": need_rollback,
+        "rollback_reason": reason,
+    }
+
+
+@router.post(
+    "/guardrail/rules/refresh-cache",
+    summary="强制刷新动态规则缓存（spec 05）",
+)
+async def refresh_dynamic_rules_cache(request: Request) -> dict:
+    """强制刷新动态规则缓存
+
+    需要管理员权限。刷新后运行时护栏立即加载最新规则。
+
+    Args:
+        request: FastAPI 请求对象
+    """
+    _require_admin(request)
+
+    loader = _get_dynamic_rule_loader()
+    count = await loader.refresh()
+    return {"refreshed": True, "active_rules_count": count}
+
+
+@router.get(
+    "/guardrail/rules/active/list",
+    summary="查询当前活跃的动态规则（spec 05）",
+)
+async def list_active_dynamic_rules(
+    request: Request,
+    pattern: str | None = None,
+    tenant_id: str = "",
+) -> dict:
+    """查询当前活跃的动态规则
+
+    Args:
+        request: FastAPI 请求对象
+        pattern: 按失败模式过滤
+        tenant_id: 按租户过滤
+    """
+    _require_admin(request)
+
+    loader = _get_dynamic_rule_loader()
+    rules = await loader.get_active_rules(pattern=pattern, tenant_id=tenant_id)
+    return {
+        "items": rules,
+        "total": len(rules),
+    }
+
+
+@router.post(
+    "/guardrail/consume/{trace_id}",
+    summary="手动触发失败 Trace 消费（spec 05）",
+)
+async def consume_failure_trace(
+    trace_id: str,
+    request: Request,
+    failure_reason: str = "",
+) -> dict:
+    """手动触发失败 Trace 消费
+
+    需要管理员权限。将指定 Trace 作为失败案例消费，触发分类和规则生成流程。
+    trace_id 同时作为 session_id 用于从 SpanCache 获取 spans。
+
+    Args:
+        trace_id: 失败 Trace ID（或 session ID）
+        request: FastAPI 请求对象
+        failure_reason: 失败原因摘要
+    """
+    _require_admin(request)
+
+    from agent.evaluation.improvement.trace_consumer import FailureTraceConsumer
+    from agent.evaluation.improvement.failure_pattern import FailurePatternClassifier
+
+    consumer = FailureTraceConsumer(FailurePatternClassifier())
+
+    # 先从 SpanCache 获取 spans
+    spans = await consumer._get_session_spans(trace_id)
+
+    result = await consumer.consume({
+        "trace_id": trace_id,
+        "session_id": trace_id,
+        "failure_reason": failure_reason,
+        "spans": spans,
+    })
+
+    if result is None:
+        from api.errors import AppException, ErrorCode
+        raise AppException(ErrorCode.CONFLICT, message=f"消费失败 Trace {trace_id} 失败")
+
+    return {
+        "trace_id": trace_id,
+        "classification": result.model_dump() if hasattr(result, "model_dump") else result,
+        "route_to_human": consumer.should_route_to_human(result),
+    }

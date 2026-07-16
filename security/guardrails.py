@@ -147,6 +147,39 @@ async def check_input_guardrails(
 
     checks.append({"check": "off_topic", "result": "pass"})
 
+    # 4. 动态规则检查（spec 05 扩展点：从 GuardrailRuleStore 加载已上线规则）
+    try:
+        dynamic_result = await check_dynamic_input_rules(content)
+        if not dynamic_result["passed"]:
+            action_str = dynamic_result.get("action", "block")
+            action = GuardrailAction.BLOCK if action_str == "block" else GuardrailAction.WARN
+            checks.append({
+                "check": "dynamic_input_rule",
+                "result": "blocked",
+                "rule_id": dynamic_result.get("rule_id", ""),
+                "reason": dynamic_result.get("reason", ""),
+            })
+            logger.warning(
+                "动态输入护栏规则命中: rule_id=%s content=%s",
+                dynamic_result.get("rule_id", ""),
+                content[:100],
+            )
+            return GuardrailResult(
+                passed=False,
+                action=action,
+                reason=dynamic_result.get("reason", "动态护栏规则拦截"),
+                checks=checks,
+            )
+        checks.append({"check": "dynamic_input_rule", "result": "pass"})
+    except Exception as e:
+        # 动态规则加载失败不阻断主流程，仅记录警告
+        logger.warning("动态输入规则加载失败（非致命）: %s", e)
+        checks.append({
+            "check": "dynamic_input_rule",
+            "result": "pass",
+            "note": f"动态规则加载失败跳过: {e}",
+        })
+
     return GuardrailResult(passed=True, checks=checks)
 
 
@@ -451,6 +484,39 @@ async def check_tool_call_guardrails(
             reason=quota_result["reason"],
             checks=checks,
         )
+
+    # 7. 动态工具护栏规则检查（spec 05 扩展点：从 GuardrailRuleStore 加载已上线规则）
+    try:
+        dynamic_result = await check_dynamic_tool_rules(tool_name, tool_input)
+        if not dynamic_result["passed"]:
+            action_str = dynamic_result.get("action", "block")
+            action = GuardrailAction.BLOCK if action_str == "block" else GuardrailAction.WARN
+            checks.append({
+                "check": "dynamic_tool_rule",
+                "result": "blocked",
+                "rule_id": dynamic_result.get("rule_id", ""),
+                "reason": dynamic_result.get("reason", ""),
+            })
+            logger.warning(
+                "动态工具护栏规则命中: rule_id=%s tool=%s",
+                dynamic_result.get("rule_id", ""),
+                tool_name,
+            )
+            return GuardrailResult(
+                passed=False,
+                action=action,
+                reason=dynamic_result.get("reason", "动态工具护栏规则拦截"),
+                checks=checks,
+            )
+        checks.append({"check": "dynamic_tool_rule", "result": "pass"})
+    except Exception as e:
+        # 动态规则加载失败不阻断主流程
+        logger.warning("动态工具规则加载失败（非致命）: %s", e)
+        checks.append({
+            "check": "dynamic_tool_rule",
+            "result": "pass",
+            "note": f"动态规则加载失败跳过: {e}",
+        })
 
     return GuardrailResult(passed=True, checks=checks)
 
@@ -815,6 +881,39 @@ async def check_output_guardrails(
                 checks=checks,
             )
 
+    # 4. 动态输出护栏规则检查（spec 05 扩展点：从 GuardrailRuleStore 加载已上线规则）
+    try:
+        dynamic_result = await check_dynamic_output_rules(content)
+        if not dynamic_result["passed"]:
+            action_str = dynamic_result.get("action", "redact")
+            action = GuardrailAction.REDACT if action_str == "redact" else GuardrailAction.BLOCK
+            checks.append({
+                "check": "dynamic_output_rule",
+                "result": "blocked",
+                "rule_id": dynamic_result.get("rule_id", ""),
+                "reason": dynamic_result.get("reason", ""),
+            })
+            logger.warning(
+                "动态输出护栏规则命中: rule_id=%s content=%s",
+                dynamic_result.get("rule_id", ""),
+                content[:100],
+            )
+            return GuardrailResult(
+                passed=False,
+                action=action,
+                reason=dynamic_result.get("reason", "动态输出护栏规则拦截"),
+                checks=checks,
+            )
+        checks.append({"check": "dynamic_output_rule", "result": "pass"})
+    except Exception as e:
+        # 动态规则加载失败不阻断主流程
+        logger.warning("动态输出规则加载失败（非致命）: %s", e)
+        checks.append({
+            "check": "dynamic_output_rule",
+            "result": "pass",
+            "note": f"动态规则加载失败跳过: {e}",
+        })
+
     return GuardrailResult(passed=True, checks=checks)
 
 
@@ -944,19 +1043,19 @@ _DYNAMIC_RULES_REFRESH_INTERVAL = 300  # 5 分钟刷新一次
 
 
 async def load_dynamic_rules(force_refresh: bool = False) -> list[dict[str, Any]]:
-    """加载动态护栏规则（新增，对应 spec 04 第 9.2 节）
+    """加载动态护栏规则（spec 04 + spec 05 合并）
 
-    从 FailureArchive 加载已审核通过且上线的护栏规则候选，
-    供 check_input_guardrails / check_tool_call_guardrails / check_output_guardrails 使用。
+    规则来源：
+      1. spec 04 FailureArchive.get_approved_rules()（已审核通过的规则候选）
+      2. spec 05 GuardrailRuleStore.list_active_rules()（已上线的规则）
 
-    规则来源：FailureArchive.get_approved_rules()
     刷新策略：每 5 分钟刷新一次，force_refresh=True 时立即刷新
 
     Args:
         force_refresh: 是否强制刷新缓存
 
     Returns:
-        已上线的规则列表，每项含 rule_id / pattern / rule_type / rule_definition
+        已上线的规则列表，每项含 rule_id / pattern / rule_type / rule_definition / layer
     """
     global _dynamic_rules, _dynamic_rules_loaded_at
 
@@ -970,36 +1069,86 @@ async def load_dynamic_rules(force_refresh: bool = False) -> list[dict[str, Any]
     ):
         return _dynamic_rules
 
-    # 从 FailureArchive 加载规则
+    merged: list[dict[str, Any]] = []
+    seen_rule_ids: set[str] = set()
+
+    # 1. 从 spec 04 FailureArchive 加载规则
     try:
         from agent.evaluation.improvement.failure_archive import FailureArchive
 
         archive = FailureArchive()
         approved_rules = archive.get_approved_rules()
 
-        _dynamic_rules = [
-            {
+        for r in approved_rules:
+            if r.rule_id in seen_rule_ids:
+                continue
+            seen_rule_ids.add(r.rule_id)
+            merged.append({
                 "rule_id": r.rule_id,
                 "pattern": r.pattern,
                 "rule_type": r.rule_type,
                 "rule_definition": r.rule_definition,
-            }
-            for r in approved_rules
-        ]
-        _dynamic_rules_loaded_at = _time.time()
-
-        logger.info("加载动态护栏规则: %d 条", len(_dynamic_rules))
-        return _dynamic_rules
-
+                "layer": _map_legacy_rule_type_to_layer(r.rule_type),
+                "source": "spec04_archive",
+            })
     except Exception as e:
-        logger.warning("加载动态护栏规则失败: %s", e)
-        return _dynamic_rules
+        logger.warning("从 FailureArchive 加载动态规则失败: %s", e)
+
+    # 2. 从 spec 05 GuardrailRuleStore 加载已上线规则
+    try:
+        from agent.evaluation.improvement.rule_store import GuardrailRuleStore
+
+        store = GuardrailRuleStore()
+        active_rules = await store.list_active_rules()
+
+        for r in active_rules:
+            rule_id = r.get("rule_id", "")
+            if not rule_id or rule_id in seen_rule_ids:
+                continue
+            seen_rule_ids.add(rule_id)
+            merged.append({
+                "rule_id": rule_id,
+                "pattern": r.get("pattern", ""),
+                "rule_type": r.get("rule_type", ""),
+                "rule_definition": r.get("rule_spec", {}),
+                "layer": r.get("layer", "input"),
+                "source": "spec05_store",
+            })
+    except Exception as e:
+        logger.warning("从 GuardrailRuleStore 加载动态规则失败: %s", e)
+
+    _dynamic_rules = merged
+    _dynamic_rules_loaded_at = _time.time()
+
+    logger.info("加载动态护栏规则: %d 条（spec04=%d, spec05=%d）",
+                len(merged),
+                sum(1 for r in merged if r.get("source") == "spec04_archive"),
+                sum(1 for r in merged if r.get("source") == "spec05_store"))
+    return _dynamic_rules
+
+
+def _map_legacy_rule_type_to_layer(rule_type: str) -> str:
+    """将 spec 04 规则类型映射到 spec 05 的 layer 字段
+
+    Args:
+        rule_type: spec 04 规则类型（input_guardrail/tool_guardrail/output_guardrail）
+
+    Returns:
+        spec 05 layer 值（input/tool/output）
+    """
+    mapping = {
+        "input_guardrail": "input",
+        "tool_guardrail": "tool",
+        "output_guardrail": "output",
+    }
+    return mapping.get(rule_type, "input")
 
 
 async def check_dynamic_input_rules(content: str) -> dict[str, Any]:
-    """检查动态输入护栏规则（新增）
+    """检查动态输入护栏规则（spec 04 + spec 05 合并）
 
     对用户输入应用已上线的动态输入护栏规则。
+    兼容 spec 04（rule_type=input_guardrail + check_type）和 spec 05（layer=input + rule_type=regex/keyword/function/schema）。
 
     Args:
         content: 用户输入内容
@@ -1010,24 +1159,41 @@ async def check_dynamic_input_rules(content: str) -> dict[str, Any]:
     rules = await load_dynamic_rules()
 
     for rule in rules:
-        if rule.get("rule_type") != "input_guardrail":
+        layer = rule.get("layer", "")
+        legacy_type = rule.get("rule_type", "")
+        # 兼容 spec 04（rule_type=input_guardrail）和 spec 05（layer=input）
+        if layer != "input" and legacy_type != "input_guardrail":
             continue
 
         rule_def = rule.get("rule_definition", {})
+        rule_id = rule.get("rule_id", "")
+
+        # spec 05 规则类型（regex/keyword/function/schema）
+        spec05_type = legacy_type if legacy_type in ("regex", "keyword", "function", "schema") else ""
+        # spec 04 check_type 字段
         check_type = rule_def.get("check_type", "")
 
-        if check_type == "regex":
+        # 优先使用 spec 05 规则类型
+        if spec05_type == "regex" or check_type == "regex":
+            if _match_regex_rule(rule_def, content):
+                return _build_dynamic_hit(rule_id, rule_def, "动态输入规则命中(正则)")
+        elif spec05_type == "keyword":
+            if _match_keyword_rule(rule_def, content):
+                return _build_dynamic_hit(rule_id, rule_def, "动态输入规则命中(关键词)")
+        elif spec05_type == "schema":
+            # schema 规则用于工具参数校验，输入层不适用
+            continue
+        elif spec05_type == "function":
+            if _match_function_rule(rule_def, {"content": content}):
+                return _build_dynamic_hit(rule_id, rule_def, "动态输入规则命中(函数)")
+        elif check_type == "regex":
+            # spec 04 兼容
             import re
             patterns = rule_def.get("patterns", [])
             for pattern in patterns:
                 try:
                     if re.search(pattern, content, re.IGNORECASE):
-                        return {
-                            "passed": False,
-                            "action": rule_def.get("action", "block"),
-                            "reason": f"动态规则命中: {rule_def.get('description', '')}",
-                            "rule_id": rule.get("rule_id"),
-                        }
+                        return _build_dynamic_hit(rule_id, rule_def, "动态规则命中(正则)")
                 except re.error:
                     continue
 
@@ -1038,9 +1204,10 @@ async def check_dynamic_tool_rules(
     tool_name: str,
     tool_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """检查动态工具护栏规则（新增）
+    """检查动态工具护栏规则（spec 04 + spec 05 合并）
 
     对工具调用应用已上线的动态工具护栏规则。
+    兼容 spec 04（rule_type=tool_guardrail）和 spec 05（layer=tool）。
 
     Args:
         tool_name: 工具名称
@@ -1050,31 +1217,49 @@ async def check_dynamic_tool_rules(
         检查结果字典，含 passed / action / reason / rule_id
     """
     rules = await load_dynamic_rules()
+    tool_input = tool_input or {}
 
     for rule in rules:
-        if rule.get("rule_type") != "tool_guardrail":
+        layer = rule.get("layer", "")
+        legacy_type = rule.get("rule_type", "")
+        if layer != "tool" and legacy_type != "tool_guardrail":
             continue
 
         rule_def = rule.get("rule_definition", {})
+        rule_id = rule.get("rule_id", "")
+
+        spec05_type = legacy_type if legacy_type in ("regex", "keyword", "function", "schema") else ""
         check_type = rule_def.get("check_type", "")
 
-        if check_type == "tool_whitelist":
+        # spec 05 schema 规则：校验工具参数
+        if spec05_type == "schema":
+            target_tool = rule_def.get("tool_name", "")
+            if target_tool and target_tool != tool_name:
+                continue
+            schema = rule_def.get("schema", {})
+            if schema and not _validate_tool_schema(tool_input, schema):
+                return _build_dynamic_hit(rule_id, rule_def, f"动态工具规则命中(Schema): {tool_name}")
+        elif spec05_type == "function":
+            if _match_function_rule(rule_def, {"tool_name": tool_name, "tool_input": tool_input}):
+                return _build_dynamic_hit(rule_id, rule_def, f"动态工具规则命中(函数): {tool_name}")
+        elif spec05_type == "keyword":
+            # 关键词规则匹配工具名
+            if _match_keyword_rule(rule_def, tool_name):
+                return _build_dynamic_hit(rule_id, rule_def, f"动态工具规则命中(关键词): {tool_name}")
+        elif check_type == "tool_whitelist":
+            # spec 04 兼容：forbidden_tools 列表
             forbidden_tools = rule_def.get("forbidden_tools", [])
             if tool_name in forbidden_tools:
-                return {
-                    "passed": False,
-                    "action": rule_def.get("action", "block"),
-                    "reason": f"动态规则禁止调用工具: {tool_name}",
-                    "rule_id": rule.get("rule_id"),
-                }
+                return _build_dynamic_hit(rule_id, rule_def, f"动态规则禁止调用工具: {tool_name}")
 
     return {"passed": True, "action": "pass", "reason": "", "rule_id": ""}
 
 
 async def check_dynamic_output_rules(content: str) -> dict[str, Any]:
-    """检查动态输出护栏规则（新增）
+    """检查动态输出护栏规则（spec 04 + spec 05 合并）
 
     对 Agent 输出应用已上线的动态输出护栏规则。
+    兼容 spec 04（rule_type=output_guardrail）和 spec 05（layer=output）。
 
     Args:
         content: Agent 输出内容
@@ -1085,19 +1270,206 @@ async def check_dynamic_output_rules(content: str) -> dict[str, Any]:
     rules = await load_dynamic_rules()
 
     for rule in rules:
-        if rule.get("rule_type") != "output_guardrail":
+        layer = rule.get("layer", "")
+        legacy_type = rule.get("rule_type", "")
+        if layer != "output" and legacy_type != "output_guardrail":
             continue
 
         rule_def = rule.get("rule_definition", {})
+        rule_id = rule.get("rule_id", "")
+
+        spec05_type = legacy_type if legacy_type in ("regex", "keyword", "function", "schema") else ""
         check_type = rule_def.get("check_type", "")
 
-        if check_type == "pii_detection":
+        if spec05_type == "regex" or check_type == "regex":
+            if _match_regex_rule(rule_def, content):
+                return _build_dynamic_hit(rule_id, rule_def, "动态输出规则命中(正则)")
+        elif spec05_type == "keyword":
+            if _match_keyword_rule(rule_def, content):
+                return _build_dynamic_hit(rule_id, rule_def, "动态输出规则命中(关键词)")
+        elif spec05_type == "function":
+            if _match_function_rule(rule_def, {"content": content}):
+                return _build_dynamic_hit(rule_id, rule_def, "动态输出规则命中(函数)")
+        elif check_type == "pii_detection":
+            # spec 04 兼容：PII 检测
             if has_pii(content):
-                return {
-                    "passed": False,
-                    "action": rule_def.get("action", "redact"),
-                    "reason": f"动态规则检测到 PII: {rule_def.get('description', '')}",
-                    "rule_id": rule.get("rule_id"),
-                }
+                return _build_dynamic_hit(rule_id, rule_def, "动态规则检测到 PII")
 
     return {"passed": True, "action": "pass", "reason": "", "rule_id": ""}
+
+
+def _build_dynamic_hit(rule_id: str, rule_def: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """构造动态规则命中返回结果
+
+    Args:
+        rule_id: 规则 ID
+        rule_def: 规则定义
+        prefix: 拦截原因前缀
+
+    Returns:
+        命中结果字典
+    """
+    description = rule_def.get("description", "")
+    reason = f"{prefix}: {description}" if description else prefix
+    return {
+        "passed": False,
+        "action": rule_def.get("action", "block"),
+        "reason": reason,
+        "rule_id": rule_id,
+    }
+
+
+def _match_regex_rule(rule_def: dict[str, Any], text: str) -> bool:
+    """匹配正则规则
+
+    支持两种格式：
+      - spec 05: {"pattern": "...", "flags": "IGNORECASE"}
+      - spec 04: {"patterns": ["...", "..."]}
+
+    Args:
+        rule_def: 规则定义
+        text: 待匹配文本
+
+    Returns:
+        是否命中
+    """
+    import re
+
+    # spec 05 单 pattern 格式
+    pattern_str = rule_def.get("pattern")
+    if pattern_str:
+        flags = re.IGNORECASE if rule_def.get("flags", "").upper() == "IGNORECASE" else 0
+        try:
+            if re.search(pattern_str, text, flags):
+                return True
+        except re.error:
+            return False
+
+    # spec 04 patterns 列表格式
+    patterns = rule_def.get("patterns", [])
+    for p in patterns:
+        try:
+            if re.search(p, text, re.IGNORECASE):
+                return True
+        except re.error:
+            continue
+    return False
+
+
+def _match_keyword_rule(rule_def: dict[str, Any], text: str) -> bool:
+    """匹配关键词规则
+
+    Args:
+        rule_def: 规则定义，含 keywords / match_mode / case_sensitive
+        text: 待匹配文本
+
+    Returns:
+        是否命中
+    """
+    keywords = rule_def.get("keywords", [])
+    if not keywords:
+        return False
+
+    case_sensitive = rule_def.get("case_sensitive", False)
+    match_mode = rule_def.get("match_mode", "any")
+
+    target = text if case_sensitive else text.lower()
+    results = []
+    for kw in keywords:
+        kw_val = kw if case_sensitive else kw.lower()
+        results.append(kw_val in target)
+
+    if match_mode == "all":
+        return all(results)
+    return any(results)
+
+
+def _match_function_rule(rule_def: dict[str, Any], context: dict[str, Any]) -> bool:
+    """匹配函数规则（仅允许调用预注册函数）
+
+    安全约束：FUNCTION 规则仅允许调用预注册的函数，不允许 LLM 生成任意函数体。
+    预注册函数在 _PRE_REGISTERED_RULE_FUNCTIONS 中维护。
+
+    Args:
+        rule_def: 规则定义，含 function_name / params
+        context: 调用上下文
+
+    Returns:
+        是否命中
+    """
+    function_name = rule_def.get("function_name", "")
+    if not function_name or function_name not in _PRE_REGISTERED_RULE_FUNCTIONS:
+        logger.warning("未注册的规则函数: %s", function_name)
+        return False
+
+    params = rule_def.get("params", {})
+    try:
+        handler = _PRE_REGISTERED_RULE_FUNCTIONS[function_name]
+        return bool(handler(context, params))
+    except Exception as e:
+        logger.warning("规则函数执行异常: %s error=%s", function_name, e)
+        return False
+
+
+def _validate_tool_schema(tool_input: dict[str, Any], schema: dict[str, Any]) -> bool:
+    """校验工具输入是否符合 Schema 规则
+
+    Args:
+        tool_input: 工具输入
+        schema: JSON Schema
+
+    Returns:
+        True 表示符合，False 表示违反
+    """
+    required = schema.get("required", [])
+    for field_name in required:
+        if field_name not in tool_input or tool_input[field_name] is None:
+            return False
+
+    properties = schema.get("properties", {})
+    for field_name, field_schema in properties.items():
+        if field_name not in tool_input:
+            continue
+        value = tool_input[field_name]
+        field_type = field_schema.get("type", "")
+
+        if field_type == "number" and not isinstance(value, (int, float)):
+            return False
+        elif field_type == "integer" and not isinstance(value, int):
+            return False
+        elif field_type == "string" and not isinstance(value, str):
+            return False
+        elif field_type == "boolean" and not isinstance(value, bool):
+            return False
+
+        # maximum 约束
+        maximum = field_schema.get("maximum")
+        if maximum is not None and isinstance(value, (int, float)) and value > maximum:
+            return False
+
+    return True
+
+
+# 预注册的规则函数白名单（spec 05 第 8.3 节安全约束）
+# 新增函数需在此注册，FUNCTION 规则仅允许调用此处声明的函数
+_PRE_REGISTERED_RULE_FUNCTIONS: dict[str, Any] = {}
+
+
+def register_rule_function(name: str) -> Any:
+    """装饰器：注册规则函数到白名单
+
+    使用方式：
+        @register_rule_function("check_tool_param_combination")
+        def check_tool_param_combination(context, params):
+            ...
+
+    Args:
+        name: 函数名（与 rule_spec.function_name 对应）
+
+    Returns:
+        装饰器
+    """
+    def decorator(func: Any) -> Any:
+        _PRE_REGISTERED_RULE_FUNCTIONS[name] = func
+        return func
+    return decorator
