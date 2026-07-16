@@ -136,7 +136,14 @@
                       <path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8zm6.5-.5A1.5 1.5 0 118 6a1.5 1.5 0 01-1.5 1.5zm3.5 0A1.5 1.5 0 1111.5 6 1.5 1.5 0 0110 7.5zM5.17 9.84a.5.5 0 01.73-.68A3.5 3.5 0 008 10.5a3.5 3.5 0 002.1-.34.5.5 0 11.4.92A4.5 4.5 0 018 11.5a4.5 4.5 0 01-2.83-1.66z" />
                     </svg>
                     <span v-if="item.activity.agentName" class="text-agent">{{ item.activity.agentName }}</span>
+                    <span v-if="item.activity.reasoningType" class="reasoning-type-badge" :class="'reasoning-' + item.activity.reasoningType">{{ getReasoningTypeLabel(item.activity.reasoningType) }}</span>
                     <span class="thought-content">{{ item.activity.content }}</span>
+                    <button v-if="item.activity.reasoningChain" class="reasoning-toggle-btn" @click="toggleReasoning(item.id)">
+                      {{ expandedReasonings.has(item.id) ? '收起推理' : '查看推理' }}
+                    </button>
+                    <div v-if="item.activity.reasoningChain && expandedReasonings.has(item.id)" class="reasoning-detail">
+                      <pre class="reasoning-pre">{{ formatReasoningChain(item.activity.reasoningChain) }}</pre>
+                    </div>
                   </div>
                   <div v-else-if="item.activity.type === 'tool_call'" class="tool-inline">
                     <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" class="tool-icon">
@@ -163,6 +170,12 @@
                   <div v-else class="generic-inline">
                     <span v-if="item.activity.agentName" class="text-agent">{{ item.activity.agentName }}</span>
                     <span class="generic-content">{{ item.activity.content }}</span>
+                    <button v-if="item.activity.reasoningChain" class="reasoning-toggle-btn" @click="toggleReasoning(item.id)">
+                      {{ expandedReasonings.has(item.id) ? '收起推理' : '查看推理' }}
+                    </button>
+                  </div>
+                  <div v-if="item.activity.reasoningChain && expandedReasonings.has(item.id) && item.activity.type !== 'thought'" class="reasoning-detail">
+                    <pre class="reasoning-pre">{{ formatReasoningChain(item.activity.reasoningChain) }}</pre>
                   </div>
                 </div>
               </template>
@@ -391,6 +404,46 @@ function toggleThinking() {
   thoughtExpanded.value = !thoughtExpanded.value
 }
 
+// 推理链折叠展开状态
+const expandedReasonings = ref<Set<string>>(new Set())
+
+function toggleReasoning(activityId: string) {
+  const s = new Set(expandedReasonings.value)
+  if (s.has(activityId)) {
+    s.delete(activityId)
+  } else {
+    s.add(activityId)
+  }
+  expandedReasonings.value = s
+}
+
+function getReasoningTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    intent: '意图分析',
+    planning: '任务规划',
+    review: '审核决策',
+    tool_selection: '工具选择',
+    execution: '执行推理',
+  }
+  return labels[type] || '推理'
+}
+
+function formatReasoningChain(chainJson: string): string {
+  if (!chainJson) return ''
+  try {
+    const chain = JSON.parse(chainJson)
+    if (chain.steps && Array.isArray(chain.steps)) {
+      return chain.steps.map((step: any, i: number) => {
+        const typeLabel = getReasoningTypeLabel(step.reasoning_type || '')
+        return `[${typeLabel}] ${step.agent_name || ''}\n${step.thought_process || step.conclusion || ''}`
+      }).join('\n\n')
+    }
+    return chainJson
+  } catch {
+    return chainJson
+  }
+}
+
 interface BoardStepSnapshot {
   step_index: number
   step_name: string
@@ -456,7 +509,10 @@ const interleavedTimeline = computed(() => {
       if (act.stepIndex != null) {
         completedStepIndices.add(act.stepIndex)
       }
-      // step_done 不生成看板快照，仅更新完成状态
+      // step_done 携带推理链时，在时间线中展示推理折叠
+      if (act.reasoningChain) {
+        timeline.push({ type: 'text', activity: act })
+      }
     } else if (act.type === 'step_start') {
       // step_start 不生成看板快照，仅触发步骤状态变更
     } else if (act.type === 'thought') {
@@ -710,6 +766,8 @@ async function handleSend() {
             agentName: agentName,
             content: `${intentData.intent || '分析中'} (置信度: ${(intentData.confidence * 100).toFixed(0)}%)`,
             status: 'completed',
+            reasoningType: 'intent',
+            reasoningChain: intentData.reasoning || '',
           })
         } catch {
           console.warn('意图数据解析失败', data.data)
@@ -770,15 +828,16 @@ async function handleSend() {
           }
         } catch { /* ignore */ }
       } else if (data.event === 'thought') {
-        // Agent 思考事件
+        // Agent 思考事件（含 CoT 推理信息）
         try {
           const thoughtData = typeof data.data === 'string' ? JSON.parse(data.data) : data.data
           if (thoughtData.content) {
             chatStore.addTaskActivity({
               type: 'thought',
               agentName: thoughtData.agent_name || agentName,
-              content: thoughtData.content.substring(0, 100),
+              content: thoughtData.content.substring(0, 200),
               status: 'completed',
+              reasoningType: thoughtData.reasoning_type || 'execution',
             })
           }
         } catch { /* ignore */ }
@@ -836,6 +895,7 @@ async function handleSend() {
               status: stepData.status === 'completed' ? 'completed' : stepData.status === 'failed' ? 'failed' : 'completed',
               stepIndex: stepData.step_index,
               totalSteps: stepData.total_steps,
+              reasoningChain: stepData.reasoning_chain || '',
             })
 
             // 关键步骤（裁判裁决、汇总等）完成时，将结果存储到 taskFinalResult，在任务看板下方独立展示
@@ -1960,6 +2020,74 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   line-height: 1.5;
+}
+
+/* 推理类型标签 */
+.reasoning-type-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.reasoning-type-badge.reasoning-intent {
+  background: #e6f7ff;
+  color: #1890ff;
+}
+.reasoning-type-badge.reasoning-planning {
+  background: #f6ffed;
+  color: #52c41a;
+}
+.reasoning-type-badge.reasoning-review {
+  background: #fff7e6;
+  color: #fa8c16;
+}
+.reasoning-type-badge.reasoning-tool_selection {
+  background: #f9f0ff;
+  color: #722ed1;
+}
+.reasoning-type-badge.reasoning-execution {
+  background: #f0f5ff;
+  color: #2f54eb;
+}
+
+/* 推理折叠展开按钮 */
+.reasoning-toggle-btn {
+  padding: 1px 8px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: #fff;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+.reasoning-toggle-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+/* 推理详情折叠区域 */
+.reasoning-detail {
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.reasoning-pre {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #595959;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
 }
 
 /* 工具调用 - 内联 */

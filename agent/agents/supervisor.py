@@ -150,6 +150,7 @@ class IntentResult(BaseModel):
     orchestration_mode: str | None = Field(
         default=None, description="编排模式: parallel/debate/vote，为空时默认顺序编排"
     )
+    reasoning: str = Field(default="", description="意图分类的推理过程")
 
 
 # 意图路由表
@@ -392,6 +393,19 @@ async def classify_intent(user_message: str) -> IntentResult:
                 part.text for part in content if hasattr(part, "text")
             )
 
+        # 提取 CoT 推理过程
+        reasoning_text = ""
+        if "<reasoning>" in content and "</reasoning>" in content:
+            try:
+                reasoning_start = content.index("<reasoning>") + len("<reasoning>")
+                reasoning_end = content.index("</reasoning>")
+                reasoning_text = content[reasoning_start:reasoning_end].strip()
+                # 从 content 中移除推理标签，只保留 JSON
+                content = content[:content.index("<reasoning>")] + content[reasoning_end + len("</reasoning>"):]
+                content = content.strip()
+            except (ValueError, IndexError):
+                pass
+
         result = json.loads(content)
         intent = result.get("intent", "general")
         confidence = result.get("confidence", 0.5)
@@ -409,6 +423,7 @@ async def classify_intent(user_message: str) -> IntentResult:
             review_required=routing["review"],
             sub_tasks=sub_tasks,
             orchestration_mode=orchestration_mode,
+            reasoning=reasoning_text,
         )
 
         # 写入 L1 精确缓存（5 分钟）

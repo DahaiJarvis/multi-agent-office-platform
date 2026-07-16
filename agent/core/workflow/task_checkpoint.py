@@ -162,6 +162,7 @@ class StepCheckpoint(BaseModel):
     fallback_used: str = ""
     failure_reason: str = ""
     retry_count: int = 0
+    reasoning_chain: str = Field(default="", description="该步骤的推理链 JSON 字符串")
     created_at: float = Field(default_factory=time.time)
 
 

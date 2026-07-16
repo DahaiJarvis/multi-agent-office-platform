@@ -483,6 +483,7 @@ async def route_and_execute(
             "agent_name": intent.target_agent,
             "intent": intent.intent,
             "collaboration_mode": intent.collaboration_mode.value,
+            "reasoning": getattr(intent, "reasoning", ""),
         }
 
     except Exception as e:
@@ -746,6 +747,7 @@ async def route_and_execute_stream(
         "confidence": intent.confidence,
         "agent": intent.target_agent,
         "mode": intent.collaboration_mode.value,
+        "reasoning": getattr(intent, "reasoning", ""),
     }
 
     # 发布意图分类事件
@@ -958,12 +960,20 @@ async def route_and_execute_stream(
                             "content": str(result_content)[:500] if result_content else "",
                         }
                 elif isinstance(message, ThoughtEvent):
-                    # Agent 思考过程事件：可用于前端展示"正在思考"
-                    logger.debug("流式-Agent思考: agent=%s", message.source)
+                    # Agent 思考过程事件：输出结构化推理信息
+                    thought_content = message.content or ""
+                    logger.debug("流式-Agent思考: agent=%s len=%d", message.source, len(thought_content))
+                    # 判断推理类型
+                    reasoning_type = "execution"
+                    if current_agent == "Supervisor":
+                        reasoning_type = "planning"
+                    elif current_agent == "Reviewer":
+                        reasoning_type = "review"
                     yield {
                         "type": "thought",
                         "agent_name": message.source or current_agent,
-                        "content": message.content or "",
+                        "content": thought_content,
+                        "reasoning_type": reasoning_type,
                     }
                 # 其他 BaseAgentEvent 子类（SelectSpeakerEvent 等）忽略
                 continue
